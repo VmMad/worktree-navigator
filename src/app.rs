@@ -1,6 +1,8 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
 
-use crate::types::{ActiveAction, ActivePanel, ConsoleMessage, PullRequest, Worktree};
+use crate::pty::PtySession;
+use crate::types::{ActiveAction, ActivePanel, PullRequest, Worktree};
 
 pub const COMMANDS: &[(&str, &str)] = &[
     ("New Branch", "n"),
@@ -19,23 +21,22 @@ pub struct App {
     pub prs_loading: bool,
     pub prs_error: Option<String>,
 
-    pub messages: Vec<ConsoleMessage>,
+    /// Per-worktree PTY sessions (keyed by worktree path)
+    pub pty_sessions: HashMap<String, PtySession>,
+    /// Path of the worktree whose shell is displayed in the right panel
+    pub active_pty_path: Option<String>,
+    /// Current console panel size (cols, rows) for PTY sizing
+    pub console_size: (u16, u16),
 
     pub sidebar_index: usize,
     pub active_panel: ActivePanel,
     pub active_action: ActiveAction,
 
-    /// Text buffer for the "new branch" input
     pub input_buffer: String,
-    /// Cursor position inside input_buffer (char index)
     pub input_cursor: usize,
-
-    /// Selection index inside action overlays (PR list, delete list)
     pub overlay_index: usize,
-    /// Waiting for y/n confirmation before delete
     pub delete_confirming: bool,
 
-    /// When set, the app should exit and the shell should cd here
     pub exit_path: Option<String>,
     pub should_quit: bool,
 }
@@ -50,9 +51,9 @@ impl App {
             prs: vec![],
             prs_loading: false,
             prs_error: None,
-            messages: vec![ConsoleMessage::info(
-                "Worktree Navigator ready. Use ↑↓ to navigate, Enter to select.",
-            )],
+            pty_sessions: HashMap::new(),
+            active_pty_path: None,
+            console_size: (120, 40),
             sidebar_index: 0,
             active_panel: ActivePanel::Sidebar,
             active_action: ActiveAction::None,
@@ -76,24 +77,37 @@ impl App {
             .collect()
     }
 
-    pub fn log(&mut self, msg: ConsoleMessage) {
-        self.messages.push(msg);
+    /// Open (or reuse) a PTY session for the given worktree and focus it.
+    pub fn open_shell(&mut self, worktree_path: &str) {
+        let (cols, rows) = self.console_size;
+        if !self.pty_sessions.contains_key(worktree_path) {
+            match PtySession::spawn(worktree_path, cols, rows) {
+                Ok(session) => {
+                    self.pty_sessions.insert(worktree_path.to_string(), session);
+                }
+                Err(_) => return,
+            }
+        }
+        self.active_pty_path = Some(worktree_path.to_string());
+        self.active_panel = ActivePanel::Console;
     }
 
-    pub fn log_lines(&mut self, lines: Vec<String>) {
-        for line in lines {
-            let kind = if line.starts_with("✓") {
-                crate::types::MessageKind::Success
-            } else if line.starts_with("✗") {
-                crate::types::MessageKind::Error
-            } else {
-                crate::types::MessageKind::Command
-            };
-            self.messages.push(ConsoleMessage { text: line, kind });
+    /// Send bytes to the active PTY.
+    pub fn send_to_pty(&mut self, data: &[u8]) {
+        if let Some(ref path) = self.active_pty_path.clone() {
+            if let Some(session) = self.pty_sessions.get_mut(path) {
+                session.write_input(data);
+            }
         }
     }
 
-    // ──────────────────────────────── input handling ─────────────────────────
+    /// Resize all open PTY sessions to new console dimensions.
+    pub fn resize_ptys(&mut self, cols: u16, rows: u16) {
+        self.console_size = (cols, rows);
+        for session in self.pty_sessions.values_mut() {
+            session.resize(cols, rows);
+        }
+    }
 
     pub fn input_char(&mut self, c: char) {
         let byte_pos = self
@@ -124,3 +138,4 @@ impl App {
         self.input_cursor = 0;
     }
 }
+

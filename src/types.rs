@@ -15,20 +15,6 @@ pub struct PullRequest {
     pub head_ref_name: String,
 }
 
-#[derive(Debug, Clone)]
-pub struct ConsoleMessage {
-    pub text: String,
-    pub kind: MessageKind,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub enum MessageKind {
-    Info,
-    Command,
-    Success,
-    Error,
-}
-
 #[derive(Debug, Clone, PartialEq)]
 pub enum ActiveAction {
     None,
@@ -43,17 +29,3 @@ pub enum ActivePanel {
     Console,
 }
 
-impl ConsoleMessage {
-    pub fn info(text: impl Into<String>) -> Self {
-        Self { text: text.into(), kind: MessageKind::Info }
-    }
-    pub fn command(text: impl Into<String>) -> Self {
-        Self { text: text.into(), kind: MessageKind::Command }
-    }
-    pub fn success(text: impl Into<String>) -> Self {
-        Self { text: text.into(), kind: MessageKind::Success }
-    }
-    pub fn error(text: impl Into<String>) -> Self {
-        Self { text: text.into(), kind: MessageKind::Error }
-    }
-}
