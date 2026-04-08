@@ -253,15 +253,14 @@ fn handle_sync_trees_key(app: &mut App, code: KeyCode) {
         return;
     }
 
-    // Results phase: any key closes.
+    // Results phase: Esc/Enter (or any other key) closes.
     if !app.sync_results.is_empty() {
         match code {
-            KeyCode::Esc | KeyCode::Enter => {
-                app.active_action = ActiveAction::None;
-                app.sync_results.clear();
-            }
+            KeyCode::Esc | KeyCode::Enter => {}
             _ => {}
         }
+        app.active_action = ActiveAction::None;
+        app.sync_results.clear();
         return;
     }
 

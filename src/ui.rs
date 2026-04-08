@@ -30,7 +30,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
 
     // Error bar at the bottom (for errors after overlays close)
     if app.active_action == ActiveAction::None {
-        if let Some(err) = &app.overlay_error.clone() {
+        if let Some(err) = &app.overlay_error {
             let err_area = Rect {
                 x: area.x + 2,
                 y: area.y + area.height.saturating_sub(2),
@@ -174,7 +174,7 @@ fn draw_worktrees(f: &mut Frame, app: &mut App, area: Rect) {
         return;
     }
 
-    if let Some(ref err) = app.worktrees_error.clone() {
+    if let Some(err) = &app.worktrees_error {
         f.render_widget(
             Paragraph::new(Span::styled(
                 format!("  ✗ {err}"),
@@ -199,9 +199,33 @@ fn draw_worktrees(f: &mut Frame, app: &mut App, area: Rect) {
     let max_rows = list_area.height as usize;
     let cmd_len = COMMANDS.len();
 
-    for (i, wt) in app.worktrees.iter().enumerate().take(max_rows) {
+    let selected_wt_idx = if sync_select {
+        Some(app.sync_selected_idx)
+    } else if app.active_action == ActiveAction::None && app.selected_index >= cmd_len {
+        Some(app.selected_index - cmd_len)
+    } else {
+        None
+    }
+    .map(|idx| idx.min(app.worktrees.len().saturating_sub(1)));
+
+    let start_idx = if app.worktrees.len() > max_rows {
+        let sel = selected_wt_idx.unwrap_or(0);
+        sel.saturating_sub(max_rows.saturating_sub(1))
+            .min(app.worktrees.len() - max_rows)
+    } else {
+        0
+    };
+
+    for (visible_i, (i, wt)) in app
+        .worktrees
+        .iter()
+        .enumerate()
+        .skip(start_idx)
+        .take(max_rows)
+        .enumerate()
+    {
         let idx = cmd_len + i;
-        let row = list_area.y + i as u16;
+        let row = list_area.y + visible_i as u16;
         app.item_rows.push((row, idx));
 
         let selected = if sync_select {

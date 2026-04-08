@@ -232,14 +232,17 @@ pub fn sync_one_worktree(repo_root: &Path, wt: &Worktree) -> (bool, SyncResult) 
                         .unwrap_or_default();
                     SyncStatus::Updated(range)
                 }
-            } else if stderr.contains("uncommitted changes")
-                || stderr.contains("local changes")
-                || stderr.contains("not possible to fast-forward")
-                || stderr.contains("You have unstaged changes")
-            {
-                SyncStatus::Skipped("dirty working tree".to_string())
             } else {
-                SyncStatus::Error(stderr)
+                let stderr_lower = stderr.to_lowercase();
+                if stderr_lower.contains("uncommitted changes")
+                    || stderr_lower.contains("local changes")
+                    || stderr_lower.contains("not possible to fast-forward")
+                    || stderr_lower.contains("you have unstaged changes")
+                {
+                    SyncStatus::Skipped("dirty working tree".to_string())
+                } else {
+                    SyncStatus::Error(stderr)
+                }
             }
         }
     };
