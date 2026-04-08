@@ -1,12 +1,13 @@
 use std::path::PathBuf;
 
-use crate::types::{ActiveAction, PullRequest, Worktree};
+use crate::types::{ActiveAction, PullRequest, SyncResult, Worktree};
 
 pub const COMMANDS: &[(&str, &str)] = &[
     ("New Branch", "n"),
     ("Sync GH PR", "p"),
     ("Delete Worktree", "d"),
-    ("Refresh", "r"),
+    ("Sync Trees", "s"),
+    ("Refresh List", "r"),
 ];
 
 pub struct App {
@@ -18,6 +19,12 @@ pub struct App {
     pub prs: Vec<PullRequest>,
     pub prs_loading: bool,
     pub prs_error: Option<String>,
+
+    pub sync_selected_idx: usize,
+    pub sync_loading: bool,
+    pub sync_pending: bool,
+    pub sync_fetch_ok: bool,
+    pub sync_results: Vec<SyncResult>,
 
     pub selected_index: usize,
     pub active_action: ActiveAction,
@@ -33,6 +40,8 @@ pub struct App {
 
     /// Maps screen row → item index, populated each render frame for mouse hit detection.
     pub item_rows: Vec<(u16, usize)>,
+    /// Screen row currently under the mouse cursor (for hover highlight).
+    pub hovered_row: Option<u16>,
 }
 
 impl App {
@@ -45,6 +54,11 @@ impl App {
             prs: vec![],
             prs_loading: false,
             prs_error: None,
+            sync_selected_idx: 0,
+            sync_loading: false,
+            sync_pending: false,
+            sync_fetch_ok: true,
+            sync_results: vec![],
             selected_index: 0,
             active_action: ActiveAction::None,
             input_buffer: String::new(),
@@ -55,6 +69,7 @@ impl App {
             exit_path: None,
             should_quit: false,
             item_rows: vec![],
+            hovered_row: None,
         }
     }
 

@@ -51,6 +51,20 @@ fn main() -> Result<()> {
     loop {
         terminal.draw(|f| ui::draw(f, &mut app))?;
 
+        // Execute pending sync after the loading frame has been rendered.
+        if app.sync_pending {
+            app.sync_pending = false;
+            let wt = app.worktrees.get(app.sync_selected_idx).cloned();
+            if let Some(wt) = wt {
+                let root = app.repo_root.clone();
+                let (fetch_ok, result) = git::sync_one_worktree(&root, &wt);
+                app.sync_fetch_ok = fetch_ok;
+                app.sync_results = vec![result];
+                app.sync_loading = false;
+                refresh_worktrees(&mut app);
+            }
+        }
+
         if event::poll(Duration::from_millis(100))? {
             match event::read()? {
                 Event::Key(key) => handle_key(&mut app, key.code, key.modifiers),
@@ -87,33 +101,57 @@ fn handle_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
     match app.active_action {
         ActiveAction::NewBranch => handle_new_branch_key(app, code),
         ActiveAction::SyncPr => handle_sync_pr_key(app, code),
+        ActiveAction::SyncTrees => handle_sync_trees_key(app, code),
         ActiveAction::Delete => handle_delete_key(app, code),
         ActiveAction::None => handle_nav_key(app, code),
     }
 }
 
 fn handle_mouse(app: &mut App, kind: MouseEventKind, row: u16) {
+    let sync_select = app.active_action == ActiveAction::SyncTrees
+        && !app.sync_loading
+        && app.sync_results.is_empty();
+
+    // While a blocking overlay is open (not sync-select), ignore mouse.
+    if app.active_action != ActiveAction::None && !sync_select {
+        return;
+    }
+
     match kind {
+        MouseEventKind::Moved => {
+            let target = app.row_to_item(row).and_then(|idx| {
+                // In sync-select mode only highlight worktree rows, not commands.
+                if sync_select && idx < app::COMMANDS.len() { None } else { Some(row) }
+            });
+            app.hovered_row = target;
+        }
         MouseEventKind::Down(MouseButton::Left) => {
-            if app.active_action != ActiveAction::None {
-                return;
-            }
             if let Some(idx) = app.row_to_item(row) {
-                // Single click: select; if already selected, activate
-                if app.selected_index == idx {
-                    activate(app);
+                if sync_select {
+                    // Only worktree rows trigger sync.
+                    if idx >= app::COMMANDS.len() {
+                        app.sync_selected_idx = idx - app::COMMANDS.len();
+                        app.sync_loading = true;
+                        app.sync_pending = true;
+                    }
                 } else {
                     app.selected_index = idx;
+                    activate(app);
                 }
             }
         }
         MouseEventKind::ScrollUp => {
-            if app.active_action == ActiveAction::None {
+            if sync_select {
+                app.sync_selected_idx = app.sync_selected_idx.saturating_sub(1);
+            } else {
                 app.selected_index = app.selected_index.saturating_sub(1);
             }
         }
         MouseEventKind::ScrollDown => {
-            if app.active_action == ActiveAction::None {
+            if sync_select {
+                let max = app.worktrees.len().saturating_sub(1);
+                app.sync_selected_idx = (app.sync_selected_idx + 1).min(max);
+            } else {
                 let max = app.total_items().saturating_sub(1);
                 app.selected_index = (app.selected_index + 1).min(max);
             }
@@ -135,6 +173,7 @@ fn handle_nav_key(app: &mut App, code: KeyCode) {
         KeyCode::Char('n') => open_action(app, ActiveAction::NewBranch),
         KeyCode::Char('p') => open_action(app, ActiveAction::SyncPr),
         KeyCode::Char('d') => open_action(app, ActiveAction::Delete),
+        KeyCode::Char('s') => open_action(app, ActiveAction::SyncTrees),
         KeyCode::Char('r') => refresh_worktrees(app),
         KeyCode::Enter => activate(app),
         _ => {}
@@ -148,7 +187,8 @@ fn activate(app: &mut App) {
             "New Branch" => open_action(app, ActiveAction::NewBranch),
             "Sync GH PR" => open_action(app, ActiveAction::SyncPr),
             "Delete Worktree" => open_action(app, ActiveAction::Delete),
-            "Refresh" => refresh_worktrees(app),
+            "Sync Trees" => open_action(app, ActiveAction::SyncTrees),
+            "Refresh List" => refresh_worktrees(app),
             _ => {}
         }
     } else {
@@ -182,6 +222,14 @@ fn open_action(app: &mut App, action: ActiveAction) {
         }
     }
 
+    if action == ActiveAction::SyncTrees {
+        app.sync_results.clear();
+        app.sync_loading = false;
+        app.sync_pending = false;
+        // Pre-select the main (first) worktree
+        app.sync_selected_idx = app.worktrees.iter().position(|w| w.is_main).unwrap_or(0);
+    }
+
     app.active_action = action;
 }
 
@@ -198,6 +246,46 @@ fn refresh_worktrees(app: &mut App) {
 }
 
 // ────────────────────────── Overlay key handlers ────────────────────────────
+
+fn handle_sync_trees_key(app: &mut App, code: KeyCode) {
+    // While loading, ignore all keys.
+    if app.sync_loading {
+        return;
+    }
+
+    // Results phase: any key closes.
+    if !app.sync_results.is_empty() {
+        match code {
+            KeyCode::Esc | KeyCode::Enter => {
+                app.active_action = ActiveAction::None;
+                app.sync_results.clear();
+            }
+            _ => {}
+        }
+        return;
+    }
+
+    // Select phase.
+    match code {
+        KeyCode::Esc => {
+            app.active_action = ActiveAction::None;
+        }
+        KeyCode::Up | KeyCode::Char('k') => {
+            app.sync_selected_idx = app.sync_selected_idx.saturating_sub(1);
+        }
+        KeyCode::Down | KeyCode::Char('j') => {
+            let max = app.worktrees.len().saturating_sub(1);
+            app.sync_selected_idx = (app.sync_selected_idx + 1).min(max);
+        }
+        KeyCode::Enter => {
+            if !app.worktrees.is_empty() {
+                app.sync_loading = true;
+                app.sync_pending = true;
+            }
+        }
+        _ => {}
+    }
+}
 
 fn handle_new_branch_key(app: &mut App, code: KeyCode) {
     match code {

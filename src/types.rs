@@ -20,5 +20,20 @@ pub enum ActiveAction {
     None,
     NewBranch,
     SyncPr,
+    SyncTrees,
     Delete,
+}
+
+#[derive(Debug, Clone)]
+pub enum SyncStatus {
+    UpToDate,
+    Updated(String),  // commit range, e.g. "a1b2c3..d4e5f6"
+    Skipped(String),  // reason (dirty, no upstream, etc.)
+    Error(String),
+}
+
+#[derive(Debug, Clone)]
+pub struct SyncResult {
+    pub branch: String,
+    pub status: SyncStatus,
 }
