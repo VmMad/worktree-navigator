@@ -19,12 +19,13 @@ pub fn draw(f: &mut Frame, app: &mut App) {
 
     let show_sync_overlay = app.active_action == ActiveAction::SyncTrees
         && (app.sync_loading || !app.sync_results.is_empty());
+    let show_delete_overlay = app.active_action == ActiveAction::Delete && app.delete_confirming;
 
     match app.active_action {
         ActiveAction::NewBranch => draw_new_branch_overlay(f, app, area),
         ActiveAction::SyncPr => draw_sync_pr_overlay(f, app, area),
         ActiveAction::SyncTrees if show_sync_overlay => draw_sync_overlay(f, app, area),
-        ActiveAction::Delete => draw_delete_overlay(f, app, area),
+        ActiveAction::Delete if show_delete_overlay => draw_delete_overlay(f, app, area),
         ActiveAction::CloneRepo => draw_clone_overlay(f, app, area),
         _ => {}
     }
@@ -61,7 +62,8 @@ fn draw_panel(f: &mut Frame, app: &mut App, area: Rect) {
     let sync_select = app.active_action == ActiveAction::SyncTrees
         && !app.sync_loading
         && app.sync_results.is_empty();
-    let is_active = app.active_action == ActiveAction::None || sync_select;
+    let delete_select = app.active_action == ActiveAction::Delete && !app.delete_confirming;
+    let is_active = app.active_action == ActiveAction::None || sync_select || delete_select;
     let border_color = if is_active { Color::Cyan } else { Color::DarkGray };
 
     let block = Block::default()
@@ -92,8 +94,10 @@ fn draw_commands(f: &mut Frame, app: &mut App, area: Rect) {
     let sync_select = app.active_action == ActiveAction::SyncTrees
         && !app.sync_loading
         && app.sync_results.is_empty();
+    let delete_select = app.active_action == ActiveAction::Delete && !app.delete_confirming;
+    let inline_select = sync_select || delete_select;
 
-    let header_style = if sync_select {
+    let header_style = if inline_select {
         Style::default().fg(Color::DarkGray)
     } else {
         Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
@@ -109,11 +113,20 @@ fn draw_commands(f: &mut Frame, app: &mut App, area: Rect) {
         app.item_rows.push((row, i));
 
         let is_sync_cmd = *label == "Sync Trees";
+        let is_delete_cmd = *label == "Delete Worktree";
+        let focused_cmd = if sync_select {
+            is_sync_cmd
+        } else if delete_select {
+            is_delete_cmd
+        } else {
+            false
+        };
 
-        let style = if sync_select {
-            if is_sync_cmd {
-                // Active sync-select indicator: green + underline
-                Style::default().fg(Color::Green).add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
+        let style = if inline_select {
+            if focused_cmd {
+                // Active inline-select indicator: underline the focused command.
+                let color = if sync_select { Color::Green } else { Color::Red };
+                Style::default().fg(color).add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
             } else {
                 Style::default().fg(Color::DarkGray)
             }
@@ -131,13 +144,13 @@ fn draw_commands(f: &mut Frame, app: &mut App, area: Rect) {
             }
         };
 
-        let prefix = if !sync_select && app.active_action == ActiveAction::None && app.selected_index == i {
+        let prefix = if !inline_select && app.active_action == ActiveAction::None && app.selected_index == i {
             "❯ "
         } else {
             "  "
         };
 
-        let shortcut_style = if sync_select && !is_sync_cmd {
+        let shortcut_style = if inline_select && !focused_cmd {
             Style::default().fg(Color::DarkGray).add_modifier(Modifier::DIM)
         } else {
             Style::default().fg(Color::DarkGray)
@@ -158,6 +171,7 @@ fn draw_worktrees(f: &mut Frame, app: &mut App, area: Rect) {
     let sync_select = app.active_action == ActiveAction::SyncTrees
         && !app.sync_loading
         && app.sync_results.is_empty();
+    let delete_select = app.active_action == ActiveAction::Delete && !app.delete_confirming;
 
     let header_style = Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD);
     f.render_widget(
@@ -200,8 +214,24 @@ fn draw_worktrees(f: &mut Frame, app: &mut App, area: Rect) {
     let max_rows = list_area.height as usize;
     let cmd_len = COMMANDS.len();
 
+    let selected_delete_wt_idx = if delete_select {
+        let deletable_indices: Vec<usize> = app
+            .worktrees
+            .iter()
+            .enumerate()
+            .filter_map(|(i, wt)| (!wt.is_main && !wt.is_current).then_some(i))
+            .collect();
+        deletable_indices
+            .get(app.overlay_index.min(deletable_indices.len().saturating_sub(1)))
+            .copied()
+    } else {
+        None
+    };
+
     let selected_wt_idx = if sync_select {
         Some(app.sync_selected_idx)
+    } else if delete_select {
+        selected_delete_wt_idx
     } else if app.active_action == ActiveAction::None && app.selected_index >= cmd_len {
         Some(app.selected_index - cmd_len)
     } else {
@@ -231,15 +261,21 @@ fn draw_worktrees(f: &mut Frame, app: &mut App, area: Rect) {
 
         let selected = if sync_select {
             app.sync_selected_idx == i
+        } else if delete_select {
+            selected_delete_wt_idx == Some(i)
         } else {
             app.active_action == ActiveAction::None && app.selected_index == idx
         };
 
-        let can_hover = app.active_action == ActiveAction::None || sync_select;
+        let can_hover = app.active_action == ActiveAction::None || sync_select || delete_select;
         let hovered = can_hover && !selected && app.hovered_row == Some(row);
+        let deletable = !wt.is_main && !wt.is_current;
 
         let base_style = if selected {
-            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+            let selected_color = if delete_select { Color::Red } else { Color::Cyan };
+            Style::default().fg(selected_color).add_modifier(Modifier::BOLD)
+        } else if delete_select && !deletable {
+            Style::default().fg(Color::DarkGray).add_modifier(Modifier::DIM)
         } else if hovered {
             Style::default()
                 .fg(if wt.is_main {
@@ -280,6 +316,7 @@ fn draw_help(f: &mut Frame, app: &App, area: Rect) {
     let sync_select = app.active_action == ActiveAction::SyncTrees
         && !app.sync_loading
         && app.sync_results.is_empty();
+    let delete_select = app.active_action == ActiveAction::Delete && !app.delete_confirming;
 
     let text = if sync_select {
         Line::from(vec![
@@ -290,6 +327,25 @@ fn draw_help(f: &mut Frame, app: &App, area: Rect) {
             Span::styled("Esc", Style::default().fg(Color::DarkGray)),
             Span::styled("  cancel", Style::default().fg(Color::DarkGray)),
         ])
+    } else if delete_select {
+        let has_deletable = app.worktrees.iter().any(|wt| !wt.is_main && !wt.is_current);
+        if has_deletable {
+            Line::from(vec![
+                Span::styled("↑↓/jk/click", Style::default().fg(Color::Red)),
+                Span::styled("  select worktree to delete    ", Style::default().fg(Color::DarkGray)),
+                Span::styled("Enter/click", Style::default().fg(Color::Red)),
+                Span::styled("  confirm    ", Style::default().fg(Color::DarkGray)),
+                Span::styled("Esc", Style::default().fg(Color::DarkGray)),
+                Span::styled("  cancel", Style::default().fg(Color::DarkGray)),
+            ])
+        } else {
+            Line::from(vec![
+                Span::styled("No deletable worktrees", Style::default().fg(Color::DarkGray)),
+                Span::styled("    ", Style::default().fg(Color::DarkGray)),
+                Span::styled("Esc", Style::default().fg(Color::DarkGray)),
+                Span::styled("  cancel", Style::default().fg(Color::DarkGray)),
+            ])
+        }
     } else {
         Line::from(vec![
             Span::styled("↑↓/jk/scroll", Style::default().fg(Color::DarkGray)),
@@ -549,94 +605,40 @@ fn draw_sync_overlay(f: &mut Frame, app: &App, area: Rect) {
 
 fn draw_delete_overlay(f: &mut Frame, app: &App, area: Rect) {
     let deletable = app.deletable_worktrees();
-    let height = (deletable.len() as u16 + 7).min(area.height.saturating_sub(4));
-    let popup = centered_rect(60, height, area);
-    f.render_widget(Clear, popup);
+    if let Some(wt) = deletable.get(app.overlay_index) {
+        let popup = centered_rect(60, 8, area);
+        f.render_widget(Clear, popup);
 
-    let block = Block::default()
-        .title(" Delete Worktree ")
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Red));
+        let block = Block::default()
+            .title(" Delete Worktree ")
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Red));
 
-    let inner = block.inner(popup).inner(Margin { horizontal: 1, vertical: 1 });
-    f.render_widget(block, popup);
-
-    if deletable.is_empty() {
+        let inner = block.inner(popup).inner(Margin { horizontal: 1, vertical: 1 });
+        f.render_widget(block, popup);
         f.render_widget(
-            Paragraph::new(Span::styled(
-                "No deletable worktrees.\n(Cannot delete main or current.)",
-                Style::default().fg(Color::DarkGray),
-            ))
-            .wrap(Wrap { trim: false }),
+            Paragraph::new(vec![
+                Line::from(Span::styled(
+                    "Delete worktree for branch:",
+                    Style::default().fg(Color::Yellow),
+                )),
+                Line::from(Span::styled(
+                    wt.branch.clone(),
+                    Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                )),
+                Line::from(Span::styled(
+                    wt.path.clone(),
+                    Style::default().fg(Color::DarkGray),
+                )),
+                Line::from(vec![]),
+                Line::from(Span::styled(
+                    "Confirm? [y/n]",
+                    Style::default().fg(Color::Yellow),
+                )),
+            ]),
             inner,
         );
-        return;
     }
-
-    if app.delete_confirming {
-        if let Some(wt) = deletable.get(app.overlay_index) {
-            f.render_widget(
-                Paragraph::new(vec![
-                    Line::from(Span::styled(
-                        "Delete worktree for branch:",
-                        Style::default().fg(Color::Yellow),
-                    )),
-                    Line::from(Span::styled(
-                        wt.branch.clone(),
-                        Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
-                    )),
-                    Line::from(Span::styled(
-                        wt.path.clone(),
-                        Style::default().fg(Color::DarkGray),
-                    )),
-                    Line::from(vec![]),
-                    Line::from(Span::styled(
-                        "Confirm? [y/n]",
-                        Style::default().fg(Color::Yellow),
-                    )),
-                ]),
-                inner,
-            );
-        }
-        return;
-    }
-
-    let items: Vec<ListItem> = deletable
-        .iter()
-        .enumerate()
-        .map(|(i, wt)| {
-            let selected = i == app.overlay_index;
-            let style = if selected {
-                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(Color::White)
-            };
-            ListItem::new(Line::from(vec![
-                Span::styled(if selected { "❯ " } else { "  " }, style),
-                Span::styled(wt.branch.clone(), style),
-                Span::styled(
-                    format!(" {}", &wt.sha[..wt.sha.len().min(7)]),
-                    Style::default().fg(Color::DarkGray),
-                ),
-            ]))
-        })
-        .collect();
-
-    let mut state = ListState::default();
-    state.select(Some(app.overlay_index));
-
-    let list_h = inner.height.saturating_sub(1);
-    let list_area = Rect { height: list_h, ..inner };
-    let help_area = Rect { y: inner.y + list_h, height: 1, ..inner };
-
-    f.render_stateful_widget(List::new(items), list_area, &mut state);
-    f.render_widget(
-        Paragraph::new(Span::styled(
-            "↑↓ navigate  Enter select  Esc cancel",
-            Style::default().fg(Color::DarkGray),
-        )),
-        help_area,
-    );
 }
 
 fn draw_clone_overlay(f: &mut Frame, app: &App, area: Rect) {
