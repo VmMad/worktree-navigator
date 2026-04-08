@@ -250,7 +250,72 @@ pub fn sync_one_worktree(repo_root: &Path, wt: &Worktree) -> (bool, SyncResult) 
     (fetch_ok, SyncResult { branch: wt.branch.clone(), status })
 }
 
-/// Walk up from cwd to find the git repo root.
+/// Derive a default destination path from a git URL.
+/// e.g. `git@github.com:org/repo.git` → `~/Projects/trees/repo`
+pub fn dest_from_url(url: &str) -> String {
+    let name = url
+        .trim_end_matches('/')
+        .rsplit('/')
+        .next()
+        .unwrap_or("repo")
+        .trim_end_matches(".git")
+        .to_string();
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    format!("{}/Projects/trees/{}", home, name)
+}
+
+/// Clone a repo as a bare repo and create the initial worktree.
+/// Returns the path to the checked-out worktree.
+pub fn clone_bare_repo(url: &str, dest: &Path) -> Result<PathBuf> {
+    let dest_str = dest.to_string_lossy();
+
+    let clone = Command::new("git")
+        .args(["clone", "--bare", url, &dest_str])
+        .output()
+        .context("Failed to run git clone")?;
+
+    if !clone.status.success() {
+        let stderr = String::from_utf8_lossy(&clone.stderr);
+        return Err(anyhow::anyhow!("{}", stderr.trim()));
+    }
+
+    // Detect the default branch from the bare repo's HEAD.
+    let head = Command::new("git")
+        .args(["symbolic-ref", "HEAD"])
+        .current_dir(dest)
+        .output()
+        .ok();
+
+    let default_branch = head
+        .filter(|o| o.status.success())
+        .map(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .trim()
+                .trim_start_matches("refs/heads/")
+                .to_string()
+        })
+        .filter(|b| !b.is_empty())
+        .unwrap_or_else(|| "main".to_string());
+
+    let worktree_path = dest.join(&default_branch);
+
+    let wt = Command::new("git")
+        .args(["worktree", "add", &worktree_path.to_string_lossy(), &default_branch])
+        .current_dir(dest)
+        .output()
+        .context("Failed to create initial worktree")?;
+
+    if !wt.status.success() {
+        let stderr = String::from_utf8_lossy(&wt.stderr);
+        return Err(anyhow::anyhow!(
+            "Cloned successfully but failed to create worktree: {}",
+            stderr.trim()
+        ));
+    }
+
+    Ok(worktree_path)
+}
+
 pub fn find_repo_root(start: &Path) -> Option<PathBuf> {
     // Ask git directly — works for normal, bare, and worktree checkouts.
     let output = Command::new("git")

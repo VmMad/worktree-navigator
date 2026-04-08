@@ -25,6 +25,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         ActiveAction::SyncPr => draw_sync_pr_overlay(f, app, area),
         ActiveAction::SyncTrees if show_sync_overlay => draw_sync_overlay(f, app, area),
         ActiveAction::Delete => draw_delete_overlay(f, app, area),
+        ActiveAction::CloneRepo => draw_clone_overlay(f, app, area),
         _ => {}
     }
 
@@ -636,4 +637,118 @@ fn draw_delete_overlay(f: &mut Frame, app: &App, area: Rect) {
         )),
         help_area,
     );
+}
+
+fn draw_clone_overlay(f: &mut Frame, app: &App, area: Rect) {
+    let has_err = app.clone_error.is_some();
+    let height = if app.clone_loading { 5 } else if has_err { 11 } else { 9 };
+    let popup = centered_rect(65, height, area);
+    f.render_widget(Clear, popup);
+
+    let block = Block::default()
+        .title(" Clone Repository as Bare Worktree ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Green));
+
+    let inner = block.inner(popup).inner(Margin { horizontal: 1, vertical: 1 });
+    f.render_widget(block, popup);
+
+    if app.clone_loading {
+        f.render_widget(
+            Paragraph::new(vec![
+                Line::from(Span::styled(
+                    "⟳  Cloning repository…",
+                    Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+                )),
+                Line::from(Span::styled(
+                    "   This may take a moment.",
+                    Style::default().fg(Color::DarkGray),
+                )),
+            ]),
+            inner,
+        );
+        return;
+    }
+
+    let mut rows_constraints = vec![
+        Constraint::Length(1), // URL line
+        Constraint::Length(1), // spacer
+        Constraint::Length(1), // dest/input line
+        Constraint::Length(1), // spacer
+        Constraint::Length(1), // hint
+    ];
+    if has_err {
+        rows_constraints.push(Constraint::Length(1)); // spacer
+        rows_constraints.push(Constraint::Length(1)); // error
+    }
+
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints(rows_constraints)
+        .split(inner);
+
+    if app.clone_step == 0 {
+        f.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled("Repo URL:  ", Style::default().fg(Color::Gray)),
+                Span::styled(
+                    &app.input_buffer,
+                    Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled("█", Style::default().fg(Color::Green)),
+            ])),
+            rows[0],
+        );
+        f.render_widget(
+            Paragraph::new(Span::styled(
+                "Dest:      ~/Projects/trees/<repo-name>  (auto)",
+                Style::default().fg(Color::DarkGray),
+            )),
+            rows[2],
+        );
+        f.render_widget(
+            Paragraph::new(Span::styled(
+                "Enter to continue  Esc to quit",
+                Style::default().fg(Color::DarkGray),
+            )),
+            rows[4],
+        );
+    } else {
+        f.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled("Repo URL:  ", Style::default().fg(Color::Gray)),
+                Span::styled(&app.clone_url, Style::default().fg(Color::DarkGray)),
+            ])),
+            rows[0],
+        );
+        f.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled("Dest:      ", Style::default().fg(Color::Gray)),
+                Span::styled(
+                    &app.input_buffer,
+                    Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled("█", Style::default().fg(Color::Green)),
+            ])),
+            rows[2],
+        );
+        f.render_widget(
+            Paragraph::new(Span::styled(
+                "Enter to clone  Esc to go back",
+                Style::default().fg(Color::DarkGray),
+            )),
+            rows[4],
+        );
+    }
+
+    if let Some(err) = &app.clone_error {
+        let short: String = err.lines().next().unwrap_or(err).chars().take(80).collect();
+        f.render_widget(
+            Paragraph::new(Span::styled(
+                format!("✗ {short}"),
+                Style::default().fg(Color::Red),
+            )),
+            rows[6],
+        );
+    }
 }

@@ -12,6 +12,7 @@ pub const COMMANDS: &[(&str, &str)] = &[
 
 pub struct App {
     pub repo_root: PathBuf,
+    pub no_repo: bool,
     pub worktrees: Vec<Worktree>,
     pub worktrees_loading: bool,
     pub worktrees_error: Option<String>,
@@ -25,6 +26,12 @@ pub struct App {
     pub sync_pending: bool,
     pub sync_fetch_ok: bool,
     pub sync_results: Vec<SyncResult>,
+
+    pub clone_step: u8,
+    pub clone_url: String,
+    pub clone_loading: bool,
+    pub clone_pending: bool,
+    pub clone_error: Option<String>,
 
     pub selected_index: usize,
     pub active_action: ActiveAction,
@@ -48,6 +55,7 @@ impl App {
     pub fn new(repo_root: PathBuf) -> Self {
         Self {
             repo_root,
+            no_repo: false,
             worktrees: vec![],
             worktrees_loading: true,
             worktrees_error: None,
@@ -59,6 +67,11 @@ impl App {
             sync_pending: false,
             sync_fetch_ok: true,
             sync_results: vec![],
+            clone_step: 0,
+            clone_url: String::new(),
+            clone_loading: false,
+            clone_pending: false,
+            clone_error: None,
             selected_index: 0,
             active_action: ActiveAction::None,
             input_buffer: String::new(),

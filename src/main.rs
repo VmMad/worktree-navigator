@@ -27,7 +27,9 @@ fn main() -> Result<()> {
         .map(PathBuf::from)
         .unwrap_or_else(|_| std::env::current_dir().expect("no cwd"));
 
-    let repo_root = git::find_repo_root(&cwd).unwrap_or(cwd);
+    let repo_root_opt = git::find_repo_root(&cwd);
+    let no_repo = repo_root_opt.is_none();
+    let repo_root = repo_root_opt.unwrap_or_else(|| cwd.clone());
 
     enable_raw_mode()?;
     let mut stderr = stderr();
@@ -37,14 +39,20 @@ fn main() -> Result<()> {
 
     let mut app = App::new(repo_root.clone());
 
-    match git::list_worktrees(&repo_root) {
-        Ok(wts) => {
-            app.worktrees = wts;
-            app.worktrees_loading = false;
-        }
-        Err(e) => {
-            app.worktrees_loading = false;
-            app.worktrees_error = Some(e.to_string());
+    if no_repo {
+        app.no_repo = true;
+        app.worktrees_loading = false;
+        app.active_action = ActiveAction::CloneRepo;
+    } else {
+        match git::list_worktrees(&repo_root) {
+            Ok(wts) => {
+                app.worktrees = wts;
+                app.worktrees_loading = false;
+            }
+            Err(e) => {
+                app.worktrees_loading = false;
+                app.worktrees_error = Some(e.to_string());
+            }
         }
     }
 
@@ -62,6 +70,24 @@ fn main() -> Result<()> {
                 app.sync_results = vec![result];
                 app.sync_loading = false;
                 refresh_worktrees(&mut app);
+            }
+        }
+
+        // Execute pending clone after the loading frame has been rendered.
+        if app.clone_pending {
+            app.clone_pending = false;
+            let url = app.clone_url.clone();
+            let dest = std::path::PathBuf::from(app.input_buffer.trim());
+            match git::clone_bare_repo(&url, &dest) {
+                Ok(worktree_path) => {
+                    app.clone_loading = false;
+                    app.exit_path = Some(worktree_path.to_string_lossy().into_owned());
+                    app.should_quit = true;
+                }
+                Err(e) => {
+                    app.clone_loading = false;
+                    app.clone_error = Some(e.to_string());
+                }
             }
         }
 
@@ -103,6 +129,7 @@ fn handle_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
         ActiveAction::SyncPr => handle_sync_pr_key(app, code),
         ActiveAction::SyncTrees => handle_sync_trees_key(app, code),
         ActiveAction::Delete => handle_delete_key(app, code),
+        ActiveAction::CloneRepo => handle_clone_key(app, code),
         ActiveAction::None => handle_nav_key(app, code),
     }
 }
@@ -400,6 +427,50 @@ fn handle_delete_key(app: &mut App, code: KeyCode) {
             app.overlay_index = (app.overlay_index + 1).min(deletable_len.saturating_sub(1));
         }
         KeyCode::Enter if deletable_len > 0 => app.delete_confirming = true,
+        _ => {}
+    }
+}
+
+fn handle_clone_key(app: &mut App, code: KeyCode) {
+    if app.clone_loading {
+        return;
+    }
+
+    match code {
+        KeyCode::Esc => {
+            if app.clone_step == 1 {
+                app.clone_step = 0;
+                app.input_buffer = app.clone_url.clone();
+                app.input_cursor = app.clone_url.chars().count();
+                app.clone_error = None;
+            } else if app.no_repo {
+                app.should_quit = true;
+            } else {
+                app.active_action = ActiveAction::None;
+                app.clone_error = None;
+                app.clear_input();
+            }
+        }
+        KeyCode::Backspace => app.input_backspace(),
+        KeyCode::Enter => {
+            let input = app.input_buffer.trim().to_string();
+            if input.is_empty() {
+                return;
+            }
+            if app.clone_step == 0 {
+                app.clone_url = input.clone();
+                let dest = git::dest_from_url(&input);
+                app.clear_input();
+                app.input_buffer = dest.clone();
+                app.input_cursor = dest.chars().count();
+                app.clone_step = 1;
+                app.clone_error = None;
+            } else {
+                app.clone_loading = true;
+                app.clone_pending = true;
+            }
+        }
+        KeyCode::Char(c) => app.input_char(c),
         _ => {}
     }
 }

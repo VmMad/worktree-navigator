@@ -22,6 +22,7 @@ pub enum ActiveAction {
     SyncPr,
     SyncTrees,
     Delete,
+    CloneRepo,
 }
 
 #[derive(Debug, Clone)]
