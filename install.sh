@@ -1,10 +1,26 @@
 #!/usr/bin/env bash
 set -e
 
-BINARY_SRC="$(cd "$(dirname "$0")" && pwd)/target/release/worktree-navigator"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+
+# Prefer a pre-built binary from a release tarball (named worktree-navigator-*)
+# then fall back to a local cargo build.
+BINARY_SRC=""
+for f in "$SCRIPT_DIR"/worktree-navigator-*; do
+  if [[ -f "$f" && -x "$f" ]]; then
+    BINARY_SRC="$f"
+    break
+  fi
+done
+
+if [[ -z "$BINARY_SRC" ]]; then
+  BINARY_SRC="$SCRIPT_DIR/target/release/worktree-navigator"
+fi
 
 if [[ ! -f "$BINARY_SRC" ]]; then
-  echo "Binary not found. Run: cargo build --release"
+  echo "Binary not found. Either:"
+  echo "  - Run: cargo build --release"
+  echo "  - Or download a release tarball from GitHub Releases"
   exit 1
 fi
 
