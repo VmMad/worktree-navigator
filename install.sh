@@ -1,10 +1,37 @@
 #!/usr/bin/env bash
 set -e
 
-BINARY_SRC="$(cd "$(dirname "$0")" && pwd)/target/release/worktree-navigator"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+
+# Prefer a pre-built binary from a release tarball (named worktree-navigator-*)
+# then fall back to a local cargo build.
+RELEASE_BINARIES=()
+for f in "$SCRIPT_DIR"/worktree-navigator-*; do
+  if [[ -f "$f" && -x "$f" ]]; then
+    RELEASE_BINARIES+=("$f")
+  fi
+done
+
+BINARY_SRC=""
+if [[ ${#RELEASE_BINARIES[@]} -eq 1 ]]; then
+  BINARY_SRC="${RELEASE_BINARIES[0]}"
+elif [[ ${#RELEASE_BINARIES[@]} -gt 1 ]]; then
+  echo "Multiple release binaries found in $SCRIPT_DIR; refusing to guess which one to install:"
+  for f in "${RELEASE_BINARIES[@]}"; do
+    echo "  - $f"
+  done
+  echo "Please keep only the correct release binary for this system, or remove the extras and rerun."
+  exit 1
+fi
+
+if [[ -z "$BINARY_SRC" ]]; then
+  BINARY_SRC="$SCRIPT_DIR/target/release/worktree-navigator"
+fi
 
 if [[ ! -f "$BINARY_SRC" ]]; then
-  echo "Binary not found. Run: cargo build --release"
+  echo "Binary not found. Either:"
+  echo "  - Run: cargo build --release"
+  echo "  - Or download a release tarball from GitHub Releases"
   exit 1
 fi
 
