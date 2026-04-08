@@ -138,17 +138,22 @@ fn handle_mouse(app: &mut App, kind: MouseEventKind, row: u16) {
     let sync_select = app.active_action == ActiveAction::SyncTrees
         && !app.sync_loading
         && app.sync_results.is_empty();
+    let delete_select = app.active_action == ActiveAction::Delete && !app.delete_confirming;
 
-    // While a blocking overlay is open (not sync-select), ignore mouse.
-    if app.active_action != ActiveAction::None && !sync_select {
+    // While a blocking overlay is open (not inline-select), ignore mouse.
+    if app.active_action != ActiveAction::None && !sync_select && !delete_select {
         return;
     }
 
     match kind {
         MouseEventKind::Moved => {
             let target = app.row_to_item(row).and_then(|idx| {
-                // In sync-select mode only highlight worktree rows, not commands.
-                if sync_select && idx < app::COMMANDS.len() { None } else { Some(row) }
+                // In inline-select mode only highlight worktree rows, not commands.
+                if (sync_select || delete_select) && idx < app::COMMANDS.len() {
+                    None
+                } else {
+                    Some(row)
+                }
             });
             app.hovered_row = target;
         }
@@ -161,6 +166,20 @@ fn handle_mouse(app: &mut App, kind: MouseEventKind, row: u16) {
                         app.sync_loading = true;
                         app.sync_pending = true;
                     }
+                } else if delete_select {
+                    // Only deletable worktree rows trigger delete confirmation.
+                    if idx >= app::COMMANDS.len() {
+                        let wt_idx = idx - app::COMMANDS.len();
+                        if app
+                            .worktrees
+                            .get(wt_idx)
+                            .map(|wt| !wt.is_main && !wt.is_current)
+                            .unwrap_or(false)
+                        {
+                            app.overlay_index = delete_overlay_index_for_worktree(app, wt_idx);
+                            app.delete_confirming = true;
+                        }
+                    }
                 } else {
                     app.selected_index = idx;
                     activate(app);
@@ -170,6 +189,8 @@ fn handle_mouse(app: &mut App, kind: MouseEventKind, row: u16) {
         MouseEventKind::ScrollUp => {
             if sync_select {
                 app.sync_selected_idx = app.sync_selected_idx.saturating_sub(1);
+            } else if delete_select {
+                app.overlay_index = app.overlay_index.saturating_sub(1);
             } else {
                 app.selected_index = app.selected_index.saturating_sub(1);
             }
@@ -178,6 +199,9 @@ fn handle_mouse(app: &mut App, kind: MouseEventKind, row: u16) {
             if sync_select {
                 let max = app.worktrees.len().saturating_sub(1);
                 app.sync_selected_idx = (app.sync_selected_idx + 1).min(max);
+            } else if delete_select {
+                let max = app.deletable_worktrees().len().saturating_sub(1);
+                app.overlay_index = (app.overlay_index + 1).min(max);
             } else {
                 let max = app.total_items().saturating_sub(1);
                 app.selected_index = (app.selected_index + 1).min(max);
@@ -255,6 +279,10 @@ fn open_action(app: &mut App, action: ActiveAction) {
         app.sync_pending = false;
         // Pre-select the main (first) worktree
         app.sync_selected_idx = app.worktrees.iter().position(|w| w.is_main).unwrap_or(0);
+    }
+
+    if action == ActiveAction::Delete {
+        app.overlay_index = 0;
     }
 
     app.active_action = action;
@@ -422,13 +450,28 @@ fn handle_delete_key(app: &mut App, code: KeyCode) {
             app.active_action = ActiveAction::None;
             app.overlay_error = None;
         }
-        KeyCode::Up => app.overlay_index = app.overlay_index.saturating_sub(1),
-        KeyCode::Down => {
+        KeyCode::Up | KeyCode::Char('k') => {
+            app.overlay_index = app.overlay_index.saturating_sub(1)
+        }
+        KeyCode::Down | KeyCode::Char('j') => {
             app.overlay_index = (app.overlay_index + 1).min(deletable_len.saturating_sub(1));
         }
         KeyCode::Enter if deletable_len > 0 => app.delete_confirming = true,
         _ => {}
     }
+}
+
+fn delete_overlay_index_for_worktree(app: &App, worktree_idx: usize) -> usize {
+    let mut deletable_idx = 0;
+    for (i, wt) in app.worktrees.iter().enumerate() {
+        if !wt.is_main && !wt.is_current {
+            if i == worktree_idx {
+                return deletable_idx;
+            }
+            deletable_idx += 1;
+        }
+    }
+    0
 }
 
 fn handle_clone_key(app: &mut App, code: KeyCode) {
