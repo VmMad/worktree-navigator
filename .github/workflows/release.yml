@@ -62,13 +62,17 @@ jobs:
           restore-keys: ${{ matrix.target }}-cargo-
 
       - name: Build release binary
-        run: cargo build --release --target ${{ matrix.target }}
+        run: cargo build --locked --release --target ${{ matrix.target }}
 
       - name: Package binary
         run: |
           cp target/${{ matrix.target }}/release/worktree-navigator ${{ matrix.asset_name }}
           chmod +x ${{ matrix.asset_name }}
-          tar czf ${{ matrix.asset_name }}.tar.gz ${{ matrix.asset_name }} install.sh README.md 2>/dev/null || tar czf ${{ matrix.asset_name }}.tar.gz ${{ matrix.asset_name }} install.sh
+          if [ -f README.md ]; then
+            tar czf ${{ matrix.asset_name }}.tar.gz ${{ matrix.asset_name }} install.sh README.md
+          else
+            tar czf ${{ matrix.asset_name }}.tar.gz ${{ matrix.asset_name }} install.sh
+          fi
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -113,5 +117,4 @@ jobs:
 
             Each archive contains the binary and `install.sh`.
           files: artifacts/**/*.tar.gz
-          generate_release_notes: true
           fail_on_unmatched_files: true
