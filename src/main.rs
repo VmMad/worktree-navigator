@@ -37,7 +37,7 @@ fn main() -> Result<()> {
 
     // Set initial console size (will be updated on first Resize event)
     let size = terminal.size()?;
-    let console_cols = size.width * 70 / 100 - 2;
+    let console_cols = (size.width * 70 / 100).saturating_sub(2).max(1);
     let console_rows = size.height.saturating_sub(2);
     app.console_size = (console_cols, console_rows);
 
@@ -59,7 +59,7 @@ fn main() -> Result<()> {
             match event::read()? {
                 Event::Key(key) => handle_key(&mut app, key.code, key.modifiers),
                 Event::Resize(cols, rows) => {
-                    let console_cols = cols * 70 / 100 - 2;
+                    let console_cols = (cols * 70 / 100).saturating_sub(2).max(1);
                     let console_rows = rows.saturating_sub(2);
                     app.resize_ptys(console_cols, console_rows);
                 }
@@ -172,6 +172,15 @@ fn key_to_bytes(code: KeyCode, modifiers: KeyModifiers) -> Option<Vec<u8>> {
 fn handle_sidebar_key(app: &mut App, code: KeyCode) {
     match code {
         KeyCode::Char('q') => {
+            // Set exit_path so the wt() shell function can cd to the active worktree.
+            app.exit_path = app.active_pty_path.clone().or_else(|| {
+                if app.sidebar_index >= app::COMMANDS.len() {
+                    let wt_idx = app.sidebar_index - app::COMMANDS.len();
+                    app.worktrees.get(wt_idx).map(|wt| wt.path.clone())
+                } else {
+                    None
+                }
+            });
             app.should_quit = true;
         }
         KeyCode::Up => {
@@ -232,7 +241,9 @@ fn activate_sidebar_selection(app: &mut App) {
         let wt_idx = idx - app::COMMANDS.len();
         if let Some(wt) = app.worktrees.get(wt_idx) {
             let path = wt.path.clone();
-            app.open_shell(&path);
+            if let Err(e) = app.open_shell(&path) {
+                app.worktrees_error = Some(e);
+            }
         }
     }
 }
@@ -265,16 +276,21 @@ fn handle_new_branch_input(app: &mut App, code: KeyCode) {
             }
             app.active_action = ActiveAction::None;
             let root = app.repo_root.clone();
-            if let Ok(lines) = git::add_worktree(&root, &branch) {
-                // After creating, open a shell in the new worktree if successful
-                let created = lines.iter().any(|l| l.starts_with("✓"));
-                if created {
-                    refresh_worktrees(app);
-                    // Find the newly created worktree path
-                    if let Some(wt) = app.worktrees.iter().find(|w| w.branch == branch) {
-                        let path = wt.path.clone();
-                        app.open_shell(&path);
+            match git::add_worktree(&root, &branch) {
+                Ok(lines) => {
+                    let created = lines.iter().any(|l| l.starts_with("✓"));
+                    if created {
+                        refresh_worktrees(app);
+                        if let Some(wt) = app.worktrees.iter().find(|w| w.branch == branch) {
+                            let path = wt.path.clone();
+                            if let Err(e) = app.open_shell(&path) {
+                                app.worktrees_error = Some(e);
+                            }
+                        }
                     }
+                }
+                Err(e) => {
+                    app.worktrees_error = Some(e.to_string());
                 }
             }
             app.clear_input();
@@ -297,14 +313,26 @@ fn handle_sync_pr_input(app: &mut App, code: KeyCode) {
             if let Some(pr) = app.prs.get(app.overlay_index).cloned() {
                 app.active_action = ActiveAction::None;
                 let root = app.repo_root.clone();
-                if let Ok(lines) = git::checkout_pr_as_worktree(&root, pr.number, &pr.head_ref_name) {
-                    let created = lines.iter().any(|l| l.starts_with("✓"));
-                    if created {
-                        refresh_worktrees(app);
-                        if let Some(wt) = app.worktrees.iter().find(|w| w.branch == pr.head_ref_name) {
-                            let path = wt.path.clone();
-                            app.open_shell(&path);
+                match git::checkout_pr_as_worktree(&root, pr.number, &pr.head_ref_name) {
+                    Ok(lines) => {
+                        let created = lines.iter().any(|l| l.starts_with("✓"));
+                        if created {
+                            refresh_worktrees(app);
+                            if let Some(wt) =
+                                app.worktrees.iter().find(|w| w.branch == pr.head_ref_name)
+                            {
+                                let path = wt.path.clone();
+                                if let Err(e) = app.open_shell(&path) {
+                                    app.prs_error = Some(e);
+                                }
+                            }
                         }
+                    }
+                    Err(e) => {
+                        app.prs_error = Some(format!(
+                            "Failed to sync PR #{} ({}): {}",
+                            pr.number, pr.head_ref_name, e
+                        ));
                     }
                 }
             }
@@ -328,15 +356,22 @@ fn handle_delete_input(app: &mut App, code: KeyCode) {
                 app.active_action = ActiveAction::None;
                 app.delete_confirming = false;
                 if let Some(path) = path {
-                    // Close PTY session for this worktree if open
-                    app.pty_sessions.remove(&path);
-                    if app.active_pty_path.as_deref() == Some(&path) {
-                        app.active_pty_path = None;
-                        app.active_panel = ActivePanel::Sidebar;
-                    }
                     let root = app.repo_root.clone();
-                    let _ = git::remove_worktree(&root, &path);
-                    refresh_worktrees(app);
+                    match git::remove_worktree(&root, &path) {
+                        Ok(_) => {
+                            // Close PTY session only after successful removal
+                            app.pty_sessions.remove(&path);
+                            if app.active_pty_path.as_deref() == Some(&path) {
+                                app.active_pty_path = None;
+                                app.active_panel = ActivePanel::Sidebar;
+                            }
+                            refresh_worktrees(app);
+                        }
+                        Err(err) => {
+                            app.worktrees_error =
+                                Some(format!("Failed to remove worktree '{}': {}", path, err));
+                        }
+                    }
                 }
             }
             KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {

@@ -78,26 +78,33 @@ impl App {
     }
 
     /// Open (or reuse) a PTY session for the given worktree and focus it.
-    pub fn open_shell(&mut self, worktree_path: &str) {
+    /// Returns an error message if the PTY could not be spawned.
+    pub fn open_shell(&mut self, worktree_path: &str) -> Result<(), String> {
         let (cols, rows) = self.console_size;
         if !self.pty_sessions.contains_key(worktree_path) {
             match PtySession::spawn(worktree_path, cols, rows) {
                 Ok(session) => {
                     self.pty_sessions.insert(worktree_path.to_string(), session);
                 }
-                Err(_) => return,
+                Err(err) => {
+                    return Err(format!(
+                        "failed to open shell for '{}': {}",
+                        worktree_path, err
+                    ));
+                }
             }
         }
         self.active_pty_path = Some(worktree_path.to_string());
         self.active_panel = ActivePanel::Console;
+        Ok(())
     }
 
     /// Send bytes to the active PTY.
     pub fn send_to_pty(&mut self, data: &[u8]) {
-        if let Some(ref path) = self.active_pty_path.clone() {
-            if let Some(session) = self.pty_sessions.get_mut(path) {
-                session.write_input(data);
-            }
+        if let Some(path) = self.active_pty_path.as_deref()
+            && let Some(session) = self.pty_sessions.get_mut(path)
+        {
+            session.write_input(data);
         }
     }
 
