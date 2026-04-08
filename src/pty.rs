@@ -21,7 +21,7 @@ impl PtySession {
             })
             .context("Failed to open PTY")?;
 
-        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
+        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
         let mut cmd = CommandBuilder::new(&shell);
         cmd.cwd(cwd);
         // Pass a clean environment inheriting from parent
@@ -45,17 +45,32 @@ impl PtySession {
 
         let parser = Arc::new(Mutex::new(vt100::Parser::new(rows, cols, 1000)));
 
-        // Background thread: read PTY output → feed vt100 parser
+        // Background thread: read PTY output → feed vt100 parser in small chunks
+        // to minimise the time the lock is held, letting the UI thread acquire it
+        // between chunks.
         let parser_clone = Arc::clone(&parser);
         std::thread::spawn(move || {
+            const CHUNK_SIZE: usize = 512;
             let mut reader = reader;
             let mut buf = [0u8; 4096];
             loop {
                 match reader.read(&mut buf) {
                     Ok(0) | Err(_) => break,
                     Ok(n) => {
-                        if let Ok(mut p) = parser_clone.lock() {
-                            p.process(&buf[..n]);
+                        // Only split into chunks when the read is large enough to
+                        // warrant it; small reads acquire the lock once directly.
+                        if n <= CHUNK_SIZE {
+                            if let Ok(mut p) = parser_clone.lock() {
+                                p.process(&buf[..n]);
+                            }
+                        } else {
+                            for chunk in buf[..n].chunks(CHUNK_SIZE) {
+                                if let Ok(mut p) = parser_clone.lock() {
+                                    p.process(chunk);
+                                } else {
+                                    break;
+                                }
+                            }
                         }
                     }
                 }

@@ -14,15 +14,15 @@ use crate::{
 pub fn draw(f: &mut Frame, app: &mut App) {
     let area = f.area();
 
-    // Update console size for PTY sizing
     let chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(30), Constraint::Percentage(70)])
         .split(area);
 
+    // Update console_size to match the actual inner area so new PTY sessions
+    // are spawned at the correct dimensions.
     let console_inner = Block::default().borders(Borders::ALL).inner(chunks[1]);
-    // Expose console dimensions for PTY resizing (subtract border)
-    let _ = (console_inner.width, console_inner.height);
+    app.console_size = (console_inner.width, console_inner.height);
 
     draw_sidebar(f, app, chunks[0]);
     draw_console(f, app, chunks[1]);
@@ -179,18 +179,14 @@ fn draw_worktrees(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_sidebar_help(f: &mut Frame, area: Rect) {
-    let help = if true {
-        Line::from(vec![
-            Span::styled("↑↓", Style::default().fg(Color::DarkGray)),
-            Span::styled(" nav  ", Style::default().fg(Color::DarkGray)),
-            Span::styled("Enter", Style::default().fg(Color::DarkGray)),
-            Span::styled(" open shell  ", Style::default().fg(Color::DarkGray)),
-            Span::styled("^Space", Style::default().fg(Color::DarkGray)),
-            Span::styled(" focus", Style::default().fg(Color::DarkGray)),
-        ])
-    } else {
-        Line::default()
-    };
+    let help = Line::from(vec![
+        Span::styled("↑↓", Style::default().fg(Color::DarkGray)),
+        Span::styled(" nav  ", Style::default().fg(Color::DarkGray)),
+        Span::styled("Enter", Style::default().fg(Color::DarkGray)),
+        Span::styled(" open shell  ", Style::default().fg(Color::DarkGray)),
+        Span::styled("^Space", Style::default().fg(Color::DarkGray)),
+        Span::styled(" focus", Style::default().fg(Color::DarkGray)),
+    ]);
     f.render_widget(Paragraph::new(help), area);
 }
 
@@ -254,7 +250,12 @@ pub fn draw_console(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_pty_screen(f: &mut Frame, session: &crate::pty::PtySession, area: Rect, show_cursor: bool) {
-    let Ok(parser) = session.parser.lock() else { return };
+    // Use try_lock so the UI thread never blocks waiting for the reader thread;
+    // if the lock is held we simply skip this frame.
+    let parser = match session.parser.try_lock() {
+        Ok(guard) => guard,
+        Err(_) => return,
+    };
     let screen = parser.screen();
     let rows = area.height as usize;
     let cols = area.width as usize;
@@ -267,11 +268,8 @@ fn draw_pty_screen(f: &mut Frame, session: &crate::pty::PtySession, area: Rect, 
         let mut current_style = Style::default();
 
         for col in 0..cols {
-            let (ch, style) = match screen.cell(row as u16, col as u16) {
+            match screen.cell(row as u16, col as u16) {
                 Some(cell) => {
-                    let ch_str = cell.contents();
-                    let ch = if ch_str.is_empty() { " ".to_string() } else { ch_str.to_string() };
-
                     let fg = vt100_color_to_ratatui(cell.fgcolor());
                     let bg = vt100_color_to_ratatui(cell.bgcolor());
 
@@ -288,19 +286,35 @@ fn draw_pty_screen(f: &mut Frame, session: &crate::pty::PtySession, area: Rect, 
                     if cell.inverse() {
                         style = style.add_modifier(Modifier::REVERSED);
                     }
-                    (ch, style)
-                }
-                None => (" ".to_string(), Style::default()),
-            };
 
-            if style == current_style {
-                current_text.push_str(&ch);
-            } else {
-                if !current_text.is_empty() {
-                    spans.push(Span::styled(current_text.clone(), current_style));
+                    if style != current_style {
+                        if !current_text.is_empty() {
+                            spans.push(Span::styled(
+                                std::mem::take(&mut current_text),
+                                current_style,
+                            ));
+                        }
+                        current_style = style;
+                    }
+                    let contents = cell.contents();
+                    if contents.is_empty() {
+                        current_text.push(' ');
+                    } else {
+                        current_text.push_str(&contents);
+                    }
                 }
-                current_text = ch;
-                current_style = style;
+                None => {
+                    if Style::default() != current_style {
+                        if !current_text.is_empty() {
+                            spans.push(Span::styled(
+                                std::mem::take(&mut current_text),
+                                current_style,
+                            ));
+                        }
+                        current_style = Style::default();
+                    }
+                    current_text.push(' ');
+                }
             }
         }
         if !current_text.is_empty() {
