@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use crate::types::Worktree;
+use crate::types::{SyncResult, SyncStatus, Worktree};
 
 pub fn list_worktrees(repo_root: &Path) -> Result<Vec<Worktree>> {
     let output = Command::new("git")
@@ -180,8 +180,77 @@ pub fn checkout_pr_as_worktree(
     Ok(messages)
 }
 
+/// Fetch from all remotes then fast-forward a single worktree to origin/<branch>.
+/// Returns (fetch_succeeded, SyncResult).
+pub fn sync_one_worktree(repo_root: &Path, wt: &Worktree) -> (bool, SyncResult) {
+    let fetch_ok = Command::new("git")
+        .args(["fetch", "--all", "--quiet"])
+        .current_dir(repo_root)
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+
+    let remote_ref = format!("origin/{}", wt.branch);
+
+    // Check that origin/<branch> exists before attempting the merge.
+    let ref_exists = Command::new("git")
+        .args(["rev-parse", "--verify", &remote_ref])
+        .current_dir(&wt.path)
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+
+    if !ref_exists {
+        return (
+            fetch_ok,
+            SyncResult {
+                branch: wt.branch.clone(),
+                status: SyncStatus::Skipped(format!("{remote_ref} not found on remote")),
+            },
+        );
+    }
+
+    let out = Command::new("git")
+        .args(["merge", "--ff-only", &remote_ref])
+        .current_dir(&wt.path)
+        .output();
+
+    let status = match out {
+        Err(e) => SyncStatus::Error(e.to_string()),
+        Ok(o) => {
+            let stdout = String::from_utf8_lossy(&o.stdout);
+            let stderr = String::from_utf8_lossy(&o.stderr).trim().to_string();
+
+            if o.status.success() {
+                if stdout.contains("Already up to date") {
+                    SyncStatus::UpToDate
+                } else {
+                    let range = stdout
+                        .lines()
+                        .find(|l| l.starts_with("Updating "))
+                        .map(|l| l.trim_start_matches("Updating ").trim().to_string())
+                        .unwrap_or_default();
+                    SyncStatus::Updated(range)
+                }
+            } else {
+                let stderr_lower = stderr.to_lowercase();
+                if stderr_lower.contains("uncommitted changes")
+                    || stderr_lower.contains("local changes")
+                    || stderr_lower.contains("not possible to fast-forward")
+                    || stderr_lower.contains("you have unstaged changes")
+                {
+                    SyncStatus::Skipped("dirty working tree".to_string())
+                } else {
+                    SyncStatus::Error(stderr)
+                }
+            }
+        }
+    };
+
+    (fetch_ok, SyncResult { branch: wt.branch.clone(), status })
+}
+
 /// Walk up from cwd to find the git repo root.
-/// Handles normal repos (.git dir/file), bare repos, and linked worktrees.
 pub fn find_repo_root(start: &Path) -> Option<PathBuf> {
     // Ask git directly — works for normal, bare, and worktree checkouts.
     let output = Command::new("git")

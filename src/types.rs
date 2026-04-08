@@ -15,45 +15,25 @@ pub struct PullRequest {
     pub head_ref_name: String,
 }
 
-#[derive(Debug, Clone)]
-pub struct ConsoleMessage {
-    pub text: String,
-    pub kind: MessageKind,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub enum MessageKind {
-    Info,
-    Command,
-    Success,
-    Error,
-}
-
 #[derive(Debug, Clone, PartialEq)]
 pub enum ActiveAction {
     None,
     NewBranch,
     SyncPr,
+    SyncTrees,
     Delete,
 }
 
-#[derive(Debug, Clone, PartialEq)]
-pub enum ActivePanel {
-    Sidebar,
-    Console,
+#[derive(Debug, Clone)]
+pub enum SyncStatus {
+    UpToDate,
+    Updated(String),  // commit range, e.g. "a1b2c3..d4e5f6"
+    Skipped(String),  // reason (dirty, no upstream, etc.)
+    Error(String),
 }
 
-impl ConsoleMessage {
-    pub fn info(text: impl Into<String>) -> Self {
-        Self { text: text.into(), kind: MessageKind::Info }
-    }
-    pub fn command(text: impl Into<String>) -> Self {
-        Self { text: text.into(), kind: MessageKind::Command }
-    }
-    pub fn success(text: impl Into<String>) -> Self {
-        Self { text: text.into(), kind: MessageKind::Success }
-    }
-    pub fn error(text: impl Into<String>) -> Self {
-        Self { text: text.into(), kind: MessageKind::Error }
-    }
+#[derive(Debug, Clone)]
+pub struct SyncResult {
+    pub branch: String,
+    pub status: SyncStatus,
 }

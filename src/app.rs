@@ -1,12 +1,13 @@
 use std::path::PathBuf;
 
-use crate::types::{ActiveAction, ActivePanel, ConsoleMessage, PullRequest, Worktree};
+use crate::types::{ActiveAction, PullRequest, SyncResult, Worktree};
 
 pub const COMMANDS: &[(&str, &str)] = &[
     ("New Branch", "n"),
     ("Sync GH PR", "p"),
     ("Delete Worktree", "d"),
-    ("Refresh", "r"),
+    ("Sync Trees", "s"),
+    ("Refresh List", "r"),
 ];
 
 pub struct App {
@@ -19,25 +20,28 @@ pub struct App {
     pub prs_loading: bool,
     pub prs_error: Option<String>,
 
-    pub messages: Vec<ConsoleMessage>,
+    pub sync_selected_idx: usize,
+    pub sync_loading: bool,
+    pub sync_pending: bool,
+    pub sync_fetch_ok: bool,
+    pub sync_results: Vec<SyncResult>,
 
-    pub sidebar_index: usize,
-    pub active_panel: ActivePanel,
+    pub selected_index: usize,
     pub active_action: ActiveAction,
 
-    /// Text buffer for the "new branch" input
     pub input_buffer: String,
-    /// Cursor position inside input_buffer (char index)
     pub input_cursor: usize,
-
-    /// Selection index inside action overlays (PR list, delete list)
     pub overlay_index: usize,
-    /// Waiting for y/n confirmation before delete
     pub delete_confirming: bool,
+    pub overlay_error: Option<String>,
 
-    /// When set, the app should exit and the shell should cd here
     pub exit_path: Option<String>,
     pub should_quit: bool,
+
+    /// Maps screen row → item index, populated each render frame for mouse hit detection.
+    pub item_rows: Vec<(u16, usize)>,
+    /// Screen row currently under the mouse cursor (for hover highlight).
+    pub hovered_row: Option<u16>,
 }
 
 impl App {
@@ -50,22 +54,26 @@ impl App {
             prs: vec![],
             prs_loading: false,
             prs_error: None,
-            messages: vec![ConsoleMessage::info(
-                "Worktree Navigator ready. Use ↑↓ to navigate, Enter to select.",
-            )],
-            sidebar_index: 0,
-            active_panel: ActivePanel::Sidebar,
+            sync_selected_idx: 0,
+            sync_loading: false,
+            sync_pending: false,
+            sync_fetch_ok: true,
+            sync_results: vec![],
+            selected_index: 0,
             active_action: ActiveAction::None,
             input_buffer: String::new(),
             input_cursor: 0,
             overlay_index: 0,
             delete_confirming: false,
+            overlay_error: None,
             exit_path: None,
             should_quit: false,
+            item_rows: vec![],
+            hovered_row: None,
         }
     }
 
-    pub fn total_sidebar_items(&self) -> usize {
+    pub fn total_items(&self) -> usize {
         COMMANDS.len() + self.worktrees.len()
     }
 
@@ -76,24 +84,10 @@ impl App {
             .collect()
     }
 
-    pub fn log(&mut self, msg: ConsoleMessage) {
-        self.messages.push(msg);
+    /// Returns the item index for the given screen row, if any.
+    pub fn row_to_item(&self, row: u16) -> Option<usize> {
+        self.item_rows.iter().find(|(r, _)| *r == row).map(|(_, idx)| *idx)
     }
-
-    pub fn log_lines(&mut self, lines: Vec<String>) {
-        for line in lines {
-            let kind = if line.starts_with("✓") {
-                crate::types::MessageKind::Success
-            } else if line.starts_with("✗") {
-                crate::types::MessageKind::Error
-            } else {
-                crate::types::MessageKind::Command
-            };
-            self.messages.push(ConsoleMessage { text: line, kind });
-        }
-    }
-
-    // ──────────────────────────────── input handling ─────────────────────────
 
     pub fn input_char(&mut self, c: char) {
         let byte_pos = self

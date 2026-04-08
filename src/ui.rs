@@ -8,38 +8,63 @@ use ratatui::{
 
 use crate::{
     app::{App, COMMANDS},
-    types::{ActiveAction, ActivePanel, MessageKind},
+    types::{ActiveAction, SyncStatus},
 };
 
 pub fn draw(f: &mut Frame, app: &mut App) {
+    app.item_rows.clear();
+
     let area = f.area();
+    draw_panel(f, app, area);
 
-    // ── 30/70 horizontal split ──────────────────────────────────────────────
-    let chunks = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(30), Constraint::Percentage(70)])
-        .split(area);
+    let show_sync_overlay = app.active_action == ActiveAction::SyncTrees
+        && (app.sync_loading || !app.sync_results.is_empty());
 
-    draw_sidebar(f, app, chunks[0]);
-    draw_console(f, app, chunks[1]);
-
-    // ── overlays (rendered on top) ──────────────────────────────────────────
     match app.active_action {
         ActiveAction::NewBranch => draw_new_branch_overlay(f, app, area),
         ActiveAction::SyncPr => draw_sync_pr_overlay(f, app, area),
+        ActiveAction::SyncTrees if show_sync_overlay => draw_sync_overlay(f, app, area),
         ActiveAction::Delete => draw_delete_overlay(f, app, area),
-        ActiveAction::None => {}
+        _ => {}
+    }
+
+    // Error bar at the bottom (for errors after overlays close)
+    if app.active_action == ActiveAction::None {
+        if let Some(err) = &app.overlay_error {
+            let err_area = Rect {
+                x: area.x + 2,
+                y: area.y + area.height.saturating_sub(2),
+                width: area.width.saturating_sub(4),
+                height: 1,
+            };
+            f.render_widget(
+                Paragraph::new(Span::styled(
+                    format!(" ✗ {err} "),
+                    Style::default().fg(Color::White).bg(Color::Red),
+                )),
+                err_area,
+            );
+        }
     }
 }
 
-// ─────────────────────────────────── Sidebar ────────────────────────────────
+// ─────────────────────────────── Main panel ─────────────────────────────────
 
-fn draw_sidebar(f: &mut Frame, app: &App, area: Rect) {
-    let is_focused = app.active_panel == ActivePanel::Sidebar && app.active_action == ActiveAction::None;
-    let border_color = if is_focused { Color::Cyan } else { Color::DarkGray };
+fn draw_panel(f: &mut Frame, app: &mut App, area: Rect) {
+    let repo_name = app
+        .repo_root
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("?");
+
+    let sync_select = app.active_action == ActiveAction::SyncTrees
+        && !app.sync_loading
+        && app.sync_results.is_empty();
+    let is_active = app.active_action == ActiveAction::None || sync_select;
+    let border_color = if is_active { Color::Cyan } else { Color::DarkGray };
 
     let block = Block::default()
-        .title(" ⎇  Worktree Navigator ")
+        .title(format!(" ⎇  Worktree Navigator — {repo_name} "))
         .title_alignment(Alignment::Center)
         .borders(Borders::ALL)
         .border_style(Style::default().fg(border_color));
@@ -51,197 +76,249 @@ fn draw_sidebar(f: &mut Frame, app: &App, area: Rect) {
         .direction(Direction::Vertical)
         .margin(1)
         .constraints([
-            Constraint::Length(COMMANDS.len() as u16 + 2), // commands header + items
-            Constraint::Min(4),                             // worktrees
-            Constraint::Length(2),                         // help line
+            Constraint::Length(COMMANDS.len() as u16 + 2), // "COMMANDS" header + items
+            Constraint::Min(3),                             // "WORKTREES" header + list
+            Constraint::Length(1),                          // help bar
         ])
         .split(inner);
 
     draw_commands(f, app, sections[0]);
     draw_worktrees(f, app, sections[1]);
-    draw_sidebar_help(f, sections[2]);
+    draw_help(f, app, sections[2]);
 }
 
-fn draw_commands(f: &mut Frame, app: &App, area: Rect) {
-    let is_focused = app.active_panel == ActivePanel::Sidebar
-        && app.active_action == ActiveAction::None
-        && app.sidebar_index < COMMANDS.len();
+fn draw_commands(f: &mut Frame, app: &mut App, area: Rect) {
+    let sync_select = app.active_action == ActiveAction::SyncTrees
+        && !app.sync_loading
+        && app.sync_results.is_empty();
 
-    let items: Vec<ListItem> = COMMANDS
-        .iter()
-        .enumerate()
-        .map(|(i, (label, shortcut))| {
-            let selected = is_focused && i == app.sidebar_index;
-            let prefix = if selected { "❯ " } else { "  " };
-            let style = if selected {
+    let header_style = if sync_select {
+        Style::default().fg(Color::DarkGray)
+    } else {
+        Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+    };
+
+    f.render_widget(
+        Paragraph::new(Line::from(Span::styled("COMMANDS", header_style))),
+        Rect { x: area.x, y: area.y, width: area.width, height: 1 },
+    );
+
+    for (i, (label, shortcut)) in COMMANDS.iter().enumerate() {
+        let row = area.y + 1 + i as u16;
+        app.item_rows.push((row, i));
+
+        let is_sync_cmd = *label == "Sync Trees";
+
+        let style = if sync_select {
+            if is_sync_cmd {
+                // Active sync-select indicator: green + underline
+                Style::default().fg(Color::Green).add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
+            } else {
+                Style::default().fg(Color::DarkGray)
+            }
+        } else {
+            let selected = app.active_action == ActiveAction::None && app.selected_index == i;
+            let hovered = app.active_action == ActiveAction::None
+                && !selected
+                && app.hovered_row == Some(row);
+            if selected {
                 Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+            } else if hovered {
+                Style::default().fg(Color::White).add_modifier(Modifier::BOLD)
             } else {
                 Style::default().fg(Color::White)
-            };
-            let shortcut_style = Style::default().fg(Color::DarkGray);
+            }
+        };
 
-            ListItem::new(Line::from(vec![
+        let prefix = if !sync_select && app.active_action == ActiveAction::None && app.selected_index == i {
+            "❯ "
+        } else {
+            "  "
+        };
+
+        let shortcut_style = if sync_select && !is_sync_cmd {
+            Style::default().fg(Color::DarkGray).add_modifier(Modifier::DIM)
+        } else {
+            Style::default().fg(Color::DarkGray)
+        };
+
+        f.render_widget(
+            Paragraph::new(Line::from(vec![
                 Span::styled(prefix, style),
                 Span::styled(*label, style),
                 Span::styled(format!(" [{shortcut}]"), shortcut_style),
-            ]))
-        })
-        .collect();
+            ])),
+            Rect { x: area.x, y: row, width: area.width, height: 1 },
+        );
+    }
+}
 
-    let title = Line::from(vec![Span::styled(
-        "COMMANDS",
-        Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
-    )]);
+fn draw_worktrees(f: &mut Frame, app: &mut App, area: Rect) {
+    let sync_select = app.active_action == ActiveAction::SyncTrees
+        && !app.sync_loading
+        && app.sync_results.is_empty();
 
-    let list = List::new(items).block(
-        Block::default()
-            .title(title)
-            .borders(Borders::NONE),
+    let header_style = Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD);
+    f.render_widget(
+        Paragraph::new(Line::from(Span::styled("WORKTREES", header_style))),
+        Rect { x: area.x, y: area.y, width: area.width, height: 1 },
     );
 
-    f.render_widget(list, area);
-}
+    let list_area = Rect { y: area.y + 1, height: area.height.saturating_sub(1), ..area };
 
-fn draw_worktrees(f: &mut Frame, app: &App, area: Rect) {
-    let is_focused = app.active_panel == ActivePanel::Sidebar
-        && app.active_action == ActiveAction::None
-        && app.sidebar_index >= COMMANDS.len();
-
-    let items: Vec<ListItem> = if app.worktrees_loading {
-        vec![ListItem::new(Span::styled(
-            "  Loading...",
-            Style::default().fg(Color::DarkGray),
-        ))]
-    } else if let Some(ref err) = app.worktrees_error {
-        vec![ListItem::new(Span::styled(
-            format!("  ✗ {err}"),
-            Style::default().fg(Color::Red),
-        ))]
-    } else if app.worktrees.is_empty() {
-        vec![ListItem::new(Span::styled(
-            "  No worktrees found",
-            Style::default().fg(Color::DarkGray),
-        ))]
-    } else {
-        app.worktrees
-            .iter()
-            .enumerate()
-            .map(|(i, wt)| {
-                let list_index = COMMANDS.len() + i;
-                let selected = is_focused && list_index == app.sidebar_index;
-
-                let prefix = if selected { "❯ " } else { "  " };
-                let marker = if wt.is_current { "✦ " } else { "  " };
-
-                let branch_color = if wt.is_current {
-                    Color::Green
-                } else {
-                    Color::White
-                };
-
-                let base_style = if selected {
-                    Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
-                } else {
-                    Style::default().fg(branch_color)
-                };
-
-                ListItem::new(Line::from(vec![
-                    Span::styled(prefix, base_style),
-                    Span::styled(marker, Style::default().fg(Color::Green)),
-                    Span::styled(wt.branch.clone(), base_style),
-                    Span::styled(
-                        format!(" {}", &wt.sha[..wt.sha.len().min(7)]),
-                        Style::default().fg(Color::DarkGray),
-                    ),
-                ]))
-            })
-            .collect()
-    };
-
-    let title = Line::from(vec![Span::styled(
-        "WORKTREES",
-        Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
-    )]);
-
-    let mut state = ListState::default();
-    if is_focused && !app.worktrees.is_empty() {
-        let wt_idx = app.sidebar_index.saturating_sub(COMMANDS.len());
-        state.select(Some(wt_idx));
+    if app.worktrees_loading {
+        f.render_widget(
+            Paragraph::new(Span::styled("  Loading…", Style::default().fg(Color::DarkGray))),
+            list_area,
+        );
+        return;
     }
 
-    let list = List::new(items)
-        .block(Block::default().title(title).borders(Borders::NONE));
+    if let Some(err) = &app.worktrees_error {
+        f.render_widget(
+            Paragraph::new(Span::styled(
+                format!("  ✗ {err}"),
+                Style::default().fg(Color::Red),
+            )),
+            list_area,
+        );
+        return;
+    }
 
-    f.render_stateful_widget(list, area, &mut state);
-}
+    if app.worktrees.is_empty() {
+        f.render_widget(
+            Paragraph::new(Span::styled(
+                "  No worktrees found",
+                Style::default().fg(Color::DarkGray),
+            )),
+            list_area,
+        );
+        return;
+    }
 
-fn draw_sidebar_help(f: &mut Frame, area: Rect) {
-    let help = Line::from(vec![
-        Span::styled("↑↓", Style::default().fg(Color::DarkGray)),
-        Span::styled(" nav  ", Style::default().fg(Color::DarkGray).add_modifier(Modifier::DIM)),
-        Span::styled("Tab", Style::default().fg(Color::DarkGray)),
-        Span::styled(" panel  ", Style::default().fg(Color::DarkGray).add_modifier(Modifier::DIM)),
-        Span::styled("q", Style::default().fg(Color::DarkGray)),
-        Span::styled(" quit", Style::default().fg(Color::DarkGray).add_modifier(Modifier::DIM)),
-    ]);
+    let max_rows = list_area.height as usize;
+    let cmd_len = COMMANDS.len();
 
-    f.render_widget(Paragraph::new(help), area);
-}
+    let selected_wt_idx = if sync_select {
+        Some(app.sync_selected_idx)
+    } else if app.active_action == ActiveAction::None && app.selected_index >= cmd_len {
+        Some(app.selected_index - cmd_len)
+    } else {
+        None
+    }
+    .map(|idx| idx.min(app.worktrees.len().saturating_sub(1)));
 
-// ─────────────────────────────────── Console ────────────────────────────────
+    let start_idx = if app.worktrees.len() > max_rows {
+        let sel = selected_wt_idx.unwrap_or(0);
+        sel.saturating_sub(max_rows.saturating_sub(1))
+            .min(app.worktrees.len() - max_rows)
+    } else {
+        0
+    };
 
-fn draw_console(f: &mut Frame, app: &App, area: Rect) {
-    let is_focused = app.active_panel == ActivePanel::Console;
-    let border_color = if is_focused { Color::Cyan } else { Color::DarkGray };
-
-    let block = Block::default()
-        .title(" Console — output ")
-        .title_alignment(Alignment::Left)
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(border_color));
-
-    let inner = block.inner(area);
-    f.render_widget(block, area);
-
-    let inner_height = inner.height as usize;
-    let lines: Vec<Line> = app
-        .messages
+    for (visible_i, (i, wt)) in app
+        .worktrees
         .iter()
-        .map(|msg| {
-            let color = match msg.kind {
-                MessageKind::Command => Color::Cyan,
-                MessageKind::Success => Color::Green,
-                MessageKind::Error => Color::Red,
-                MessageKind::Info => Color::Gray,
-            };
-            Line::from(Span::styled(msg.text.clone(), Style::default().fg(color)))
-        })
-        .collect();
+        .enumerate()
+        .skip(start_idx)
+        .take(max_rows)
+        .enumerate()
+    {
+        let idx = cmd_len + i;
+        let row = list_area.y + visible_i as u16;
+        app.item_rows.push((row, idx));
 
-    // Tail scroll: show last N lines
-    let start = lines.len().saturating_sub(inner_height);
-    let visible: Vec<Line> = lines.into_iter().skip(start).collect();
+        let selected = if sync_select {
+            app.sync_selected_idx == i
+        } else {
+            app.active_action == ActiveAction::None && app.selected_index == idx
+        };
 
-    let paragraph = Paragraph::new(visible).wrap(Wrap { trim: false });
-    f.render_widget(paragraph, inner);
+        let can_hover = app.active_action == ActiveAction::None || sync_select;
+        let hovered = can_hover && !selected && app.hovered_row == Some(row);
+
+        let base_style = if selected {
+            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+        } else if hovered {
+            Style::default()
+                .fg(if wt.is_main {
+                    Color::Green
+                } else if wt.is_current {
+                    Color::Yellow
+                } else {
+                    Color::White
+                })
+                .add_modifier(Modifier::BOLD)
+        } else if wt.is_main {
+            Style::default().fg(Color::Green)
+        } else if wt.is_current {
+            Style::default().fg(Color::Yellow)
+        } else {
+            Style::default().fg(Color::White)
+        };
+
+        let mut spans = vec![
+            Span::styled(if selected { "❯ " } else { "  " }, base_style),
+            Span::styled(wt.branch.clone(), base_style),
+        ];
+
+        if wt.is_main {
+            spans.push(Span::styled(" [main]", Style::default().fg(Color::DarkGray)));
+        } else if wt.is_current {
+            spans.push(Span::styled(" [here]", Style::default().fg(Color::DarkGray)));
+        }
+
+        f.render_widget(
+            Paragraph::new(Line::from(spans)),
+            Rect { x: list_area.x, y: row, width: list_area.width, height: 1 },
+        );
+    }
 }
 
-// ──────────────────────────────── Overlays ──────────────────────────────────
+fn draw_help(f: &mut Frame, app: &App, area: Rect) {
+    let sync_select = app.active_action == ActiveAction::SyncTrees
+        && !app.sync_loading
+        && app.sync_results.is_empty();
+
+    let text = if sync_select {
+        Line::from(vec![
+            Span::styled("↑↓/jk/click", Style::default().fg(Color::Green)),
+            Span::styled("  select branch to sync    ", Style::default().fg(Color::DarkGray)),
+            Span::styled("Enter/click", Style::default().fg(Color::Green)),
+            Span::styled("  sync    ", Style::default().fg(Color::DarkGray)),
+            Span::styled("Esc", Style::default().fg(Color::DarkGray)),
+            Span::styled("  cancel", Style::default().fg(Color::DarkGray)),
+        ])
+    } else {
+        Line::from(vec![
+            Span::styled("↑↓/jk/scroll", Style::default().fg(Color::DarkGray)),
+            Span::styled("  nav    ", Style::default().fg(Color::DarkGray)),
+            Span::styled("Enter/click", Style::default().fg(Color::DarkGray)),
+            Span::styled("  open    ", Style::default().fg(Color::DarkGray)),
+            Span::styled("n  p  d  s  r", Style::default().fg(Color::DarkGray)),
+            Span::styled("  branch/PR/delete/sync/refresh    ", Style::default().fg(Color::DarkGray)),
+            Span::styled("q", Style::default().fg(Color::DarkGray)),
+            Span::styled("  quit", Style::default().fg(Color::DarkGray)),
+        ])
+    };
+    f.render_widget(Paragraph::new(text), area);
+}
+
+// ─────────────────────────────── Overlays ───────────────────────────────────
 
 fn centered_rect(percent_x: u16, height: u16, r: Rect) -> Rect {
-    let popup_width = r.width * percent_x / 100;
-    let popup_x = r.x + (r.width.saturating_sub(popup_width)) / 2;
-    let popup_y = r.y + (r.height.saturating_sub(height)) / 2;
+    let w = r.width * percent_x / 100;
     Rect {
-        x: popup_x,
-        y: popup_y,
-        width: popup_width,
+        x: r.x + r.width.saturating_sub(w) / 2,
+        y: r.y + r.height.saturating_sub(height) / 2,
+        width: w,
         height: height.min(r.height),
     }
 }
 
 fn draw_new_branch_overlay(f: &mut Frame, app: &App, area: Rect) {
-    let popup = centered_rect(60, 7, area);
+    let has_err = app.overlay_error.is_some();
+    let popup = centered_rect(60, if has_err { 9 } else { 7 }, area);
     f.render_widget(Clear, popup);
 
     let block = Block::default()
@@ -249,22 +326,34 @@ fn draw_new_branch_overlay(f: &mut Frame, app: &App, area: Rect) {
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Yellow));
 
-    let inner = block.inner(popup);
+    let inner = block.inner(popup).inner(Margin { horizontal: 1, vertical: 1 });
     f.render_widget(block, popup);
 
-    let layout = Layout::default()
+    let mut constraints = vec![
+        Constraint::Length(1), // input
+        Constraint::Length(1), // spacer
+        Constraint::Length(1), // hint
+    ];
+    if has_err {
+        constraints.push(Constraint::Length(1)); // spacer
+        constraints.push(Constraint::Length(1)); // error
+    }
+
+    let rows = Layout::default()
         .direction(Direction::Vertical)
-        .margin(1)
-        .constraints([Constraint::Length(1), Constraint::Length(1), Constraint::Length(1)])
+        .constraints(constraints)
         .split(inner);
 
     f.render_widget(
         Paragraph::new(Line::from(vec![
             Span::styled("Branch name: ", Style::default().fg(Color::Gray)),
-            Span::styled(&app.input_buffer, Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                &app.input_buffer,
+                Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+            ),
             Span::styled("█", Style::default().fg(Color::Yellow)),
         ])),
-        layout[0],
+        rows[0],
     );
 
     f.render_widget(
@@ -272,8 +361,18 @@ fn draw_new_branch_overlay(f: &mut Frame, app: &App, area: Rect) {
             "Enter to create  Esc to cancel",
             Style::default().fg(Color::DarkGray),
         )),
-        layout[2],
+        rows[2],
     );
+
+    if let Some(err) = &app.overlay_error {
+        f.render_widget(
+            Paragraph::new(Span::styled(
+                format!("✗ {err}"),
+                Style::default().fg(Color::Red),
+            )),
+            rows[4],
+        );
+    }
 }
 
 fn draw_sync_pr_overlay(f: &mut Frame, app: &App, area: Rect) {
@@ -291,7 +390,7 @@ fn draw_sync_pr_overlay(f: &mut Frame, app: &App, area: Rect) {
 
     if app.prs_loading {
         f.render_widget(
-            Paragraph::new(Span::styled("Fetching open PRs...", Style::default().fg(Color::DarkGray))),
+            Paragraph::new(Span::styled("Loading pull requests…", Style::default().fg(Color::DarkGray))),
             inner,
         );
         return;
@@ -299,7 +398,11 @@ fn draw_sync_pr_overlay(f: &mut Frame, app: &App, area: Rect) {
 
     if let Some(ref err) = app.prs_error {
         f.render_widget(
-            Paragraph::new(Span::styled(format!("✗ {err}"), Style::default().fg(Color::Red))).wrap(Wrap { trim: false }),
+            Paragraph::new(Span::styled(
+                format!("✗ {err}"),
+                Style::default().fg(Color::Red),
+            ))
+            .wrap(Wrap { trim: false }),
             inner,
         );
         return;
@@ -307,7 +410,10 @@ fn draw_sync_pr_overlay(f: &mut Frame, app: &App, area: Rect) {
 
     if app.prs.is_empty() {
         f.render_widget(
-            Paragraph::new(Span::styled("No open pull requests found.", Style::default().fg(Color::DarkGray))),
+            Paragraph::new(Span::styled(
+                "No open pull requests found.",
+                Style::default().fg(Color::DarkGray),
+            )),
             inner,
         );
         return;
@@ -319,17 +425,19 @@ fn draw_sync_pr_overlay(f: &mut Frame, app: &App, area: Rect) {
         .enumerate()
         .map(|(i, pr)| {
             let selected = i == app.overlay_index;
-            let prefix = if selected { "❯ " } else { "  " };
             let style = if selected {
                 Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD)
             } else {
                 Style::default().fg(Color::White)
             };
             ListItem::new(Line::from(vec![
-                Span::styled(prefix, style),
+                Span::styled(if selected { "❯ " } else { "  " }, style),
                 Span::styled(format!("#{} ", pr.number), Style::default().fg(Color::DarkGray)),
                 Span::styled(pr.title.clone(), style),
-                Span::styled(format!(" ({})", pr.head_ref_name), Style::default().fg(Color::DarkGray)),
+                Span::styled(
+                    format!(" ({})", pr.head_ref_name),
+                    Style::default().fg(Color::DarkGray),
+                ),
             ]))
         })
         .collect();
@@ -337,13 +445,9 @@ fn draw_sync_pr_overlay(f: &mut Frame, app: &App, area: Rect) {
     let mut state = ListState::default();
     state.select(Some(app.overlay_index));
 
-    let list_height = inner.height.saturating_sub(1);
-    let list_area = Rect { height: list_height, ..inner };
-    let help_area = Rect {
-        y: inner.y + list_height,
-        height: 1,
-        ..inner
-    };
+    let list_h = inner.height.saturating_sub(1 + if app.overlay_error.is_some() { 2 } else { 0 });
+    let list_area = Rect { height: list_h, ..inner };
+    let help_area = Rect { y: inner.y + list_h, height: 1, ..inner };
 
     f.render_stateful_widget(List::new(items), list_area, &mut state);
     f.render_widget(
@@ -353,7 +457,94 @@ fn draw_sync_pr_overlay(f: &mut Frame, app: &App, area: Rect) {
         )),
         help_area,
     );
+
+    if let Some(err) = &app.overlay_error {
+        let err_area = Rect { y: inner.y + list_h + 1, height: 1, ..inner };
+        f.render_widget(
+            Paragraph::new(Span::styled(
+                format!("✗ {err}"),
+                Style::default().fg(Color::Red),
+            )),
+            err_area,
+        );
+    }
 }
+
+fn draw_sync_overlay(f: &mut Frame, app: &App, area: Rect) {
+    // Loading phase
+    if app.sync_loading {
+        let popup = centered_rect(50, 5, area);
+        f.render_widget(Clear, popup);
+        let block = Block::default()
+            .title(" Sync Tree ")
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Cyan));
+        let inner = block.inner(popup).inner(Margin { horizontal: 1, vertical: 1 });
+        f.render_widget(block, popup);
+        f.render_widget(
+            Paragraph::new(vec![
+                Line::from(Span::styled(
+                    "⟳  Fetching from remote…",
+                    Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                )),
+                Line::from(Span::styled(
+                    "   This may take a moment.",
+                    Style::default().fg(Color::DarkGray),
+                )),
+            ]),
+            inner,
+        );
+        return;
+    }
+
+    // Results phase
+    if let Some(result) = app.sync_results.first() {
+        let popup = centered_rect(60, 7, area);
+        f.render_widget(Clear, popup);
+
+        let fetch_label = if app.sync_fetch_ok { "fetch ✓" } else { "fetch ✗" };
+        let fetch_color = if app.sync_fetch_ok { Color::Green } else { Color::Red };
+        let block = Block::default()
+            .title(format!(" Sync Result  {fetch_label} "))
+            .title_style(Style::default().fg(fetch_color))
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Cyan));
+        let inner = block.inner(popup).inner(Margin { horizontal: 1, vertical: 1 });
+        f.render_widget(block, popup);
+
+        let (icon, detail, color) = match &result.status {
+            SyncStatus::UpToDate => ("✓", "Already up to date.".to_string(), Color::Green),
+            SyncStatus::Updated(range) => ("↑", format!("Updated  {range}"), Color::Green),
+            SyncStatus::Skipped(reason) => ("⚠", reason.clone(), Color::Yellow),
+            SyncStatus::Error(msg) => {
+                let short = msg.lines().next().unwrap_or(msg).chars().take(70).collect::<String>();
+                ("✗", short, Color::Red)
+            }
+        };
+
+        let rows = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(1), Constraint::Length(1), Constraint::Length(1)])
+            .split(inner);
+
+        f.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled(format!("{icon}  "), Style::default().fg(color).add_modifier(Modifier::BOLD)),
+                Span::styled(result.branch.clone(), Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+            ])),
+            rows[0],
+        );
+        f.render_widget(
+            Paragraph::new(Span::styled(format!("   {detail}"), Style::default().fg(color))),
+            rows[1],
+        );
+        f.render_widget(
+            Paragraph::new(Span::styled("Enter / Esc to close", Style::default().fg(Color::DarkGray))),
+            rows[2],
+        );
+    }
+}
+
 
 fn draw_delete_overlay(f: &mut Frame, app: &App, area: Rect) {
     let deletable = app.deletable_worktrees();
@@ -374,7 +565,8 @@ fn draw_delete_overlay(f: &mut Frame, app: &App, area: Rect) {
             Paragraph::new(Span::styled(
                 "No deletable worktrees.\n(Cannot delete main or current.)",
                 Style::default().fg(Color::DarkGray),
-            )).wrap(Wrap { trim: false }),
+            ))
+            .wrap(Wrap { trim: false }),
             inner,
         );
         return;
@@ -382,14 +574,28 @@ fn draw_delete_overlay(f: &mut Frame, app: &App, area: Rect) {
 
     if app.delete_confirming {
         if let Some(wt) = deletable.get(app.overlay_index) {
-            let text = vec![
-                Line::from(Span::styled("Delete worktree for branch:", Style::default().fg(Color::Yellow))),
-                Line::from(Span::styled(wt.branch.clone(), Style::default().fg(Color::Red).add_modifier(Modifier::BOLD))),
-                Line::from(Span::styled(wt.path.clone(), Style::default().fg(Color::DarkGray))),
-                Line::from(vec![]),
-                Line::from(Span::styled("Confirm? [y/n]", Style::default().fg(Color::Yellow))),
-            ];
-            f.render_widget(Paragraph::new(text), inner);
+            f.render_widget(
+                Paragraph::new(vec![
+                    Line::from(Span::styled(
+                        "Delete worktree for branch:",
+                        Style::default().fg(Color::Yellow),
+                    )),
+                    Line::from(Span::styled(
+                        wt.branch.clone(),
+                        Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                    )),
+                    Line::from(Span::styled(
+                        wt.path.clone(),
+                        Style::default().fg(Color::DarkGray),
+                    )),
+                    Line::from(vec![]),
+                    Line::from(Span::styled(
+                        "Confirm? [y/n]",
+                        Style::default().fg(Color::Yellow),
+                    )),
+                ]),
+                inner,
+            );
         }
         return;
     }
@@ -399,14 +605,13 @@ fn draw_delete_overlay(f: &mut Frame, app: &App, area: Rect) {
         .enumerate()
         .map(|(i, wt)| {
             let selected = i == app.overlay_index;
-            let prefix = if selected { "❯ " } else { "  " };
             let style = if selected {
                 Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
             } else {
                 Style::default().fg(Color::White)
             };
             ListItem::new(Line::from(vec![
-                Span::styled(prefix, style),
+                Span::styled(if selected { "❯ " } else { "  " }, style),
                 Span::styled(wt.branch.clone(), style),
                 Span::styled(
                     format!(" {}", &wt.sha[..wt.sha.len().min(7)]),
@@ -419,13 +624,9 @@ fn draw_delete_overlay(f: &mut Frame, app: &App, area: Rect) {
     let mut state = ListState::default();
     state.select(Some(app.overlay_index));
 
-    let list_height = inner.height.saturating_sub(1);
-    let list_area = Rect { height: list_height, ..inner };
-    let help_area = Rect {
-        y: inner.y + list_height,
-        height: 1,
-        ..inner
-    };
+    let list_h = inner.height.saturating_sub(1);
+    let list_area = Rect { height: list_h, ..inner };
+    let help_area = Rect { y: inner.y + list_h, height: 1, ..inner };
 
     f.render_stateful_widget(List::new(items), list_area, &mut state);
     f.render_widget(
