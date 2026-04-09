@@ -8,38 +8,29 @@ For a maintainer quick reference (setup, dev commands, workflow, and file map), 
 
 ## Install
 
+### From a GitHub release
+
+```bash
+curl -fsSL -O https://github.com/VmMad/worktree-navigator/releases/latest/download/worktree-navigator-x86_64-linux-gnu \
+  && chmod +x worktree-navigator-x86_64-linux-gnu \
+  && sudo cp worktree-navigator-x86_64-linux-gnu /usr/local/bin/wt
+```
+
+Then add the `wt()` shell wrapper so navigating to a worktree changes your shell's directory:
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/VmMad/worktree-navigator/main/scripts/zsh-install.sh) \
+  && source ~/.zshrc
+```
+
 ### From source
 
 ```bash
 cargo build --release
-./install.sh
-source ~/.zshrc
+sudo cp target/release/worktree-navigator /usr/local/bin/wt
 ```
 
-### From a release archive
-
-1. Download the right `worktree-navigator-*.tar.gz` from GitHub Releases
-2. Extract it
-3. Run:
-
-```bash
-./install.sh
-source ~/.zshrc
-```
-
-`install.sh` installs `worktree-navigator` into `~/.local/bin` and adds this wrapper to `~/.zshrc`:
-
-```zsh
-wt() {
-  local target
-  target=$(WT_CWD="$PWD" worktree-navigator "$@")
-  local exit_code=$?
-  if [[ -n "$target" && -d "$target" ]]; then
-    cd "$target"
-  fi
-  return $exit_code
-}
-```
+Then run the same one-liner above to add the `wt()` wrapper.
 
 ## Usage
 

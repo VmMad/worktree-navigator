@@ -72,18 +72,19 @@ fn parse_worktree_porcelain(raw: &str, cwd: &Path) -> Result<Vec<Worktree>> {
     Ok(worktrees)
 }
 
-pub fn add_worktree(repo_root: &Path, branch_name: &str) -> Result<Vec<String>> {
+pub fn add_worktree(repo_root: &Path, branch_name: &str) -> Result<(Vec<String>, PathBuf)> {
     let mut messages = Vec::new();
 
     let sanitized = branch_name.replace('/', "-");
     let dest = worktree_base_dir(repo_root).join(&sanitized);
     let dest_str = dest.to_string_lossy().to_string();
+    let git_cwd = resolve_git_cwd(repo_root);
 
     messages.push(format!("$ git worktree add {dest_str} -b {branch_name}"));
 
     let output = Command::new("git")
         .args(["worktree", "add", &dest_str, "-b", branch_name])
-        .current_dir(repo_root)
+        .current_dir(&git_cwd)
         .output()
         .context("Failed to run git worktree add")?;
 
@@ -94,16 +95,17 @@ pub fn add_worktree(repo_root: &Path, branch_name: &str) -> Result<Vec<String>> 
         messages.push(format!("✗ {}", stderr.trim()));
     }
 
-    Ok(messages)
+    Ok((messages, dest))
 }
 
 pub fn remove_worktree(repo_root: &Path, worktree_path: &str) -> Result<Vec<String>> {
     let mut messages = Vec::new();
+    let git_cwd = resolve_git_cwd(repo_root);
     messages.push(format!("$ git worktree remove --force {worktree_path}"));
 
     let output = Command::new("git")
         .args(["worktree", "remove", "--force", worktree_path])
-        .current_dir(repo_root)
+        .current_dir(&git_cwd)
         .output()
         .context("Failed to run git worktree remove")?;
 
@@ -117,8 +119,9 @@ pub fn remove_worktree(repo_root: &Path, worktree_path: &str) -> Result<Vec<Stri
     Ok(messages)
 }
 
-pub fn checkout_pr_as_worktree(repo_root: &Path, pr_number: u32) -> Result<Vec<String>> {
+pub fn checkout_pr_as_worktree(repo_root: &Path, pr_number: u32) -> Result<(Vec<String>, PathBuf)> {
     let mut messages = Vec::new();
+    let git_cwd = resolve_git_cwd(repo_root);
 
     let pr_ref = format!("#{pr_number}");
     let pr_info = Command::new("gh")
@@ -131,7 +134,7 @@ pub fn checkout_pr_as_worktree(repo_root: &Path, pr_number: u32) -> Result<Vec<S
             "-q",
             ".headRefName",
         ])
-        .current_dir(repo_root)
+        .current_dir(&git_cwd)
         .output()
         .context("Failed to run gh pr view")?;
 
@@ -149,7 +152,7 @@ pub fn checkout_pr_as_worktree(repo_root: &Path, pr_number: u32) -> Result<Vec<S
     messages.push(format!("$ git fetch origin {branch_name}:{branch_name}"));
     let fetch = Command::new("git")
         .args(["fetch", "origin", &format!("{branch_name}:{branch_name}")])
-        .current_dir(repo_root)
+        .current_dir(&git_cwd)
         .output();
 
     match fetch {
@@ -162,14 +165,14 @@ pub fn checkout_pr_as_worktree(repo_root: &Path, pr_number: u32) -> Result<Vec<S
         _ => {}
     }
 
-    let dest = worktree_base_dir(repo_root).join(format!("pr-{pr_number}"));
+    let dest = worktree_base_dir(repo_root).join(branch_name.replace('/', "-"));
     let dest_str = dest.to_string_lossy().to_string();
 
     messages.push(format!("$ git worktree add {dest_str} {branch_name}"));
 
     let output = Command::new("git")
         .args(["worktree", "add", &dest_str, &branch_name])
-        .current_dir(repo_root)
+        .current_dir(&git_cwd)
         .output()
         .context("Failed to run git worktree add")?;
 
@@ -180,15 +183,16 @@ pub fn checkout_pr_as_worktree(repo_root: &Path, pr_number: u32) -> Result<Vec<S
         messages.push(format!("✗ {}", stderr.trim()));
     }
 
-    Ok(messages)
+    Ok((messages, dest))
 }
 
 /// Fetch from all remotes then fast-forward a single worktree to origin/<branch>.
 /// Returns (fetch_succeeded, SyncResult).
 pub fn sync_one_worktree(repo_root: &Path, wt: &Worktree) -> (bool, SyncResult) {
+    let git_cwd = resolve_git_cwd(repo_root);
     let fetch_ok = Command::new("git")
         .args(["fetch", "--all", "--quiet"])
-        .current_dir(repo_root)
+        .current_dir(&git_cwd)
         .status()
         .map(|s| s.success())
         .unwrap_or(false);
@@ -353,6 +357,43 @@ fn clone_with_git(source: &str, dest: &str) -> Result<()> {
         let stderr = String::from_utf8_lossy(&clone.stderr);
         Err(anyhow::anyhow!("{}", stderr.trim()))
     }
+}
+
+/// Returns a path suitable as `current_dir` for git commands.
+///
+/// In workspace mode `repo_root` is the parent directory holding individual
+/// worktrees as subdirectories — it is not itself a git repo. We fall back to
+/// the first valid git-repo subdirectory so git commands have a working context
+/// while `worktree_base_dir` still uses `repo_root` to place new trees.
+fn resolve_git_cwd(repo_root: &Path) -> PathBuf {
+    if is_git_repo(repo_root) {
+        return repo_root.to_path_buf();
+    }
+
+    if let Ok(entries) = fs::read_dir(repo_root) {
+        let mut dirs: Vec<_> = entries
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().is_dir())
+            .collect();
+        dirs.sort_by_key(|e| e.file_name());
+        for entry in dirs {
+            let path = entry.path();
+            if is_git_repo(&path) {
+                return path;
+            }
+        }
+    }
+
+    repo_root.to_path_buf()
+}
+
+fn is_git_repo(dir: &Path) -> bool {
+    Command::new("git")
+        .args(["rev-parse", "--git-dir"])
+        .current_dir(dir)
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
 }
 
 fn worktree_base_dir(repo_root: &Path) -> PathBuf {
