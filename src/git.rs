@@ -126,9 +126,33 @@ pub fn remove_worktree(repo_root: &Path, worktree_path: &str) -> Result<Vec<Stri
 pub fn checkout_pr_as_worktree(
     repo_root: &Path,
     pr_number: u32,
-    branch_name: &str,
 ) -> Result<Vec<String>> {
     let mut messages = Vec::new();
+
+    let pr_ref = format!("#{pr_number}");
+    let pr_info = Command::new("gh")
+        .args([
+            "pr",
+            "view",
+            &pr_ref,
+            "--json",
+            "headRefName",
+            "-q",
+            ".headRefName",
+        ])
+        .current_dir(repo_root)
+        .output()
+        .context("Failed to run gh pr view")?;
+
+    if !pr_info.status.success() {
+        let stderr = String::from_utf8_lossy(&pr_info.stderr);
+        anyhow::bail!("{}", stderr.trim());
+    }
+
+    let branch_name = String::from_utf8_lossy(&pr_info.stdout).trim().to_string();
+    if branch_name.is_empty() {
+        anyhow::bail!("Could not resolve head branch for PR #{pr_number}");
+    }
 
     // Fetch the remote branch first
     messages.push(format!(
@@ -163,7 +187,7 @@ pub fn checkout_pr_as_worktree(
     messages.push(format!("$ git worktree add {dest_str} {branch_name}"));
 
     let output = Command::new("git")
-        .args(["worktree", "add", &dest_str, branch_name])
+        .args(["worktree", "add", &dest_str, &branch_name])
         .current_dir(repo_root)
         .output()
         .context("Failed to run git worktree add")?;

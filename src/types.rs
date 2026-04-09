@@ -7,14 +7,6 @@ pub struct Worktree {
     pub is_current: bool,
 }
 
-#[derive(Debug, Clone, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PullRequest {
-    pub number: u32,
-    pub title: String,
-    pub head_ref_name: String,
-}
-
 #[derive(Debug, Clone, PartialEq)]
 pub enum ActiveAction {
     None,
