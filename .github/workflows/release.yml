@@ -85,18 +85,11 @@ jobs:
             |------|--------|
             | `worktree-navigator-x86_64-linux-gnu` | Linux x86_64 (glibc, most Ubuntu/Debian systems) |
 
-            After installing, add the `wt()` shell wrapper to your `~/.zshrc` so that navigating to a worktree changes your shell's directory:
+            After installing, add the `wt()` shell wrapper to your `~/.zshrc` using the following command:
 
             ```zsh
-            wt() {
-              local target
-              target=$(WT_CWD="$PWD" command wt "$@")
-              local exit_code=$?
-              if [[ -n "$target" && -d "$target" ]]; then
-                cd "$target"
-              fi
-              return $exit_code
-            }
+            bash <(curl -fsSL https://raw.githubusercontent.com/VmMad/worktree-navigator/main/scripts/zsh-install.sh) \
+              && source ~/.zshrc
             ```
           files: artifacts/**/*
           fail_on_unmatched_files: true

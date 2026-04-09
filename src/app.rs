@@ -12,6 +12,7 @@ pub const COMMANDS: &[(&str, &str)] = &[
 pub struct App {
     pub repo_root: PathBuf,
     pub no_repo: bool,
+    pub is_workspace: bool,
     pub worktrees: Vec<Worktree>,
     pub worktrees_loading: bool,
     pub worktrees_error: Option<String>,
@@ -53,6 +54,7 @@ impl App {
         Self {
             repo_root,
             no_repo: false,
+            is_workspace: false,
             worktrees: vec![],
             worktrees_loading: true,
             worktrees_error: None,

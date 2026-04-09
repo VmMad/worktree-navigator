@@ -57,6 +57,7 @@ fn main() -> Result<()> {
         app.worktrees_loading = false;
         app.active_action = ActiveAction::CloneRepo;
     } else if workspace_root_opt.is_some() {
+        app.is_workspace = true;
         match git::list_workspace_worktrees(&repo_root) {
             Ok(wts) => {
                 app.worktrees = wts;
@@ -104,19 +105,13 @@ fn main() -> Result<()> {
         if let Some(pr_number) = app.sync_pr_pending.take() {
             let root = app.repo_root.clone();
             match git::checkout_pr_as_worktree(&root, pr_number) {
-                Ok(_) => {
+                Ok((_, dest)) => {
                     app.sync_pr_loading = false;
                     app.active_action = ActiveAction::None;
                     app.clear_input();
                     refresh_worktrees(&mut app);
-                    if let Some(wt) = app
-                        .worktrees
-                        .iter()
-                        .find(|w| w.path.ends_with(&format!("pr-{pr_number}")))
-                    {
-                        app.exit_path = Some(wt.path.clone());
-                        app.should_quit = true;
-                    }
+                    app.exit_path = Some(dest.to_string_lossy().into_owned());
+                    app.should_quit = true;
                 }
                 Err(e) => {
                     app.sync_pr_loading = false;
@@ -332,7 +327,12 @@ fn open_action(app: &mut App, action: ActiveAction) {
 }
 
 fn refresh_worktrees(app: &mut App) {
-    match git::list_worktrees(&app.repo_root) {
+    let result = if app.is_workspace {
+        git::list_workspace_worktrees(&app.repo_root)
+    } else {
+        git::list_worktrees(&app.repo_root)
+    };
+    match result {
         Ok(wts) => {
             app.worktrees = wts;
             app.worktrees_error = None;
@@ -399,14 +399,12 @@ fn handle_new_branch_key(app: &mut App, code: KeyCode) {
             }
             let root = app.repo_root.clone();
             match git::add_worktree(&root, &branch) {
-                Ok(_) => {
+                Ok((_, dest)) => {
                     app.active_action = ActiveAction::None;
                     app.clear_input();
                     refresh_worktrees(app);
-                    if let Some(wt) = app.worktrees.iter().find(|w| w.branch == branch) {
-                        app.exit_path = Some(wt.path.clone());
-                        app.should_quit = true;
-                    }
+                    app.exit_path = Some(dest.to_string_lossy().into_owned());
+                    app.should_quit = true;
                 }
                 Err(e) => {
                     app.overlay_error = Some(format!("Failed to create branch: {e}"));

@@ -16,22 +16,11 @@ curl -fsSL -O https://github.com/VmMad/worktree-navigator/releases/latest/downlo
   && sudo cp worktree-navigator-x86_64-linux-gnu /usr/local/bin/wt
 ```
 
-Then add the `wt()` shell wrapper to your `~/.zshrc` so navigating to a worktree changes your shell's directory:
-
-```zsh
-wt() {
-  local target
-  target=$(WT_CWD="$PWD" command wt "$@")
-  local exit_code=$?
-  if [[ -n "$target" && -d "$target" ]]; then
-    cd "$target"
-  fi
-  return $exit_code
-}
-```
+Then add the `wt()` shell wrapper so navigating to a worktree changes your shell's directory:
 
 ```bash
-source ~/.zshrc
+bash <(curl -fsSL https://raw.githubusercontent.com/VmMad/worktree-navigator/main/scripts/zsh-install.sh) \
+  && source ~/.zshrc
 ```
 
 ### From source
@@ -41,7 +30,12 @@ cargo build --release
 sudo cp target/release/worktree-navigator /usr/local/bin/wt
 ```
 
-Then add the `wt()` wrapper above to `~/.zshrc` and `source ~/.zshrc`.
+Then add the `wt()` shell wrapper so navigating to a worktree changes your shell's directory:
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/VmMad/worktree-navigator/main/scripts/zsh-install.sh) \
+  && source ~/.zshrc
+```
 
 ## Usage
 
