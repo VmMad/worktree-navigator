@@ -38,6 +38,9 @@ jobs:
           key: ${{ matrix.target }}-cargo-${{ hashFiles('Cargo.lock') }}
           restore-keys: ${{ matrix.target }}-cargo-
 
+      - name: Set version from tag
+        run: sed -i "s/^version = \".*\"/version = \"${GITHUB_REF_NAME#v}\"/" Cargo.toml
+
       - name: Build release binary
         run: cargo build --locked --release --target ${{ matrix.target }}
 
