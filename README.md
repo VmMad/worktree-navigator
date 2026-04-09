@@ -11,9 +11,8 @@ For a maintainer quick reference (setup, dev commands, workflow, and file map), 
 ### From a GitHub release
 
 ```bash
-curl -fsSL -O https://github.com/VmMad/worktree-navigator/releases/latest/download/worktree-navigator-x86_64-linux-gnu \
-  && chmod +x worktree-navigator-x86_64-linux-gnu \
-  && sudo mv worktree-navigator-x86_64-linux-gnu /usr/local/bin/wt
+curl -fsSL https://github.com/VmMad/worktree-navigator/releases/latest/download/worktree-navigator-x86_64-linux-gnu \
+  -o ~/.local/bin/wt && chmod +x ~/.local/bin/wt
 ```
 
 Then add the `wt()` shell wrapper so navigating to a worktree changes your shell's directory:
@@ -26,8 +25,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/VmMad/worktree-navigator/mai
 ### From source
 
 ```bash
-cargo build --release
-sudo cp target/release/worktree-navigator /usr/local/bin/wt
+cargo build --release && cp target/release/worktree-navigator ~/.local/bin/wt
 ```
 
 Then add the `wt()` shell wrapper so navigating to a worktree changes your shell's directory:

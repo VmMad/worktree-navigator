@@ -3,7 +3,7 @@ use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Margin, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, Paragraph},
+    widgets::{Block, Borders, Clear, Paragraph, block::Title},
 };
 
 use crate::{
@@ -73,6 +73,14 @@ fn draw_panel(f: &mut Frame, app: &mut App, area: Rect) {
     let block = Block::default()
         .title(format!(" ⎇  Worktree Navigator — {repo_name} "))
         .title_alignment(Alignment::Center)
+        .title(
+            Title::from(Span::styled(
+                format!(" v{} ", env!("CARGO_PKG_VERSION")),
+                Style::default().fg(Color::DarkGray),
+            ))
+            .alignment(Alignment::Right)
+            .position(ratatui::widgets::block::Position::Bottom),
+        )
         .borders(Borders::ALL)
         .border_style(Style::default().fg(border_color));
 
