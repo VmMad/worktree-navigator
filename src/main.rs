@@ -10,13 +10,13 @@ use std::time::Duration;
 use anyhow::Result;
 use crossterm::{
     event::{
-        self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyModifiers,
-        MouseButton, MouseEventKind,
+        self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyModifiers, MouseButton,
+        MouseEventKind,
     },
     execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
-use ratatui::{backend::CrosstermBackend, Terminal};
+use ratatui::{Terminal, backend::CrosstermBackend};
 
 use app::App;
 use types::ActiveAction;
@@ -130,7 +130,11 @@ fn main() -> Result<()> {
     }
 
     disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen, DisableMouseCapture)?;
+    execute!(
+        terminal.backend_mut(),
+        LeaveAlternateScreen,
+        DisableMouseCapture
+    )?;
     terminal.show_cursor()?;
 
     if let Some(ref path) = app.exit_path {
@@ -404,15 +408,13 @@ fn handle_sync_pr_key(app: &mut App, code: KeyCode) {
             let raw = app.input_buffer.trim();
             let pr_input = raw.trim_start_matches('#');
             if pr_input.is_empty() || !pr_input.chars().all(|c| c.is_ascii_digit()) {
-                app.overlay_error =
-                    Some("Invalid PR number. Use #123 or 123.".to_string());
+                app.overlay_error = Some("Invalid PR number. Use #123 or 123.".to_string());
                 return;
             }
             let pr_number: u32 = match pr_input.parse() {
                 Ok(n) => n,
                 Err(_) => {
-                    app.overlay_error =
-                        Some("Invalid PR number. Use #123 or 123.".to_string());
+                    app.overlay_error = Some("Invalid PR number. Use #123 or 123.".to_string());
                     return;
                 }
             };
@@ -447,8 +449,7 @@ fn handle_delete_key(app: &mut App, code: KeyCode) {
                         }
                         Err(e) => {
                             app.active_action = ActiveAction::None;
-                            app.overlay_error =
-                                Some(format!("Failed to delete worktree: {e}"));
+                            app.overlay_error = Some(format!("Failed to delete worktree: {e}"));
                         }
                     }
                 }
@@ -466,9 +467,7 @@ fn handle_delete_key(app: &mut App, code: KeyCode) {
             app.active_action = ActiveAction::None;
             app.overlay_error = None;
         }
-        KeyCode::Up | KeyCode::Char('k') => {
-            app.overlay_index = app.overlay_index.saturating_sub(1)
-        }
+        KeyCode::Up | KeyCode::Char('k') => app.overlay_index = app.overlay_index.saturating_sub(1),
         KeyCode::Down | KeyCode::Char('j') => {
             app.overlay_index = (app.overlay_index + 1).min(deletable_len.saturating_sub(1));
         }
@@ -511,6 +510,11 @@ fn handle_clone_key(app: &mut App, code: KeyCode) {
             }
         }
         KeyCode::Backspace => app.input_backspace(),
+        KeyCode::Delete => app.input_delete(),
+        KeyCode::Left => app.input_left(),
+        KeyCode::Right => app.input_right(),
+        KeyCode::Home => app.input_home(),
+        KeyCode::End => app.input_end(),
         KeyCode::Enter => {
             let input = app.input_buffer.trim().to_string();
             if input.is_empty() {

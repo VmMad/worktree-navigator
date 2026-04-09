@@ -73,16 +73,8 @@ fn parse_worktree_porcelain(raw: &str, cwd: &Path) -> Result<Vec<Worktree>> {
 pub fn add_worktree(repo_root: &Path, branch_name: &str) -> Result<Vec<String>> {
     let mut messages = Vec::new();
 
-    let parent = repo_root
-        .parent()
-        .context("Repo root has no parent directory")?;
-    let repo_name = repo_root
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("repo");
-
     let sanitized = branch_name.replace('/', "-");
-    let dest = parent.join(format!("{repo_name}-{sanitized}"));
+    let dest = repo_root.join(&sanitized);
     let dest_str = dest.to_string_lossy().to_string();
 
     messages.push(format!("$ git worktree add {dest_str} -b {branch_name}"));
@@ -123,10 +115,7 @@ pub fn remove_worktree(repo_root: &Path, worktree_path: &str) -> Result<Vec<Stri
     Ok(messages)
 }
 
-pub fn checkout_pr_as_worktree(
-    repo_root: &Path,
-    pr_number: u32,
-) -> Result<Vec<String>> {
+pub fn checkout_pr_as_worktree(repo_root: &Path, pr_number: u32) -> Result<Vec<String>> {
     let mut messages = Vec::new();
 
     let pr_ref = format!("#{pr_number}");
@@ -155,9 +144,7 @@ pub fn checkout_pr_as_worktree(
     }
 
     // Fetch the remote branch first
-    messages.push(format!(
-        "$ git fetch origin {branch_name}:{branch_name}"
-    ));
+    messages.push(format!("$ git fetch origin {branch_name}:{branch_name}"));
     let fetch = Command::new("git")
         .args(["fetch", "origin", &format!("{branch_name}:{branch_name}")])
         .current_dir(repo_root)
@@ -173,15 +160,7 @@ pub fn checkout_pr_as_worktree(
         _ => {}
     }
 
-    let parent = repo_root
-        .parent()
-        .context("Repo root has no parent directory")?;
-    let repo_name = repo_root
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("repo");
-
-    let dest = parent.join(format!("{repo_name}-pr-{pr_number}"));
+    let dest = repo_root.join(format!("pr-{pr_number}"));
     let dest_str = dest.to_string_lossy().to_string();
 
     messages.push(format!("$ git worktree add {dest_str} {branch_name}"));
@@ -193,9 +172,7 @@ pub fn checkout_pr_as_worktree(
         .context("Failed to run git worktree add")?;
 
     if output.status.success() {
-        messages.push(format!(
-            "✓ PR #{pr_number} checked out at {dest_str}"
-        ));
+        messages.push(format!("✓ PR #{pr_number} checked out at {dest_str}"));
     } else {
         let stderr = String::from_utf8_lossy(&output.stderr);
         messages.push(format!("✗ {}", stderr.trim()));
@@ -271,13 +248,19 @@ pub fn sync_one_worktree(repo_root: &Path, wt: &Worktree) -> (bool, SyncResult) 
         }
     };
 
-    (fetch_ok, SyncResult { branch: wt.branch.clone(), status })
+    (
+        fetch_ok,
+        SyncResult {
+            branch: wt.branch.clone(),
+            status,
+        },
+    )
 }
 
-/// Derive a default destination path from a git URL.
-/// e.g. `git@github.com:org/repo.git` → `~/Projects/trees/repo`
-pub fn dest_from_url(url: &str) -> String {
-    let name = url
+/// Derive a default destination path from clone input.
+/// e.g. `git@github.com:org/repo.git` or `org/repo` → `~/Projects/trees/repo`
+pub fn dest_from_url(source: &str) -> String {
+    let name = source
         .trim_end_matches('/')
         .rsplit('/')
         .next()
@@ -292,15 +275,29 @@ pub fn dest_from_url(url: &str) -> String {
 /// Returns the path to the checked-out worktree.
 pub fn clone_bare_repo(url: &str, dest: &Path) -> Result<PathBuf> {
     let dest_str = dest.to_string_lossy();
+    let source = url.trim();
 
-    let clone = Command::new("git")
-        .args(["clone", "--bare", url, &dest_str])
-        .output()
-        .context("Failed to run git clone")?;
+    if is_github_owner_repo(source) {
+        let mut cloned = false;
 
-    if !clone.status.success() {
-        let stderr = String::from_utf8_lossy(&clone.stderr);
-        return Err(anyhow::anyhow!("{}", stderr.trim()));
+        if gh_available() {
+            let gh_clone = Command::new("gh")
+                .args(["repo", "clone", source, &dest_str, "--", "--bare"])
+                .output()
+                .context("Failed to run gh repo clone")?;
+
+            if gh_clone.status.success() {
+                cloned = true;
+            }
+        }
+
+        if !cloned {
+            let protocol = preferred_github_protocol();
+            let repo_url = github_url_from_slug(source, &protocol);
+            clone_with_git(&repo_url, &dest_str)?;
+        }
+    } else {
+        clone_with_git(source, &dest_str)?;
     }
 
     // Detect the default branch from the bare repo's HEAD.
@@ -324,7 +321,12 @@ pub fn clone_bare_repo(url: &str, dest: &Path) -> Result<PathBuf> {
     let worktree_path = dest.join(&default_branch);
 
     let wt = Command::new("git")
-        .args(["worktree", "add", &worktree_path.to_string_lossy(), &default_branch])
+        .args([
+            "worktree",
+            "add",
+            &worktree_path.to_string_lossy(),
+            &default_branch,
+        ])
         .current_dir(dest)
         .output()
         .context("Failed to create initial worktree")?;
@@ -340,6 +342,73 @@ pub fn clone_bare_repo(url: &str, dest: &Path) -> Result<PathBuf> {
     Ok(worktree_path)
 }
 
+fn clone_with_git(source: &str, dest: &str) -> Result<()> {
+    let clone = Command::new("git")
+        .args(["clone", "--bare", source, dest])
+        .output()
+        .context("Failed to run git clone")?;
+
+    if clone.status.success() {
+        Ok(())
+    } else {
+        let stderr = String::from_utf8_lossy(&clone.stderr);
+        Err(anyhow::anyhow!("{}", stderr.trim()))
+    }
+}
+
+fn is_github_owner_repo(input: &str) -> bool {
+    let value = input.trim();
+    if value.is_empty()
+        || value.contains("://")
+        || value.contains('@')
+        || value.contains(' ')
+        || value.starts_with('/')
+    {
+        return false;
+    }
+
+    let mut parts = value.split('/');
+    let owner = parts.next().unwrap_or("");
+    let repo = parts.next().unwrap_or("");
+
+    !owner.is_empty() && !repo.is_empty() && parts.next().is_none()
+}
+
+fn gh_available() -> bool {
+    Command::new("gh")
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+fn preferred_github_protocol() -> String {
+    let out = Command::new("gh")
+        .args(["config", "get", "git_protocol"])
+        .output();
+
+    match out {
+        Ok(o) if o.status.success() => {
+            let protocol = String::from_utf8_lossy(&o.stdout).trim().to_lowercase();
+            if protocol == "https" {
+                "https".to_string()
+            } else {
+                "ssh".to_string()
+            }
+        }
+        _ => "ssh".to_string(),
+    }
+}
+
+fn github_url_from_slug(slug: &str, protocol: &str) -> String {
+    let normalized = slug.trim().trim_end_matches(".git");
+    if protocol == "https" {
+        format!("https://github.com/{normalized}.git")
+    } else {
+        format!("git@github.com:{normalized}.git")
+    }
+}
+
 pub fn find_repo_root(start: &Path) -> Option<PathBuf> {
     // Ask git directly — works for normal, bare, and worktree checkouts.
     let output = Command::new("git")
@@ -352,9 +421,7 @@ pub fn find_repo_root(start: &Path) -> Option<PathBuf> {
         return None;
     }
 
-    let git_common_dir = String::from_utf8_lossy(&output.stdout)
-        .trim()
-        .to_string();
+    let git_common_dir = String::from_utf8_lossy(&output.stdout).trim().to_string();
 
     // --git-common-dir returns "." when cwd is a bare repo root.
     let git_dir = if git_common_dir == "." {
