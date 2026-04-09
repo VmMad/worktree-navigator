@@ -253,7 +253,6 @@ fn handle_nav_key(app: &mut App, code: KeyCode) {
         KeyCode::Char('p') => open_action(app, ActiveAction::SyncPr),
         KeyCode::Char('d') => open_action(app, ActiveAction::Delete),
         KeyCode::Char('s') => open_action(app, ActiveAction::SyncTrees),
-        KeyCode::Char('r') => refresh_worktrees(app),
         KeyCode::Enter => activate(app),
         _ => {}
     }
@@ -267,7 +266,6 @@ fn activate(app: &mut App) {
             "Sync GH PR" => open_action(app, ActiveAction::SyncPr),
             "Delete Worktree" => open_action(app, ActiveAction::Delete),
             "Sync Trees" => open_action(app, ActiveAction::SyncTrees),
-            "Refresh List" => refresh_worktrees(app),
             _ => {}
         }
     } else {
@@ -522,7 +520,7 @@ fn handle_clone_key(app: &mut App, code: KeyCode) {
             }
             if app.clone_step == 0 {
                 app.clone_url = input.clone();
-                let dest = git::dest_from_url(&input);
+                let dest = git::dest_from_url(&input, &app.repo_root);
                 app.clear_input();
                 app.input_buffer = dest.clone();
                 app.input_cursor = dest.chars().count();

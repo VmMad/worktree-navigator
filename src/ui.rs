@@ -427,9 +427,9 @@ fn draw_help(f: &mut Frame, app: &App, area: Rect) {
             Span::styled("  nav    ", Style::default().fg(Color::DarkGray)),
             Span::styled("Enter/click", Style::default().fg(Color::DarkGray)),
             Span::styled("  open    ", Style::default().fg(Color::DarkGray)),
-            Span::styled("n  p  d  s  r", Style::default().fg(Color::DarkGray)),
+            Span::styled("n  p  d  s", Style::default().fg(Color::DarkGray)),
             Span::styled(
-                "  branch/PR/delete/sync/refresh    ",
+                "  branch/PR/delete/sync    ",
                 Style::default().fg(Color::DarkGray),
             ),
             Span::styled("q", Style::default().fg(Color::DarkGray)),
@@ -847,7 +847,7 @@ fn draw_clone_overlay(f: &mut Frame, app: &App, area: Rect) {
         );
         f.render_widget(
             Paragraph::new(Span::styled(
-                "Dest:      ~/Projects/trees/<repo-name>  (auto)",
+                "Dest:      <cwd>/<repo-name>  (auto)",
                 Style::default().fg(Color::DarkGray),
             )),
             rows[2],

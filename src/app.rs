@@ -7,7 +7,6 @@ pub const COMMANDS: &[(&str, &str)] = &[
     ("Sync GH PR", "p"),
     ("Delete Worktree", "d"),
     ("Sync Trees", "s"),
-    ("Refresh List", "r"),
 ];
 
 pub struct App {

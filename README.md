@@ -55,7 +55,6 @@ Main commands:
 - `Sync GH PR [p]` enter a PR number (`#123` or `123`) and create/sync its worktree
 - `Delete Worktree [d]` inline select in the worktree list, then confirm `[y/n]`
 - `Sync Trees [s]` inline select a branch to sync from `origin/<branch>`
-- `Refresh List [r]` re-read local worktrees
 
 Navigation:
 
@@ -70,7 +69,7 @@ Navigation:
 If you run `wt` in a directory that is not a git repo, it opens a clone flow:
 
 1. Enter repo source (`owner/repo`, SSH URL or HTTPS URL)
-2. Confirm or edit destination (defaults to `~/Projects/trees/<repo-name>`)
+2. Confirm or edit destination (defaults to `<current-working-directory>/<repo-name>`)
 3. Clone as bare repo, create initial worktree, and jump into it
 
 For `owner/repo`, `wt` uses `gh repo clone` when available, and falls back to `git clone --bare` using your preferred GitHub protocol (SSH/HTTPS)
