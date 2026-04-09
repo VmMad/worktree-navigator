@@ -777,7 +777,7 @@ fn draw_clone_overlay(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(Clear, popup);
 
     let block = Block::default()
-        .title(" Clone Repository as Bare Worktree ")
+        .title(" Clone Repository ")
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Green));
 

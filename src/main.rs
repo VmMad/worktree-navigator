@@ -102,7 +102,7 @@ fn main() -> Result<()> {
             app.clone_pending = false;
             let url = app.clone_url.clone();
             let dest = std::path::PathBuf::from(app.input_buffer.trim());
-            match git::clone_bare_repo(&url, &dest) {
+            match git::clone_repo_with_layout(&url, &dest) {
                 Ok(worktree_path) => {
                     app.clone_loading = false;
                     app.exit_path = Some(worktree_path.to_string_lossy().into_owned());
