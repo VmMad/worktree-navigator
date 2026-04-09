@@ -72,6 +72,9 @@ fn main() -> Result<()> {
             Ok(wts) => {
                 app.worktrees = wts;
                 app.worktrees_loading = false;
+                if !app.worktrees.is_empty() {
+                    app.selected_index = app::COMMANDS.len();
+                }
             }
             Err(e) => {
                 app.worktrees_loading = false;
@@ -456,7 +459,7 @@ fn handle_delete_key(app: &mut App, code: KeyCode) {
 
     if app.delete_confirming {
         match code {
-            KeyCode::Char('y') | KeyCode::Char('Y') => {
+            KeyCode::Enter | KeyCode::Char('y') | KeyCode::Char('Y') => {
                 let path = app
                     .deletable_worktrees()
                     .get(app.overlay_index)
