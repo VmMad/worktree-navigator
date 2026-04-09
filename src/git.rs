@@ -341,6 +341,7 @@ pub fn clone_repo_with_layout(url: &str, dest: &Path) -> Result<PathBuf> {
         );
     }
     fs::rename(&tmp_dir, &worktree_path).context("Failed to finalize cloned repository layout")?;
+    fs::write(dest.join(".wt-workspace"), "").context("Failed to create .wt-workspace")?;
 
     Ok(worktree_path)
 }
