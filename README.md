@@ -53,7 +53,7 @@ Main commands:
 
 - `New Branch [n]` create a new branch worktree and jump into it
 - `Sync GH PR [p]` enter a PR number (`#123` or `123`) and create/sync its worktree
-- `Delete Worktree [d]` inline select in the worktree list, then confirm `[y/n]`
+- `Delete Worktree [d]` inline select in the worktree list, then confirm with `Enter` or `y` (`n`/`Esc` cancels)
 - `Sync Trees [s]` inline select a branch to sync from `origin/<branch>`
 
 Navigation:

@@ -434,7 +434,7 @@ fn handle_delete_key(app: &mut App, code: KeyCode) {
 
     if app.delete_confirming {
         match code {
-            KeyCode::Char('y') | KeyCode::Char('Y') => {
+            KeyCode::Enter | KeyCode::Char('y') | KeyCode::Char('Y') => {
                 let path = app
                     .deletable_worktrees()
                     .get(app.overlay_index)
