@@ -155,12 +155,12 @@ fn main() -> Result<()> {
         }
     }
 
-    disable_raw_mode()?;
     execute!(
         terminal.backend_mut(),
-        LeaveAlternateScreen,
-        DisableMouseCapture
+        DisableMouseCapture,
+        LeaveAlternateScreen
     )?;
+    disable_raw_mode()?;
     terminal.show_cursor()?;
 
     if let Some(ref path) = app.exit_path {
