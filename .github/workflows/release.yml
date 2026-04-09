@@ -45,17 +45,12 @@ jobs:
         run: |
           cp target/${{ matrix.target }}/release/worktree-navigator ${{ matrix.asset_name }}
           chmod +x ${{ matrix.asset_name }}
-          if [ -f README.md ]; then
-            tar czf ${{ matrix.asset_name }}.tar.gz ${{ matrix.asset_name }} install.sh README.md
-          else
-            tar czf ${{ matrix.asset_name }}.tar.gz ${{ matrix.asset_name }} install.sh
-          fi
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.asset_name }}
-          path: ${{ matrix.asset_name }}.tar.gz
+          path: ${{ matrix.asset_name }}
 
   release:
     name: Publish GitHub Release
@@ -79,17 +74,29 @@ jobs:
             ### Quick install (Linux x86_64)
 
             ```bash
-            curl -fsSL https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/worktree-navigator-x86_64-linux-gnu.tar.gz | tar xz
-            chmod +x worktree-navigator-x86_64-linux-gnu
-            ./install.sh  # or manually copy binary to ~/.local/bin/
+            curl -fsSL -O https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/worktree-navigator-x86_64-linux-gnu \
+              && chmod +x worktree-navigator-x86_64-linux-gnu \
+              && sudo cp worktree-navigator-x86_64-linux-gnu /usr/local/bin/wt
             ```
 
             ### Available binaries
 
             | File | Target |
             |------|--------|
-            | `worktree-navigator-x86_64-linux-gnu.tar.gz` | Linux x86_64 (glibc, most Ubuntu/Debian systems) |
+            | `worktree-navigator-x86_64-linux-gnu` | Linux x86_64 (glibc, most Ubuntu/Debian systems) |
 
-            Each archive contains the binary and `install.sh`.
-          files: artifacts/**/*.tar.gz
+            After installing, add the `wt()` shell wrapper to your `~/.zshrc` so that navigating to a worktree changes your shell's directory:
+
+            ```zsh
+            wt() {
+              local target
+              target=$(WT_CWD="$PWD" command wt "$@")
+              local exit_code=$?
+              if [[ -n "$target" && -d "$target" ]]; then
+                cd "$target"
+              fi
+              return $exit_code
+            }
+            ```
+          files: artifacts/**/*
           fail_on_unmatched_files: true
