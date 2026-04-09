@@ -755,7 +755,7 @@ fn draw_delete_overlay(f: &mut Frame, app: &App, area: Rect) {
                 )),
                 Line::from(vec![]),
                 Line::from(Span::styled(
-                    "Confirm? [y/n]",
+                    "Confirm? [Enter/y to delete, n/Esc to cancel]",
                     Style::default().fg(Color::Yellow),
                 )),
             ]),
