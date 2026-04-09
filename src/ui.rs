@@ -2,7 +2,7 @@ use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Margin, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap},
+    widgets::{Block, Borders, Clear, Paragraph},
     Frame,
 };
 
@@ -433,8 +433,33 @@ fn draw_new_branch_overlay(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_sync_pr_overlay(f: &mut Frame, app: &App, area: Rect) {
-    let height = (app.prs.len() as u16 + 6).min(area.height.saturating_sub(4));
-    let popup = centered_rect(70, height, area);
+    if app.sync_pr_loading {
+        let popup = centered_rect(50, 5, area);
+        f.render_widget(Clear, popup);
+        let block = Block::default()
+            .title(" Sync GitHub PR as Worktree ")
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Magenta));
+        let inner = block.inner(popup).inner(Margin { horizontal: 1, vertical: 1 });
+        f.render_widget(block, popup);
+        f.render_widget(
+            Paragraph::new(vec![
+                Line::from(Span::styled(
+                    "⟳  Fetching PR and creating worktree…",
+                    Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD),
+                )),
+                Line::from(Span::styled(
+                    "   This may take a moment.",
+                    Style::default().fg(Color::DarkGray),
+                )),
+            ]),
+            inner,
+        );
+        return;
+    }
+
+    let has_err = app.overlay_error.is_some();
+    let popup = centered_rect(60, if has_err { 9 } else { 7 }, area);
     f.render_widget(Clear, popup);
 
     let block = Block::default()
@@ -445,84 +470,47 @@ fn draw_sync_pr_overlay(f: &mut Frame, app: &App, area: Rect) {
     let inner = block.inner(popup).inner(Margin { horizontal: 1, vertical: 1 });
     f.render_widget(block, popup);
 
-    if app.prs_loading {
-        f.render_widget(
-            Paragraph::new(Span::styled("Loading pull requests…", Style::default().fg(Color::DarkGray))),
-            inner,
-        );
-        return;
+    let mut constraints = vec![
+        Constraint::Length(1), // input
+        Constraint::Length(1), // spacer
+        Constraint::Length(1), // hint
+    ];
+    if has_err {
+        constraints.push(Constraint::Length(1)); // spacer
+        constraints.push(Constraint::Length(1)); // error
     }
 
-    if let Some(ref err) = app.prs_error {
-        f.render_widget(
-            Paragraph::new(Span::styled(
-                format!("✗ {err}"),
-                Style::default().fg(Color::Red),
-            ))
-            .wrap(Wrap { trim: false }),
-            inner,
-        );
-        return;
-    }
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints(constraints)
+        .split(inner);
 
-    if app.prs.is_empty() {
-        f.render_widget(
-            Paragraph::new(Span::styled(
-                "No open pull requests found.",
-                Style::default().fg(Color::DarkGray),
-            )),
-            inner,
-        );
-        return;
-    }
-
-    let items: Vec<ListItem> = app
-        .prs
-        .iter()
-        .enumerate()
-        .map(|(i, pr)| {
-            let selected = i == app.overlay_index;
-            let style = if selected {
-                Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(Color::White)
-            };
-            ListItem::new(Line::from(vec![
-                Span::styled(if selected { "❯ " } else { "  " }, style),
-                Span::styled(format!("#{} ", pr.number), Style::default().fg(Color::DarkGray)),
-                Span::styled(pr.title.clone(), style),
-                Span::styled(
-                    format!(" ({})", pr.head_ref_name),
-                    Style::default().fg(Color::DarkGray),
-                ),
-            ]))
-        })
-        .collect();
-
-    let mut state = ListState::default();
-    state.select(Some(app.overlay_index));
-
-    let list_h = inner.height.saturating_sub(1 + if app.overlay_error.is_some() { 2 } else { 0 });
-    let list_area = Rect { height: list_h, ..inner };
-    let help_area = Rect { y: inner.y + list_h, height: 1, ..inner };
-
-    f.render_stateful_widget(List::new(items), list_area, &mut state);
+    f.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled("PR number: ", Style::default().fg(Color::Gray)),
+            Span::styled(
+                &app.input_buffer,
+                Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("█", Style::default().fg(Color::Magenta)),
+        ])),
+        rows[0],
+    );
     f.render_widget(
         Paragraph::new(Span::styled(
-            "↑↓ navigate  Enter checkout  Esc cancel",
+            "Use #123 or 123  Enter to checkout  Esc to cancel",
             Style::default().fg(Color::DarkGray),
         )),
-        help_area,
+        rows[2],
     );
 
     if let Some(err) = &app.overlay_error {
-        let err_area = Rect { y: inner.y + list_h + 1, height: 1, ..inner };
         f.render_widget(
             Paragraph::new(Span::styled(
                 format!("✗ {err}"),
                 Style::default().fg(Color::Red),
             )),
-            err_area,
+            rows[4],
         );
     }
 }

@@ -1,6 +1,5 @@
 mod app;
 mod git;
-mod github;
 mod types;
 mod ui;
 
@@ -70,6 +69,31 @@ fn main() -> Result<()> {
                 app.sync_results = vec![result];
                 app.sync_loading = false;
                 refresh_worktrees(&mut app);
+            }
+        }
+
+        // Execute pending PR sync after the loading frame has been rendered.
+        if let Some(pr_number) = app.sync_pr_pending.take() {
+            let root = app.repo_root.clone();
+            match git::checkout_pr_as_worktree(&root, pr_number) {
+                Ok(_) => {
+                    app.sync_pr_loading = false;
+                    app.active_action = ActiveAction::None;
+                    app.clear_input();
+                    refresh_worktrees(&mut app);
+                    if let Some(wt) = app
+                        .worktrees
+                        .iter()
+                        .find(|w| w.path.ends_with(&format!("pr-{pr_number}")))
+                    {
+                        app.exit_path = Some(wt.path.clone());
+                        app.should_quit = true;
+                    }
+                }
+                Err(e) => {
+                    app.sync_pr_loading = false;
+                    app.overlay_error = Some(format!("Failed to sync PR #{pr_number}: {e}"));
+                }
             }
         }
 
@@ -257,28 +281,17 @@ fn open_action(app: &mut App, action: ActiveAction) {
     app.delete_confirming = false;
     app.overlay_error = None;
 
-    if action == ActiveAction::SyncPr {
-        app.prs_loading = true;
-        app.prs_error = None;
-        app.prs.clear();
-        match github::list_open_prs(&app.repo_root) {
-            Ok(prs) => {
-                app.prs = prs;
-                app.prs_loading = false;
-            }
-            Err(e) => {
-                app.prs_loading = false;
-                app.prs_error = Some(e.to_string());
-            }
-        }
-    }
-
     if action == ActiveAction::SyncTrees {
         app.sync_results.clear();
         app.sync_loading = false;
         app.sync_pending = false;
         // Pre-select the main (first) worktree
         app.sync_selected_idx = app.worktrees.iter().position(|w| w.is_main).unwrap_or(0);
+    }
+
+    if action == ActiveAction::SyncPr {
+        app.sync_pr_loading = false;
+        app.sync_pr_pending = None;
     }
 
     if action == ActiveAction::Delete {
@@ -376,36 +389,39 @@ fn handle_new_branch_key(app: &mut App, code: KeyCode) {
 }
 
 fn handle_sync_pr_key(app: &mut App, code: KeyCode) {
+    if app.sync_pr_loading {
+        return;
+    }
+
     match code {
         KeyCode::Esc => {
             app.active_action = ActiveAction::None;
             app.overlay_error = None;
+            app.clear_input();
         }
-        KeyCode::Up => app.overlay_index = app.overlay_index.saturating_sub(1),
-        KeyCode::Down => {
-            app.overlay_index = (app.overlay_index + 1).min(app.prs.len().saturating_sub(1));
-        }
+        KeyCode::Backspace => app.input_backspace(),
         KeyCode::Enter => {
-            if let Some(pr) = app.prs.get(app.overlay_index).cloned() {
-                let root = app.repo_root.clone();
-                match git::checkout_pr_as_worktree(&root, pr.number, &pr.head_ref_name) {
-                    Ok(_) => {
-                        app.active_action = ActiveAction::None;
-                        refresh_worktrees(app);
-                        if let Some(wt) =
-                            app.worktrees.iter().find(|w| w.branch == pr.head_ref_name)
-                        {
-                            app.exit_path = Some(wt.path.clone());
-                            app.should_quit = true;
-                        }
-                    }
-                    Err(e) => {
-                        app.overlay_error =
-                            Some(format!("Failed to sync PR #{}: {e}", pr.number));
-                    }
-                }
+            let raw = app.input_buffer.trim();
+            let pr_input = raw.trim_start_matches('#');
+            if pr_input.is_empty() || !pr_input.chars().all(|c| c.is_ascii_digit()) {
+                app.overlay_error =
+                    Some("Invalid PR number. Use #123 or 123.".to_string());
+                return;
             }
+            let pr_number: u32 = match pr_input.parse() {
+                Ok(n) => n,
+                Err(_) => {
+                    app.overlay_error =
+                        Some("Invalid PR number. Use #123 or 123.".to_string());
+                    return;
+                }
+            };
+
+            app.overlay_error = None;
+            app.sync_pr_loading = true;
+            app.sync_pr_pending = Some(pr_number);
         }
+        KeyCode::Char(c) => app.input_char(c),
         _ => {}
     }
 }

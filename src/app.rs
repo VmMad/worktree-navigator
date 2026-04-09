@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use crate::types::{ActiveAction, PullRequest, SyncResult, Worktree};
+use crate::types::{ActiveAction, SyncResult, Worktree};
 
 pub const COMMANDS: &[(&str, &str)] = &[
     ("New Branch", "n"),
@@ -17,11 +17,9 @@ pub struct App {
     pub worktrees_loading: bool,
     pub worktrees_error: Option<String>,
 
-    pub prs: Vec<PullRequest>,
-    pub prs_loading: bool,
-    pub prs_error: Option<String>,
-
     pub sync_selected_idx: usize,
+    pub sync_pr_loading: bool,
+    pub sync_pr_pending: Option<u32>,
     pub sync_loading: bool,
     pub sync_pending: bool,
     pub sync_fetch_ok: bool,
@@ -59,10 +57,9 @@ impl App {
             worktrees: vec![],
             worktrees_loading: true,
             worktrees_error: None,
-            prs: vec![],
-            prs_loading: false,
-            prs_error: None,
             sync_selected_idx: 0,
+            sync_pr_loading: false,
+            sync_pr_pending: None,
             sync_loading: false,
             sync_pending: false,
             sync_fetch_ok: true,
