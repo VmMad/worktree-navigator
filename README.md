@@ -4,8 +4,6 @@ Interactive UI for managing git worktrees on Ubuntu.
 
 `wt` opens full screen, works with keyboard and mouse, and lets you jump between worktrees without typing long git commands.
 
-For a maintainer quick reference (setup, dev commands, workflow, and file map), see [CONTRIBUTING.md](./CONTRIBUTING.md).
-
 ## Install
 
 ### From a GitHub release
