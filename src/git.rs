@@ -258,8 +258,8 @@ pub fn sync_one_worktree(repo_root: &Path, wt: &Worktree) -> (bool, SyncResult) 
 }
 
 /// Derive a default destination path from clone input.
-/// e.g. `git@github.com:org/repo.git` or `org/repo` → `~/Projects/trees/repo`
-pub fn dest_from_url(source: &str) -> String {
+/// e.g. `git@github.com:org/repo.git` or `org/repo` → `<cwd>/repo`
+pub fn dest_from_url(source: &str, cwd: &Path) -> String {
     let name = source
         .trim_end_matches('/')
         .rsplit('/')
@@ -267,8 +267,7 @@ pub fn dest_from_url(source: &str) -> String {
         .unwrap_or("repo")
         .trim_end_matches(".git")
         .to_string();
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-    format!("{}/Projects/trees/{}", home, name)
+    cwd.join(name).to_string_lossy().into_owned()
 }
 
 /// Clone a repo as a bare repo and create the initial worktree.
