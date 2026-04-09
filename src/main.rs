@@ -26,9 +26,23 @@ fn main() -> Result<()> {
         .map(PathBuf::from)
         .unwrap_or_else(|_| std::env::current_dir().expect("no cwd"));
 
+    let mark_tree = std::env::args().any(|a| a == "--mark-tree");
+
+    if mark_tree {
+        git::create_workspace_marker(&cwd)?;
+    }
+
     let repo_root_opt = git::find_repo_root(&cwd);
-    let no_repo = repo_root_opt.is_none();
-    let repo_root = repo_root_opt.unwrap_or_else(|| cwd.clone());
+    let workspace_root_opt = if repo_root_opt.is_none() {
+        git::find_workspace_root(&cwd)
+    } else {
+        None
+    };
+
+    let no_repo = repo_root_opt.is_none() && workspace_root_opt.is_none();
+    let repo_root = repo_root_opt
+        .or_else(|| workspace_root_opt.clone())
+        .unwrap_or_else(|| cwd.clone());
 
     enable_raw_mode()?;
     let mut stderr = stderr();
@@ -42,6 +56,17 @@ fn main() -> Result<()> {
         app.no_repo = true;
         app.worktrees_loading = false;
         app.active_action = ActiveAction::CloneRepo;
+    } else if workspace_root_opt.is_some() {
+        match git::list_workspace_worktrees(&repo_root) {
+            Ok(wts) => {
+                app.worktrees = wts;
+                app.worktrees_loading = false;
+            }
+            Err(e) => {
+                app.worktrees_loading = false;
+                app.worktrees_error = Some(e.to_string());
+            }
+        }
     } else {
         match git::list_worktrees(&repo_root) {
             Ok(wts) => {
