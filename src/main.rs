@@ -60,8 +60,10 @@ fn main() -> Result<()> {
         app.is_workspace = true;
         match git::list_workspace_worktrees(&repo_root) {
             Ok(wts) => {
+                let current_idx = wts.iter().position(|w| w.is_current).unwrap_or(0);
                 app.worktrees = wts;
                 app.worktrees_loading = false;
+                app.selected_index = app::COMMANDS.len() + current_idx;
             }
             Err(e) => {
                 app.worktrees_loading = false;
@@ -71,10 +73,11 @@ fn main() -> Result<()> {
     } else {
         match git::list_worktrees(&repo_root) {
             Ok(wts) => {
+                let current_idx = wts.iter().position(|w| w.is_current).unwrap_or(0);
                 app.worktrees = wts;
                 app.worktrees_loading = false;
                 if !app.worktrees.is_empty() {
-                    app.selected_index = app::COMMANDS.len();
+                    app.selected_index = app::COMMANDS.len() + current_idx;
                 }
             }
             Err(e) => {
@@ -181,7 +184,7 @@ fn handle_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
         ActiveAction::SyncTrees => handle_sync_trees_key(app, code),
         ActiveAction::Delete => handle_delete_key(app, code),
         ActiveAction::CloneRepo => handle_clone_key(app, code),
-        ActiveAction::None => handle_nav_key(app, code),
+        ActiveAction::None => handle_nav_key(app, code, modifiers),
     }
 }
 
@@ -242,8 +245,10 @@ fn handle_mouse(app: &mut App, kind: MouseEventKind, row: u16) {
                 app.sync_selected_idx = app.sync_selected_idx.saturating_sub(1);
             } else if delete_select {
                 app.overlay_index = app.overlay_index.saturating_sub(1);
+            } else if app.selected_index == 0 {
+                app.selected_index = app.total_items().saturating_sub(1);
             } else {
-                app.selected_index = app.selected_index.saturating_sub(1);
+                app.selected_index -= 1;
             }
         }
         MouseEventKind::ScrollDown => {
@@ -255,22 +260,41 @@ fn handle_mouse(app: &mut App, kind: MouseEventKind, row: u16) {
                 app.overlay_index = (app.overlay_index + 1).min(max);
             } else {
                 let max = app.total_items().saturating_sub(1);
-                app.selected_index = (app.selected_index + 1).min(max);
+                if app.selected_index >= max {
+                    app.selected_index = 0;
+                } else {
+                    app.selected_index += 1;
+                }
             }
         }
         _ => {}
     }
 }
 
-fn handle_nav_key(app: &mut App, code: KeyCode) {
+fn handle_nav_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
+    let ctrl = modifiers.contains(KeyModifiers::CONTROL);
     match code {
         KeyCode::Char('q') | KeyCode::Esc => app.should_quit = true,
+        KeyCode::Up | KeyCode::Char('k') if ctrl => {
+            app.selected_index = app::COMMANDS.len().min(app.total_items().saturating_sub(1));
+        }
+        KeyCode::Down | KeyCode::Char('j') if ctrl => {
+            app.selected_index = app.total_items().saturating_sub(1);
+        }
         KeyCode::Up | KeyCode::Char('k') => {
-            app.selected_index = app.selected_index.saturating_sub(1);
+            if app.selected_index == 0 {
+                app.selected_index = app.total_items().saturating_sub(1);
+            } else {
+                app.selected_index -= 1;
+            }
         }
         KeyCode::Down | KeyCode::Char('j') => {
             let max = app.total_items().saturating_sub(1);
-            app.selected_index = (app.selected_index + 1).min(max);
+            if app.selected_index >= max {
+                app.selected_index = 0;
+            } else {
+                app.selected_index += 1;
+            }
         }
         KeyCode::Char('n') => open_action(app, ActiveAction::NewBranch),
         KeyCode::Char('p') => open_action(app, ActiveAction::SyncPr),
