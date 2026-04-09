@@ -354,16 +354,14 @@ fn draw_worktrees(f: &mut Frame, app: &mut App, area: Rect) {
             Span::styled(wt.branch.clone(), base_style),
         ];
 
-        if wt.is_main {
-            spans.push(Span::styled(
-                " [main]",
-                Style::default().fg(Color::DarkGray),
-            ));
-        } else if wt.is_current {
-            spans.push(Span::styled(
-                " [here]",
-                Style::default().fg(Color::DarkGray),
-            ));
+        let tag = match (wt.is_main, wt.is_current) {
+            (true, true) => Some(" [default / current]"),
+            (true, false) => Some(" [default]"),
+            (false, true) => Some(" [current]"),
+            (false, false) => None,
+        };
+        if let Some(t) = tag {
+            spans.push(Span::styled(t, Style::default().fg(Color::DarkGray)));
         }
 
         f.render_widget(
