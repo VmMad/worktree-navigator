@@ -1,6 +1,8 @@
 use anyhow::{Context, Result};
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::types::{SyncResult, SyncStatus, Worktree};
 
@@ -74,7 +76,7 @@ pub fn add_worktree(repo_root: &Path, branch_name: &str) -> Result<Vec<String>> 
     let mut messages = Vec::new();
 
     let sanitized = branch_name.replace('/', "-");
-    let dest = repo_root.join(&sanitized);
+    let dest = worktree_base_dir(repo_root).join(&sanitized);
     let dest_str = dest.to_string_lossy().to_string();
 
     messages.push(format!("$ git worktree add {dest_str} -b {branch_name}"));
@@ -160,7 +162,7 @@ pub fn checkout_pr_as_worktree(repo_root: &Path, pr_number: u32) -> Result<Vec<S
         _ => {}
     }
 
-    let dest = repo_root.join(format!("pr-{pr_number}"));
+    let dest = worktree_base_dir(repo_root).join(format!("pr-{pr_number}"));
     let dest_str = dest.to_string_lossy().to_string();
 
     messages.push(format!("$ git worktree add {dest_str} {branch_name}"));
@@ -270,18 +272,27 @@ pub fn dest_from_url(source: &str, cwd: &Path) -> String {
     cwd.join(name).to_string_lossy().into_owned()
 }
 
-/// Clone a repo as a bare repo and create the initial worktree.
-/// Returns the path to the checked-out worktree.
-pub fn clone_bare_repo(url: &str, dest: &Path) -> Result<PathBuf> {
-    let dest_str = dest.to_string_lossy();
+/// Clone a repo and place the default branch checkout under `<dest>/<branch>`.
+/// Returns the path to the checked-out default branch directory.
+pub fn clone_repo_with_layout(url: &str, dest: &Path) -> Result<PathBuf> {
     let source = url.trim();
+    fs::create_dir_all(dest).context("Failed to create destination directory")?;
+    let tmp_dir = dest.join(format!(
+        ".wt-clone-tmp-{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0)
+    ));
+    let tmp_str = tmp_dir.to_string_lossy().to_string();
 
     if is_github_owner_repo(source) {
         let mut cloned = false;
 
         if gh_available() {
             let gh_clone = Command::new("gh")
-                .args(["repo", "clone", source, &dest_str, "--", "--bare"])
+                .args(["repo", "clone", source, &tmp_str])
                 .output()
                 .context("Failed to run gh repo clone")?;
 
@@ -293,16 +304,16 @@ pub fn clone_bare_repo(url: &str, dest: &Path) -> Result<PathBuf> {
         if !cloned {
             let protocol = preferred_github_protocol();
             let repo_url = github_url_from_slug(source, &protocol);
-            clone_with_git(&repo_url, &dest_str)?;
+            clone_with_git(&repo_url, &tmp_str)?;
         }
     } else {
-        clone_with_git(source, &dest_str)?;
+        clone_with_git(source, &tmp_str)?;
     }
 
-    // Detect the default branch from the bare repo's HEAD.
+    // Detect the default branch from the cloned checkout.
     let head = Command::new("git")
-        .args(["symbolic-ref", "HEAD"])
-        .current_dir(dest)
+        .args(["symbolic-ref", "--short", "HEAD"])
+        .current_dir(&tmp_dir)
         .output()
         .ok();
 
@@ -317,33 +328,22 @@ pub fn clone_bare_repo(url: &str, dest: &Path) -> Result<PathBuf> {
         .filter(|b| !b.is_empty())
         .unwrap_or_else(|| "main".to_string());
 
-    let worktree_path = dest.join(&default_branch);
-
-    let wt = Command::new("git")
-        .args([
-            "worktree",
-            "add",
-            &worktree_path.to_string_lossy(),
-            &default_branch,
-        ])
-        .current_dir(dest)
-        .output()
-        .context("Failed to create initial worktree")?;
-
-    if !wt.status.success() {
-        let stderr = String::from_utf8_lossy(&wt.stderr);
-        return Err(anyhow::anyhow!(
-            "Cloned successfully but failed to create worktree: {}",
-            stderr.trim()
-        ));
+    let worktree_path = dest.join(default_branch.replace('/', "-"));
+    if worktree_path.exists() {
+        let _ = fs::remove_dir_all(&tmp_dir);
+        anyhow::bail!(
+            "Destination already exists: {}",
+            worktree_path.to_string_lossy()
+        );
     }
+    fs::rename(&tmp_dir, &worktree_path).context("Failed to finalize cloned repository layout")?;
 
     Ok(worktree_path)
 }
 
 fn clone_with_git(source: &str, dest: &str) -> Result<()> {
     let clone = Command::new("git")
-        .args(["clone", "--bare", source, dest])
+        .args(["clone", source, dest])
         .output()
         .context("Failed to run git clone")?;
 
@@ -352,6 +352,20 @@ fn clone_with_git(source: &str, dest: &str) -> Result<()> {
     } else {
         let stderr = String::from_utf8_lossy(&clone.stderr);
         Err(anyhow::anyhow!("{}", stderr.trim()))
+    }
+}
+
+fn worktree_base_dir(repo_root: &Path) -> PathBuf {
+    // Non-bare repositories use <repo_root>/.git as common dir.
+    // In that layout we want branch folders beside repo_root (e.g. repo/main, repo/feature).
+    if repo_root.join(".git").exists() {
+        repo_root
+            .parent()
+            .map(PathBuf::from)
+            .unwrap_or_else(|| repo_root.to_path_buf())
+    } else {
+        // Bare repositories already use repo_root as the common directory.
+        repo_root.to_path_buf()
     }
 }
 
