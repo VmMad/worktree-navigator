@@ -47,6 +47,9 @@ fn main() -> Result<()> {
             Ok(wts) => {
                 app.worktrees = wts;
                 app.worktrees_loading = false;
+                if !app.worktrees.is_empty() {
+                    app.selected_index = app::COMMANDS.len();
+                }
             }
             Err(e) => {
                 app.worktrees_loading = false;
