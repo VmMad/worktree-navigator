@@ -453,3 +453,86 @@ pub fn find_repo_root(start: &Path) -> Option<PathBuf> {
         Some(git_dir)
     }
 }
+
+pub fn create_workspace_marker(dir: &Path) -> Result<()> {
+    let marker = dir.join(".wt-workspace");
+    fs::write(&marker, "").context("Failed to create .wt-workspace")?;
+    Ok(())
+}
+
+/// Walk up from `start` looking for a `.wt-workspace` marker file.
+pub fn find_workspace_root(start: &Path) -> Option<PathBuf> {
+    let mut current = start.to_path_buf();
+    loop {
+        if current.join(".wt-workspace").exists() {
+            return Some(current);
+        }
+        if !current.pop() {
+            return None;
+        }
+    }
+}
+
+/// Scan immediate subdirectories of `workspace_dir` for git repos and return
+/// them as `Worktree` entries. Each valid git subdir is treated as one worktree.
+pub fn list_workspace_worktrees(workspace_dir: &Path) -> Result<Vec<Worktree>> {
+    let cwd = std::env::var("WT_CWD")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| workspace_dir.to_path_buf());
+    let cwd = cwd.canonicalize().unwrap_or(cwd);
+
+    let mut worktrees = Vec::new();
+
+    let mut entries: Vec<_> = fs::read_dir(workspace_dir)
+        .context("Failed to read workspace directory")?
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().is_dir())
+        .collect();
+
+    entries.sort_by_key(|e| e.file_name());
+
+    for entry in entries {
+        let path = entry.path();
+
+        let branch_output = Command::new("git")
+            .args(["symbolic-ref", "--short", "HEAD"])
+            .current_dir(&path)
+            .output();
+
+        let Ok(branch_out) = branch_output else {
+            continue;
+        };
+        if !branch_out.status.success() {
+            continue;
+        }
+
+        let branch = String::from_utf8_lossy(&branch_out.stdout)
+            .trim()
+            .to_string();
+
+        let sha_output = Command::new("git")
+            .args(["rev-parse", "--short", "HEAD"])
+            .current_dir(&path)
+            .output();
+
+        let sha = sha_output
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            .unwrap_or_else(|| "unknown".to_string());
+
+        let path_str = path.to_string_lossy().to_string();
+        let is_main = worktrees.is_empty();
+        let is_current = path.canonicalize().unwrap_or(path.clone()) == cwd;
+
+        worktrees.push(Worktree {
+            path: path_str,
+            branch,
+            sha,
+            is_main,
+            is_current,
+        });
+    }
+
+    Ok(worktrees)
+}
