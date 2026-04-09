@@ -13,7 +13,7 @@ For a maintainer quick reference (setup, dev commands, workflow, and file map), 
 ```bash
 curl -fsSL -O https://github.com/VmMad/worktree-navigator/releases/latest/download/worktree-navigator-x86_64-linux-gnu \
   && chmod +x worktree-navigator-x86_64-linux-gnu \
-  && sudo cp worktree-navigator-x86_64-linux-gnu /usr/local/bin/wt
+  && sudo mv worktree-navigator-x86_64-linux-gnu /usr/local/bin/wt
 ```
 
 Then add the `wt()` shell wrapper so navigating to a worktree changes your shell's directory:
