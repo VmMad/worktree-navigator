@@ -4,6 +4,8 @@ Interactive UI for managing git worktrees on Ubuntu.
 
 `wt` opens full screen, works with keyboard and mouse, and lets you jump between worktrees without typing long git commands.
 
+For a maintainer quick reference (setup, dev commands, workflow, and file map), see [CONTRIBUTING.md](./CONTRIBUTING.md).
+
 ## Install
 
 ### From source
@@ -67,9 +69,11 @@ Navigation:
 
 If you run `wt` in a directory that is not a git repo, it opens a clone flow:
 
-1. Enter repo URL
+1. Enter repo source (`owner/repo`, SSH URL or HTTPS URL)
 2. Confirm or edit destination (defaults to `~/Projects/trees/<repo-name>`)
 3. Clone as bare repo, create initial worktree, and jump into it
+
+For `owner/repo`, `wt` uses `gh repo clone` when available, and falls back to `git clone --bare` using your preferred GitHub protocol (SSH/HTTPS)
 
 ## Requirements
 

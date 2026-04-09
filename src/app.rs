@@ -96,16 +96,26 @@ impl App {
 
     /// Returns the item index for the given screen row, if any.
     pub fn row_to_item(&self, row: u16) -> Option<usize> {
-        self.item_rows.iter().find(|(r, _)| *r == row).map(|(_, idx)| *idx)
+        self.item_rows
+            .iter()
+            .find(|(r, _)| *r == row)
+            .map(|(_, idx)| *idx)
     }
 
-    pub fn input_char(&mut self, c: char) {
-        let byte_pos = self
-            .input_buffer
+    fn input_byte_index(&self) -> usize {
+        self.input_buffer
             .char_indices()
             .nth(self.input_cursor)
             .map(|(i, _)| i)
-            .unwrap_or(self.input_buffer.len());
+            .unwrap_or(self.input_buffer.len())
+    }
+
+    fn input_len(&self) -> usize {
+        self.input_buffer.chars().count()
+    }
+
+    pub fn input_char(&mut self, c: char) {
+        let byte_pos = self.input_byte_index();
         self.input_buffer.insert(byte_pos, c);
         self.input_cursor += 1;
     }
@@ -113,14 +123,32 @@ impl App {
     pub fn input_backspace(&mut self) {
         if self.input_cursor > 0 {
             self.input_cursor -= 1;
-            let byte_pos = self
-                .input_buffer
-                .char_indices()
-                .nth(self.input_cursor)
-                .map(|(i, _)| i)
-                .unwrap_or(self.input_buffer.len());
+            let byte_pos = self.input_byte_index();
             self.input_buffer.remove(byte_pos);
         }
+    }
+
+    pub fn input_delete(&mut self) {
+        if self.input_cursor < self.input_len() {
+            let byte_pos = self.input_byte_index();
+            self.input_buffer.remove(byte_pos);
+        }
+    }
+
+    pub fn input_left(&mut self) {
+        self.input_cursor = self.input_cursor.saturating_sub(1);
+    }
+
+    pub fn input_right(&mut self) {
+        self.input_cursor = (self.input_cursor + 1).min(self.input_len());
+    }
+
+    pub fn input_home(&mut self) {
+        self.input_cursor = 0;
+    }
+
+    pub fn input_end(&mut self) {
+        self.input_cursor = self.input_len();
     }
 
     pub fn clear_input(&mut self) {
