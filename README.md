@@ -30,7 +30,12 @@ cargo build --release
 sudo cp target/release/worktree-navigator /usr/local/bin/wt
 ```
 
-Then run the same one-liner above to add the `wt()` wrapper.
+Then add the `wt()` shell wrapper so navigating to a worktree changes your shell's directory:
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/VmMad/worktree-navigator/main/scripts/zsh-install.sh) \
+  && source ~/.zshrc
+```
 
 ## Usage
 
