@@ -90,11 +90,20 @@ jobs:
             |------|--------|
             | `worktree-navigator-x86_64-linux-gnu` | Linux x86_64 (glibc, most Ubuntu/Debian systems) |
 
-            After installing, add the `wt()` shell wrapper to your `~/.zshrc` using the following command:
+            After installing, add the `wt()` shell wrapper by running the installer that matches your shell:
+
+            **zsh**
 
             ```zsh
             bash <(curl -fsSL https://raw.githubusercontent.com/VmMad/worktree-navigator/main/scripts/zsh-install.sh) \
               && source ~/.zshrc
+            ```
+
+            **bash**
+
+            ```bash
+            bash <(curl -fsSL https://raw.githubusercontent.com/VmMad/worktree-navigator/main/scripts/bash-install.sh) \
+              && source ~/.bashrc
             ```
           files: artifacts/**/*
           fail_on_unmatched_files: true

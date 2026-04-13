@@ -13,11 +13,20 @@ curl -fsSL https://github.com/VmMad/worktree-navigator/releases/latest/download/
   -o ~/.local/bin/wt && chmod +x ~/.local/bin/wt
 ```
 
-Then add the `wt()` shell wrapper so navigating to a worktree changes your shell's directory:
+Then add the `wt()` shell wrapper so navigating to a worktree changes your shell's directory. Pick the installer that matches your shell:
+
+**zsh**
 
 ```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/VmMad/worktree-navigator/main/scripts/zsh-install.sh) \
   && source ~/.zshrc
+```
+
+**bash**
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/VmMad/worktree-navigator/main/scripts/bash-install.sh) \
+  && source ~/.bashrc
 ```
 
 ### From source
@@ -26,11 +35,20 @@ bash <(curl -fsSL https://raw.githubusercontent.com/VmMad/worktree-navigator/mai
 cargo build --release && cp target/release/worktree-navigator ~/.local/bin/wt
 ```
 
-Then add the `wt()` shell wrapper so navigating to a worktree changes your shell's directory:
+Then add the `wt()` shell wrapper so navigating to a worktree changes your shell's directory. Pick the installer that matches your shell:
+
+**zsh**
 
 ```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/VmMad/worktree-navigator/main/scripts/zsh-install.sh) \
   && source ~/.zshrc
+```
+
+**bash**
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/VmMad/worktree-navigator/main/scripts/bash-install.sh) \
+  && source ~/.bashrc
 ```
 
 ## Usage
@@ -71,4 +89,4 @@ For `owner/repo`, `wt` uses `gh repo clone` when available, and falls back to `g
 - Linux (Ubuntu tested)
 - `git`
 - `gh` for PR sync
-- `zsh` if you want the `wt` shell wrapper
+- `zsh` or `bash` if you want the `wt` shell wrapper
