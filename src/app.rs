@@ -121,6 +121,12 @@ impl App {
         self.input_cursor += 1;
     }
 
+    pub fn input_str(&mut self, s: &str) {
+        let byte_pos = self.input_byte_index();
+        self.input_buffer.insert_str(byte_pos, s);
+        self.input_cursor += s.chars().count();
+    }
+
     pub fn input_backspace(&mut self) {
         if self.input_cursor > 0 {
             self.input_cursor -= 1;

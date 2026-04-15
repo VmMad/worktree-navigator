@@ -10,8 +10,8 @@ use std::time::Duration;
 use anyhow::Result;
 use crossterm::{
     event::{
-        self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyModifiers, MouseButton,
-        MouseEventKind,
+        self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+        Event, KeyCode, KeyModifiers, MouseButton, MouseEventKind,
     },
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
@@ -46,9 +46,15 @@ fn main() -> Result<()> {
 
     enable_raw_mode()?;
     let mut stderr = stderr();
-    execute!(stderr, EnterAlternateScreen, EnableMouseCapture)?;
+    execute!(
+        stderr,
+        EnterAlternateScreen,
+        EnableMouseCapture,
+        EnableBracketedPaste
+    )?;
     let backend = CrosstermBackend::new(stderr);
     let mut terminal = Terminal::new(backend)?;
+    let mut mouse_capture_enabled = true;
 
     let mut app = App::new(repo_root.clone());
 
@@ -88,6 +94,16 @@ fn main() -> Result<()> {
     }
 
     loop {
+        let wants_mouse_capture = app.active_action != ActiveAction::CloneRepo;
+        if wants_mouse_capture != mouse_capture_enabled {
+            if wants_mouse_capture {
+                execute!(terminal.backend_mut(), EnableMouseCapture)?;
+            } else {
+                execute!(terminal.backend_mut(), DisableMouseCapture)?;
+            }
+            mouse_capture_enabled = wants_mouse_capture;
+        }
+
         terminal.draw(|f| ui::draw(f, &mut app))?;
 
         // Execute pending sync after the loading frame has been rendered.
@@ -144,6 +160,7 @@ fn main() -> Result<()> {
         if event::poll(Duration::from_millis(100))? {
             match event::read()? {
                 Event::Key(key) => handle_key(&mut app, key.code, key.modifiers),
+                Event::Paste(text) => handle_paste(&mut app, &text),
                 Event::Mouse(m) => handle_mouse(&mut app, m.kind, m.row),
                 Event::Resize(_, _) => {}
                 _ => {}
@@ -157,6 +174,7 @@ fn main() -> Result<()> {
 
     execute!(
         terminal.backend_mut(),
+        DisableBracketedPaste,
         DisableMouseCapture,
         LeaveAlternateScreen
     )?;
@@ -584,4 +602,17 @@ fn handle_clone_key(app: &mut App, code: KeyCode) {
         KeyCode::Char(c) => app.input_char(c),
         _ => {}
     }
+}
+
+fn handle_paste(app: &mut App, text: &str) {
+    if app.active_action != ActiveAction::CloneRepo || app.clone_loading {
+        return;
+    }
+
+    let text = text.trim_end_matches(['\r', '\n']);
+    if text.is_empty() {
+        return;
+    }
+
+    app.input_str(text);
 }
