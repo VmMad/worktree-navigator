@@ -904,7 +904,7 @@ fn draw_clone_overlay(f: &mut Frame, app: &App, area: Rect) {
     }
 
     if let Some(err) = &app.clone_error {
-        let short: String = err.lines().next().unwrap_or(err).chars().take(80).collect();
+        let short = summarize_clone_error(err);
         f.render_widget(
             Paragraph::new(Span::styled(
                 format!("✗ {short}"),
@@ -913,4 +913,36 @@ fn draw_clone_overlay(f: &mut Frame, app: &App, area: Rect) {
             rows[6],
         );
     }
+}
+
+fn summarize_clone_error(err: &str) -> String {
+    let lines: Vec<&str> = err
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect();
+    if lines.is_empty() {
+        return err.chars().take(80).collect();
+    }
+
+    let selected = lines
+        .iter()
+        .rev()
+        .copied()
+        .find(|line| {
+            let lower = line.to_ascii_lowercase();
+            lower.starts_with("fatal:")
+                || lower.starts_with("error:")
+                || lower.contains("permission denied")
+                || lower.contains("not found")
+        })
+        .or_else(|| {
+            lines
+                .iter()
+                .copied()
+                .find(|line| !line.starts_with("Cloning into "))
+        })
+        .unwrap_or(lines[0]);
+
+    selected.chars().take(80).collect()
 }

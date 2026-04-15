@@ -51,6 +51,38 @@ bash <(curl -fsSL https://raw.githubusercontent.com/VmMad/worktree-navigator/mai
   && source ~/.bashrc
 ```
 
+### Update existing install
+
+If you already have the `wt` binary installed and the `wt()` wrapper in `~/.zshrc`, you only need to replace the binary.
+
+From the latest GitHub release:
+
+```bash
+curl -fsSL https://github.com/VmMad/worktree-navigator/releases/latest/download/worktree-navigator-x86_64-linux-gnu \
+  -o ~/.local/bin/wt && chmod +x ~/.local/bin/wt
+```
+
+From source:
+
+```bash
+cargo build --release && cp target/release/worktree-navigator ~/.local/bin/wt
+```
+
+No `~/.zshrc` changes are needed if `wt()` is already present.
+
+You can also run:
+
+```bash
+wt --update
+```
+
+When a newer release is available, `wt` now checks on startup and prompts:
+
+- `y` updates immediately
+- `n` disables future startup prompts and shows a reminder to use `wt --update`
+
+`wt --update` selects the release asset matching your current binary target (for example `x86_64-linux-gnu` or `aarch64-linux-musl`) and remembers that asset for future updates.
+
 ## Usage
 
 Run inside a repo or inside a worktree:
