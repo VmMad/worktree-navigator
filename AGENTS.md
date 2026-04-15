@@ -7,6 +7,7 @@ Repository-specific guidance for AI coding agents working in `worktree-navigator
 - Keep changes focused and avoid unrelated refactors.
 - Do not alter runtime behavior unless explicitly requested.
 - Prefer docs/config updates when the request is documentation-only.
+- Keep README updates selective: document important user-facing workflows or behavior changes, not every individual feature or implementation detail.
 
 ## Build, lint, test
 

@@ -5,6 +5,7 @@ mod ui;
 
 use std::io::stderr;
 use std::path::PathBuf;
+use std::sync::mpsc::TryRecvError;
 use std::time::Duration;
 
 use anyhow::Result;
@@ -19,7 +20,7 @@ use crossterm::{
 use ratatui::{Terminal, backend::CrosstermBackend};
 
 use app::App;
-use types::ActiveAction;
+use types::{ActiveAction, CloneEvent};
 
 fn main() -> Result<()> {
     let cwd = std::env::var("WT_CWD")
@@ -88,6 +89,7 @@ fn main() -> Result<()> {
     }
 
     loop {
+        poll_clone_updates(&mut app);
         terminal.draw(|f| ui::draw(f, &mut app))?;
 
         // Execute pending sync after the loading frame has been rendered.
@@ -119,24 +121,6 @@ fn main() -> Result<()> {
                 Err(e) => {
                     app.sync_pr_loading = false;
                     app.overlay_error = Some(format!("Failed to sync PR #{pr_number}: {e}"));
-                }
-            }
-        }
-
-        // Execute pending clone after the loading frame has been rendered.
-        if app.clone_pending {
-            app.clone_pending = false;
-            let url = app.clone_url.clone();
-            let dest = std::path::PathBuf::from(app.input_buffer.trim());
-            match git::clone_repo_with_layout(&url, &dest) {
-                Ok(worktree_path) => {
-                    app.clone_loading = false;
-                    app.exit_path = Some(worktree_path.to_string_lossy().into_owned());
-                    app.should_quit = true;
-                }
-                Err(e) => {
-                    app.clone_loading = false;
-                    app.clone_error = Some(e.to_string());
                 }
             }
         }
@@ -578,10 +562,67 @@ fn handle_clone_key(app: &mut App, code: KeyCode) {
                 app.clone_error = None;
             } else {
                 app.clone_loading = true;
-                app.clone_pending = true;
+                app.clone_error = None;
+                app.reset_clone_progress();
+                app.clone_receiver = Some(git::start_clone_repo_with_layout(
+                    app.clone_url.clone(),
+                    PathBuf::from(input),
+                ));
             }
         }
         KeyCode::Char(c) => app.input_char(c),
         _ => {}
+    }
+}
+
+fn poll_clone_updates(app: &mut App) {
+    let mut events = Vec::new();
+    let mut disconnected = false;
+    let mut clear_receiver = false;
+
+    if let Some(receiver) = app.clone_receiver.as_ref() {
+        loop {
+            match receiver.try_recv() {
+                Ok(event) => {
+                    let is_terminal =
+                        matches!(event, CloneEvent::Finished(_) | CloneEvent::Error(_));
+                    events.push(event);
+                    if is_terminal {
+                        clear_receiver = true;
+                        break;
+                    }
+                }
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => {
+                    disconnected = true;
+                    clear_receiver = true;
+                    break;
+                }
+            }
+        }
+    }
+
+    for event in events {
+        match event {
+            CloneEvent::Progress(progress) => app.update_clone_progress(progress),
+            CloneEvent::Finished(worktree_path) => {
+                app.clone_loading = false;
+                app.exit_path = Some(worktree_path.to_string_lossy().into_owned());
+                app.should_quit = true;
+            }
+            CloneEvent::Error(err) => {
+                app.clone_loading = false;
+                app.clone_error = Some(err);
+            }
+        }
+    }
+
+    if disconnected && app.clone_loading {
+        app.clone_loading = false;
+        app.clone_error = Some("Clone process ended unexpectedly.".to_string());
+    }
+
+    if clear_receiver {
+        app.clone_receiver = None;
     }
 }

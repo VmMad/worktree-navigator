@@ -3,7 +3,7 @@ use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Margin, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, Paragraph, block::Title},
+    widgets::{Block, Borders, Clear, Gauge, Paragraph, block::Title},
 };
 
 use crate::{
@@ -773,7 +773,7 @@ fn draw_delete_overlay(f: &mut Frame, app: &App, area: Rect) {
 fn draw_clone_overlay(f: &mut Frame, app: &App, area: Rect) {
     let has_err = app.clone_error.is_some();
     let height = if app.clone_loading {
-        5
+        8
     } else if has_err {
         11
     } else {
@@ -794,20 +794,42 @@ fn draw_clone_overlay(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(block, popup);
 
     if app.clone_loading {
+        let rows = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(1),
+                Constraint::Length(1),
+                Constraint::Length(1),
+                Constraint::Length(1),
+            ])
+            .split(inner);
+        let percent = (app.clone_progress.ratio * 100.0).round() as u16;
+
         f.render_widget(
-            Paragraph::new(vec![
-                Line::from(Span::styled(
-                    "⟳  Cloning repository…",
-                    Style::default()
-                        .fg(Color::Green)
-                        .add_modifier(Modifier::BOLD),
-                )),
-                Line::from(Span::styled(
-                    "   This may take a moment.",
-                    Style::default().fg(Color::DarkGray),
-                )),
-            ]),
-            inner,
+            Paragraph::new(Span::styled(
+                format!("⟳  {}", app.clone_progress.phase),
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD),
+            )),
+            rows[0],
+        );
+        f.render_widget(
+            Gauge::default()
+                .ratio(app.clone_progress.ratio)
+                .label(format!("{percent}%"))
+                .gauge_style(Style::default().fg(Color::Green)),
+            rows[1],
+        );
+        f.render_widget(
+            Paragraph::new(Span::styled(
+                app.clone_progress
+                    .detail
+                    .as_deref()
+                    .unwrap_or("Cloning repository…"),
+                Style::default().fg(Color::DarkGray),
+            )),
+            rows[3],
         );
         return;
     }
