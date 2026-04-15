@@ -2,6 +2,7 @@ mod app;
 mod git;
 mod types;
 mod ui;
+mod update;
 
 use std::io::stderr;
 use std::path::PathBuf;
@@ -22,11 +23,25 @@ use app::App;
 use types::ActiveAction;
 
 fn main() -> Result<()> {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+
+    if args.iter().any(|a| a == "--update") {
+        update::run_manual_update()?;
+        return Ok(());
+    }
+
+    if !args.iter().any(|a| a == "--mark-tree") {
+        match update::maybe_prompt_for_update()? {
+            update::StartupUpdateAction::Continue => {}
+            update::StartupUpdateAction::ExitAfterUpdateFlow => return Ok(()),
+        }
+    }
+
     let cwd = std::env::var("WT_CWD")
         .map(PathBuf::from)
         .unwrap_or_else(|_| std::env::current_dir().expect("no cwd"));
 
-    let mark_tree = std::env::args().any(|a| a == "--mark-tree");
+    let mark_tree = args.iter().any(|a| a == "--mark-tree");
 
     if mark_tree {
         git::create_workspace_marker(&cwd)?;
