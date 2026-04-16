@@ -1,10 +1,13 @@
 use anyhow::{Context, Result};
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::sync::mpsc::{self, Receiver};
+use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::types::{SyncResult, SyncStatus, Worktree};
+use crate::types::{CloneEvent, CloneProgress, SyncResult, SyncStatus, Worktree};
 
 pub fn list_worktrees(repo_root: &Path) -> Result<Vec<Worktree>> {
     let output = Command::new("git")
@@ -276,10 +279,42 @@ pub fn dest_from_url(source: &str, cwd: &Path) -> String {
     cwd.join(name).to_string_lossy().into_owned()
 }
 
-/// Clone a repo and place the default branch checkout under `<dest>/<branch>`.
-/// Returns the path to the checked-out default branch directory.
-pub fn clone_repo_with_layout(url: &str, dest: &Path) -> Result<PathBuf> {
+pub fn start_clone_repo_with_layout(url: String, dest: PathBuf) -> Receiver<CloneEvent> {
+    let (tx, rx) = mpsc::channel();
+
+    thread::spawn(move || {
+        let result = clone_repo_with_layout_with_progress(&url, &dest, |progress| {
+            let _ = tx.send(CloneEvent::Progress(progress));
+        });
+
+        match result {
+            Ok(worktree_path) => {
+                let _ = tx.send(CloneEvent::Progress(CloneProgress::new(
+                    "Clone complete",
+                    Some("Opening default branch worktree…".to_string()),
+                    1.0,
+                )));
+                let _ = tx.send(CloneEvent::Finished(worktree_path));
+            }
+            Err(err) => {
+                let _ = tx.send(CloneEvent::Error(err.to_string()));
+            }
+        }
+    });
+
+    rx
+}
+
+fn clone_repo_with_layout_with_progress<F>(url: &str, dest: &Path, mut notify: F) -> Result<PathBuf>
+where
+    F: FnMut(CloneProgress),
+{
     let source = url.trim();
+    notify(CloneProgress::new(
+        "Preparing clone",
+        Some(format!("{source} → {}", dest.display())),
+        0.01,
+    ));
     fs::create_dir_all(dest).context("Failed to create destination directory")?;
     let tmp_dir = dest.join(format!(
         ".wt-clone-tmp-{}-{}",
@@ -292,27 +327,32 @@ pub fn clone_repo_with_layout(url: &str, dest: &Path) -> Result<PathBuf> {
     let tmp_str = tmp_dir.to_string_lossy().to_string();
 
     if is_github_owner_repo(source) {
-        let mut cloned = false;
-
         if gh_available() {
-            let gh_clone = Command::new("gh")
-                .args(["repo", "clone", source, &tmp_str])
-                .output()
-                .context("Failed to run gh repo clone")?;
-
-            if gh_clone.status.success() {
-                cloned = true;
+            match clone_with_gh_with_progress(source, &tmp_str, &mut notify) {
+                Ok(()) => {}
+                Err(_) => {
+                    if tmp_dir.exists() {
+                        let _ = fs::remove_dir_all(&tmp_dir);
+                    }
+                    let protocol = preferred_github_protocol();
+                    let repo_url = github_url_from_slug(source, &protocol);
+                    clone_with_git_with_progress(&repo_url, &tmp_str, &mut notify)?;
+                }
             }
-        }
-
-        if !cloned {
+        } else {
             let protocol = preferred_github_protocol();
             let repo_url = github_url_from_slug(source, &protocol);
-            clone_with_git(&repo_url, &tmp_str)?;
+            clone_with_git_with_progress(&repo_url, &tmp_str, &mut notify)?;
         }
     } else {
-        clone_with_git(source, &tmp_str)?;
+        clone_with_git_with_progress(source, &tmp_str, &mut notify)?;
     }
+
+    notify(CloneProgress::new(
+        "Finalizing workspace",
+        Some("Detecting default branch…".to_string()),
+        0.97,
+    ));
 
     // Detect the default branch from the cloned checkout.
     let head = Command::new("git")
@@ -340,24 +380,209 @@ pub fn clone_repo_with_layout(url: &str, dest: &Path) -> Result<PathBuf> {
             worktree_path.to_string_lossy()
         );
     }
+    notify(CloneProgress::new(
+        "Finalizing workspace",
+        Some(format!("Creating {}", worktree_path.display())),
+        0.99,
+    ));
     fs::rename(&tmp_dir, &worktree_path).context("Failed to finalize cloned repository layout")?;
     fs::write(dest.join(".wt-workspace"), "").context("Failed to create .wt-workspace")?;
 
     Ok(worktree_path)
 }
 
-fn clone_with_git(source: &str, dest: &str) -> Result<()> {
-    let clone = Command::new("git")
-        .args(["clone", source, dest])
-        .output()
-        .context("Failed to run git clone")?;
+fn clone_with_gh_with_progress<F>(source: &str, dest: &str, notify: &mut F) -> Result<()>
+where
+    F: FnMut(CloneProgress),
+{
+    clone_with_command_with_progress(
+        Command::new("gh"),
+        &["repo", "clone", source, dest],
+        "Failed to run gh repo clone",
+        "gh repo clone failed",
+        notify,
+    )
+}
 
-    if clone.status.success() {
+fn clone_with_git_with_progress<F>(source: &str, dest: &str, notify: &mut F) -> Result<()>
+where
+    F: FnMut(CloneProgress),
+{
+    clone_with_command_with_progress(
+        Command::new("git"),
+        &["clone", "--progress", source, dest],
+        "Failed to run git clone",
+        "git clone failed",
+        notify,
+    )
+}
+
+fn clone_with_command_with_progress<F>(
+    mut command: Command,
+    args: &[&str],
+    spawn_context: &'static str,
+    fallback_error: &'static str,
+    notify: &mut F,
+) -> Result<()>
+where
+    F: FnMut(CloneProgress),
+{
+    let mut child = command
+        .args(args)
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .context(spawn_context)?;
+
+    let mut stderr_lines = Vec::new();
+
+    if let Some(mut stderr) = child.stderr.take() {
+        stream_clone_output(&mut stderr, |line| {
+            if line.is_empty() {
+                return;
+            }
+
+            stderr_lines.push(line.to_string());
+
+            if let Some(progress) = parse_clone_progress(line) {
+                notify(progress);
+            }
+        })
+        .context("Failed to read git clone progress")?;
+    }
+
+    let status = child.wait().context("Failed to wait for git clone")?;
+    if status.success() {
         Ok(())
     } else {
-        let stderr = String::from_utf8_lossy(&clone.stderr);
-        Err(anyhow::anyhow!("{}", stderr.trim()))
+        let message = stderr_lines
+            .into_iter()
+            .rev()
+            .find(|line| !looks_like_clone_progress(line))
+            .unwrap_or_else(|| fallback_error.to_string());
+        Err(anyhow::anyhow!("{message}"))
     }
+}
+
+fn stream_clone_output<R, F>(reader: &mut R, mut on_line: F) -> std::io::Result<()>
+where
+    R: Read,
+    F: FnMut(&str),
+{
+    let mut current = Vec::new();
+    let mut byte = [0_u8; 1];
+
+    loop {
+        match reader.read(&mut byte)? {
+            0 => break,
+            _ if matches!(byte[0], b'\r' | b'\n') => {
+                flush_clone_output(&mut current, &mut on_line);
+            }
+            _ => current.push(byte[0]),
+        }
+    }
+
+    flush_clone_output(&mut current, &mut on_line);
+    Ok(())
+}
+
+fn flush_clone_output<F>(buffer: &mut Vec<u8>, on_line: &mut F)
+where
+    F: FnMut(&str),
+{
+    if buffer.is_empty() {
+        return;
+    }
+
+    let line = String::from_utf8_lossy(buffer);
+    let trimmed = line.trim();
+    if !trimmed.is_empty() {
+        on_line(trimmed);
+    }
+    buffer.clear();
+}
+
+fn parse_clone_progress(line: &str) -> Option<CloneProgress> {
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let normalized = trimmed
+        .trim_start_matches("remote:")
+        .trim_start_matches(' ')
+        .trim();
+
+    if normalized.is_empty() {
+        return None;
+    }
+
+    if normalized.to_ascii_lowercase().starts_with("cloning into") {
+        return Some(CloneProgress::new(
+            "Starting clone",
+            Some(normalized.to_string()),
+            0.02,
+        ));
+    }
+
+    let (phase, start, span) = clone_progress_stage(normalized)?;
+    let ratio = start + span * extract_percent(normalized).unwrap_or(0.0);
+
+    Some(CloneProgress::new(
+        phase,
+        Some(normalized.to_string()),
+        ratio,
+    ))
+}
+
+fn clone_progress_stage(line: &str) -> Option<(&'static str, f64, f64)> {
+    let lower = line.to_ascii_lowercase();
+
+    if lower.starts_with("enumerating objects") || lower.starts_with("counting objects") {
+        Some(("Counting objects", 0.02, 0.08))
+    } else if lower.starts_with("compressing objects") {
+        Some(("Compressing objects", 0.10, 0.10))
+    } else if lower.starts_with("receiving objects") {
+        Some(("Receiving objects", 0.20, 0.65))
+    } else if lower.starts_with("resolving deltas") {
+        Some(("Resolving deltas", 0.85, 0.10))
+    } else if lower.starts_with("updating files") || lower.starts_with("checking out files") {
+        Some(("Checking out files", 0.95, 0.04))
+    } else {
+        None
+    }
+}
+
+fn extract_percent(line: &str) -> Option<f64> {
+    let percent_idx = line.find('%')?;
+    let digits_reversed: String = line[..percent_idx]
+        .chars()
+        .rev()
+        .skip_while(|c| c.is_ascii_whitespace())
+        .take_while(|c| c.is_ascii_digit())
+        .collect();
+
+    if digits_reversed.is_empty() {
+        return None;
+    }
+
+    let digits: String = digits_reversed.chars().rev().collect();
+    let percent: f64 = digits.parse().ok()?;
+    Some((percent / 100.0).clamp(0.0, 1.0))
+}
+
+fn looks_like_clone_progress(line: &str) -> bool {
+    let trimmed = line.trim();
+    trimmed.to_ascii_lowercase().starts_with("cloning into")
+        || clone_progress_stage(trimmed.trim_start_matches("remote:").trim()).is_some()
+}
+
+fn gh_available() -> bool {
+    Command::new("gh")
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
 }
 
 /// Returns a path suitable as `current_dir` for git commands.
@@ -427,14 +652,6 @@ fn is_github_owner_repo(input: &str) -> bool {
     let repo = parts.next().unwrap_or("");
 
     !owner.is_empty() && !repo.is_empty() && parts.next().is_none()
-}
-
-fn gh_available() -> bool {
-    Command::new("gh")
-        .arg("--version")
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
 }
 
 fn preferred_github_protocol() -> String {
@@ -577,4 +794,56 @@ pub fn list_workspace_worktrees(workspace_dir: &Path) -> Result<Vec<Worktree>> {
     }
 
     Ok(worktrees)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{looks_like_clone_progress, parse_clone_progress};
+
+    #[test]
+    fn parses_receiving_objects_progress() {
+        let progress =
+            parse_clone_progress("Receiving objects:  42% (42/100), 1.23 MiB | 1.23 MiB/s")
+                .expect("expected progress line to parse");
+
+        assert_eq!(progress.phase, "Receiving objects");
+        assert_eq!(
+            progress.detail.as_deref(),
+            Some("Receiving objects:  42% (42/100), 1.23 MiB | 1.23 MiB/s")
+        );
+        assert!((progress.ratio - 0.473).abs() < 0.001);
+    }
+
+    #[test]
+    fn parses_remote_counting_progress() {
+        let progress = parse_clone_progress("remote: Counting objects: 100% (24/24), done.")
+            .expect("expected progress line to parse");
+
+        assert_eq!(progress.phase, "Counting objects");
+        assert_eq!(
+            progress.detail.as_deref(),
+            Some("Counting objects: 100% (24/24), done.")
+        );
+        assert!((progress.ratio - 0.10).abs() < 0.001);
+    }
+
+    #[test]
+    fn leaves_error_output_unclassified() {
+        let line = "fatal: repository 'git@github.com:owner/missing.git' not found";
+        assert!(parse_clone_progress(line).is_none());
+        assert!(!looks_like_clone_progress(line));
+    }
+
+    #[test]
+    fn parses_gh_clone_prelude() {
+        let progress = parse_clone_progress("Cloning into 'tea-website'...")
+            .expect("expected progress line to parse");
+
+        assert_eq!(progress.phase, "Starting clone");
+        assert_eq!(
+            progress.detail.as_deref(),
+            Some("Cloning into 'tea-website'...")
+        );
+        assert!((progress.ratio - 0.02).abs() < 0.001);
+    }
 }

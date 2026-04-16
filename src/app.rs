@@ -1,6 +1,7 @@
 use std::path::PathBuf;
+use std::sync::mpsc::Receiver;
 
-use crate::types::{ActiveAction, SyncResult, Worktree};
+use crate::types::{ActiveAction, CloneEvent, CloneProgress, SyncResult, Worktree};
 
 pub const COMMANDS: &[(&str, &str)] = &[
     ("New Branch", "n"),
@@ -28,7 +29,8 @@ pub struct App {
     pub clone_step: u8,
     pub clone_url: String,
     pub clone_loading: bool,
-    pub clone_pending: bool,
+    pub clone_receiver: Option<Receiver<CloneEvent>>,
+    pub clone_progress: CloneProgress,
     pub clone_error: Option<String>,
 
     pub selected_index: usize,
@@ -68,7 +70,8 @@ impl App {
             clone_step: 0,
             clone_url: String::new(),
             clone_loading: false,
-            clone_pending: false,
+            clone_receiver: None,
+            clone_progress: CloneProgress::default(),
             clone_error: None,
             selected_index: 0,
             active_action: ActiveAction::None,
@@ -161,5 +164,15 @@ impl App {
     pub fn clear_input(&mut self) {
         self.input_buffer.clear();
         self.input_cursor = 0;
+    }
+
+    pub fn reset_clone_progress(&mut self) {
+        self.clone_progress = CloneProgress::default();
+    }
+
+    pub fn update_clone_progress(&mut self, progress: CloneProgress) {
+        self.clone_progress.ratio = self.clone_progress.ratio.max(progress.ratio);
+        self.clone_progress.phase = progress.phase;
+        self.clone_progress.detail = progress.detail;
     }
 }
