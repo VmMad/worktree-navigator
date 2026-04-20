@@ -8,30 +8,38 @@ use ratatui::{
 
 use crate::{
     app::{App, COMMANDS},
-    types::{ActiveAction, SyncStatus},
+    types::{ActiveAction, CopySecretsPhase, SyncStatus},
 };
 
 pub fn draw(f: &mut Frame, app: &mut App) {
     app.item_rows.clear();
 
     let area = f.area();
+    app.frame_width = area.width;
+    app.frame_height = area.height;
     draw_panel(f, app, area);
 
     let show_sync_overlay = app.active_action == ActiveAction::SyncTrees
         && (app.sync_loading || !app.sync_results.is_empty());
     let show_delete_overlay = app.active_action == ActiveAction::Delete && app.delete_confirming;
+    let show_copy_overlay = app.active_action == ActiveAction::CopySecrets
+        && app.copy_secrets_phase == CopySecretsPhase::ConfirmOverwrite;
 
     match app.active_action {
         ActiveAction::NewBranch => draw_new_branch_overlay(f, app, area),
         ActiveAction::SyncPr => draw_sync_pr_overlay(f, app, area),
         ActiveAction::SyncTrees if show_sync_overlay => draw_sync_overlay(f, app, area),
         ActiveAction::Delete if show_delete_overlay => draw_delete_overlay(f, app, area),
+        ActiveAction::CopySecrets if show_copy_overlay => draw_copy_secrets_overlay(f, app, area),
         ActiveAction::CloneRepo => draw_clone_overlay(f, app, area),
         _ => {}
     }
 
     // Error bar at the bottom (for errors after overlays close)
-    if app.active_action == ActiveAction::None {
+    let show_error_bar = app.active_action == ActiveAction::None
+        || (app.active_action == ActiveAction::CopySecrets
+            && app.copy_secrets_phase != CopySecretsPhase::ConfirmOverwrite);
+    if show_error_bar {
         if let Some(err) = &app.overlay_error {
             let err_area = Rect {
                 x: area.x + 2,
@@ -63,7 +71,10 @@ fn draw_panel(f: &mut Frame, app: &mut App, area: Rect) {
         && !app.sync_loading
         && app.sync_results.is_empty();
     let delete_select = app.active_action == ActiveAction::Delete && !app.delete_confirming;
-    let is_active = app.active_action == ActiveAction::None || sync_select || delete_select;
+    let copy_select = app.active_action == ActiveAction::CopySecrets
+        && app.copy_secrets_phase != CopySecretsPhase::ConfirmOverwrite;
+    let is_active =
+        app.active_action == ActiveAction::None || sync_select || delete_select || copy_select;
     let border_color = if is_active {
         Color::Cyan
     } else {
@@ -107,7 +118,9 @@ fn draw_commands(f: &mut Frame, app: &mut App, area: Rect) {
         && !app.sync_loading
         && app.sync_results.is_empty();
     let delete_select = app.active_action == ActiveAction::Delete && !app.delete_confirming;
-    let inline_select = sync_select || delete_select;
+    let copy_select = app.active_action == ActiveAction::CopySecrets
+        && app.copy_secrets_phase != CopySecretsPhase::ConfirmOverwrite;
+    let inline_select = sync_select || delete_select || copy_select;
 
     let header_style = if inline_select {
         Style::default().fg(Color::DarkGray)
@@ -133,10 +146,13 @@ fn draw_commands(f: &mut Frame, app: &mut App, area: Rect) {
 
         let is_sync_cmd = *label == "Sync Trees";
         let is_delete_cmd = *label == "Delete Worktree";
+        let is_copy_cmd = *label == "Copy Secrets";
         let focused_cmd = if sync_select {
             is_sync_cmd
         } else if delete_select {
             is_delete_cmd
+        } else if copy_select {
+            is_copy_cmd
         } else {
             false
         };
@@ -145,6 +161,8 @@ fn draw_commands(f: &mut Frame, app: &mut App, area: Rect) {
             if focused_cmd {
                 // Active inline-select indicator: underline the focused command.
                 let color = if sync_select {
+                    Color::Green
+                } else if copy_select {
                     Color::Green
                 } else {
                     Color::Red
@@ -210,6 +228,8 @@ fn draw_worktrees(f: &mut Frame, app: &mut App, area: Rect) {
         && !app.sync_loading
         && app.sync_results.is_empty();
     let delete_select = app.active_action == ActiveAction::Delete && !app.delete_confirming;
+    let copy_select = app.active_action == ActiveAction::CopySecrets
+        && app.copy_secrets_phase != CopySecretsPhase::ConfirmOverwrite;
 
     let header_style = Style::default()
         .fg(Color::Yellow)
@@ -285,6 +305,19 @@ fn draw_worktrees(f: &mut Frame, app: &mut App, area: Rect) {
 
     let selected_wt_idx = if sync_select {
         Some(app.sync_selected_idx)
+    } else if copy_select {
+        Some(
+            if app.copy_secrets_phase == CopySecretsPhase::SelectSource {
+                app.copy_secrets_source_idx.unwrap_or_else(|| {
+                    app.worktrees
+                        .iter()
+                        .position(|wt| wt.is_current)
+                        .unwrap_or(0)
+                })
+            } else {
+                app.copy_secrets_target_idx
+            },
+        )
     } else if delete_select {
         selected_delete_wt_idx
     } else if app.active_action == ActiveAction::None && app.selected_index >= cmd_len {
@@ -316,25 +349,45 @@ fn draw_worktrees(f: &mut Frame, app: &mut App, area: Rect) {
 
         let selected = if sync_select {
             app.sync_selected_idx == i
+        } else if copy_select {
+            if app.copy_secrets_phase == CopySecretsPhase::SelectSource {
+                app.copy_secrets_source_idx.unwrap_or_else(|| {
+                    app.worktrees
+                        .iter()
+                        .position(|wt| wt.is_current)
+                        .unwrap_or(0)
+                }) == i
+            } else {
+                app.copy_secrets_target_idx == i
+            }
         } else if delete_select {
             selected_delete_wt_idx == Some(i)
         } else {
             app.active_action == ActiveAction::None && app.selected_index == idx
         };
 
-        let can_hover = app.active_action == ActiveAction::None || sync_select || delete_select;
+        let can_hover =
+            app.active_action == ActiveAction::None || sync_select || delete_select || copy_select;
         let hovered = can_hover && !selected && app.hovered_row == Some(row);
         let deletable = !wt.is_main && !wt.is_current;
+        let copy_disabled = app.copy_secrets_phase == CopySecretsPhase::SelectTarget
+            && app.copy_secrets_source_idx == Some(i);
 
         let base_style = if selected {
             let selected_color = if delete_select {
                 Color::Red
+            } else if copy_select {
+                Color::Green
             } else {
                 Color::Cyan
             };
             Style::default()
                 .fg(selected_color)
                 .add_modifier(Modifier::BOLD)
+        } else if copy_disabled {
+            Style::default()
+                .fg(Color::DarkGray)
+                .add_modifier(Modifier::DIM)
         } else if delete_select && !deletable {
             Style::default()
                 .fg(Color::DarkGray)
@@ -359,6 +412,14 @@ fn draw_worktrees(f: &mut Frame, app: &mut App, area: Rect) {
 
         let mut spans = vec![
             Span::styled(if selected { "❯ " } else { "  " }, base_style),
+            Span::styled(
+                if copy_select {
+                    if wt.has_secrets { "● " } else { "○ " }
+                } else {
+                    ""
+                },
+                Style::default().fg(Color::Green),
+            ),
             Span::styled(wt.branch.clone(), base_style),
         ];
 
@@ -389,6 +450,8 @@ fn draw_help(f: &mut Frame, app: &App, area: Rect) {
         && !app.sync_loading
         && app.sync_results.is_empty();
     let delete_select = app.active_action == ActiveAction::Delete && !app.delete_confirming;
+    let copy_select = app.active_action == ActiveAction::CopySecrets
+        && app.copy_secrets_phase != CopySecretsPhase::ConfirmOverwrite;
 
     let text = if sync_select {
         Line::from(vec![
@@ -427,15 +490,34 @@ fn draw_help(f: &mut Frame, app: &App, area: Rect) {
                 Span::styled("  cancel", Style::default().fg(Color::DarkGray)),
             ])
         }
+    } else if copy_select {
+        let phase_text = if app.copy_secrets_phase == CopySecretsPhase::SelectSource {
+            "  select source worktree    "
+        } else {
+            "  select destination worktree    "
+        };
+        Line::from(vec![
+            Span::styled("●/○", Style::default().fg(Color::Green)),
+            Span::styled(
+                "  secrets present/empty    ",
+                Style::default().fg(Color::DarkGray),
+            ),
+            Span::styled("↑↓/jk/click", Style::default().fg(Color::Green)),
+            Span::styled(phase_text, Style::default().fg(Color::DarkGray)),
+            Span::styled("Enter/click", Style::default().fg(Color::Green)),
+            Span::styled("  confirm    ", Style::default().fg(Color::DarkGray)),
+            Span::styled("Esc", Style::default().fg(Color::DarkGray)),
+            Span::styled("  back/cancel", Style::default().fg(Color::DarkGray)),
+        ])
     } else {
         Line::from(vec![
             Span::styled("↑↓/jk/scroll", Style::default().fg(Color::DarkGray)),
             Span::styled("  nav    ", Style::default().fg(Color::DarkGray)),
             Span::styled("Enter/click", Style::default().fg(Color::DarkGray)),
             Span::styled("  open    ", Style::default().fg(Color::DarkGray)),
-            Span::styled("n  p  d  s", Style::default().fg(Color::DarkGray)),
+            Span::styled("n  p  d  s  c", Style::default().fg(Color::DarkGray)),
             Span::styled(
-                "  branch/PR/delete/sync    ",
+                "  branch/PR/delete/sync/copy    ",
                 Style::default().fg(Color::DarkGray),
             ),
             Span::styled("q", Style::default().fg(Color::DarkGray)),
@@ -443,6 +525,79 @@ fn draw_help(f: &mut Frame, app: &App, area: Rect) {
         ])
     };
     f.render_widget(Paragraph::new(text), area);
+}
+
+fn draw_copy_secrets_overlay(f: &mut Frame, app: &App, area: Rect) {
+    let popup = centered_rect(60, 8, area);
+    f.render_widget(Clear, popup);
+
+    let block = Block::default()
+        .title(" Copy Secrets ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Green));
+
+    let inner = block.inner(popup).inner(Margin {
+        horizontal: 1,
+        vertical: 1,
+    });
+    f.render_widget(block, popup);
+
+    let Some(source_idx) = app.copy_secrets_source_idx else {
+        return;
+    };
+    let Some(source) = app.worktrees.get(source_idx) else {
+        return;
+    };
+    let Some(target) = app.worktrees.get(app.copy_secrets_target_idx) else {
+        return;
+    };
+
+    let yes_style = if app.copy_secrets_confirm_yes {
+        Style::default()
+            .fg(Color::Black)
+            .bg(Color::Green)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::Green)
+    };
+    let no_style = if app.copy_secrets_confirm_yes {
+        Style::default().fg(Color::DarkGray)
+    } else {
+        Style::default()
+            .fg(Color::Black)
+            .bg(Color::Red)
+            .add_modifier(Modifier::BOLD)
+    };
+
+    f.render_widget(
+        Paragraph::new(vec![
+            Line::from(vec![
+                Span::styled("Overwrite secrets in ", Style::default().fg(Color::Yellow)),
+                Span::styled(
+                    target.branch.clone(),
+                    Style::default()
+                        .fg(Color::White)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled("?", Style::default().fg(Color::Yellow)),
+            ]),
+            Line::from(Span::styled(
+                format!("Source: {}", source.branch),
+                Style::default().fg(Color::DarkGray),
+            )),
+            Line::from(vec![]),
+            Line::from(vec![
+                Span::styled("  Yes  ", yes_style),
+                Span::styled("   ", Style::default()),
+                Span::styled("  No  ", no_style),
+            ]),
+            Line::from(Span::styled(
+                "Left/Right or click, Enter to confirm, Esc to cancel",
+                Style::default().fg(Color::DarkGray),
+            )),
+        ]),
+        inner,
+    );
 }
 
 // ─────────────────────────────── Overlays ───────────────────────────────────

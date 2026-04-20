@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use std::collections::HashSet;
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -69,6 +70,7 @@ fn parse_worktree_porcelain(raw: &str, cwd: &Path) -> Result<Vec<Worktree>> {
             sha,
             is_main,
             is_current,
+            has_secrets: worktree_has_secrets(&path),
         });
     }
 
@@ -264,6 +266,46 @@ pub fn sync_one_worktree(repo_root: &Path, wt: &Worktree) -> (bool, SyncResult) 
             status,
         },
     )
+}
+
+pub fn copy_secret_files(from: &Worktree, to: &Worktree, overwrite: bool) -> Result<usize> {
+    let from_path = Path::new(&from.path);
+    let to_path = Path::new(&to.path);
+
+    let source_files = list_secret_files(from_path)?;
+    if source_files.is_empty() {
+        anyhow::bail!("This worktree doesn't contain secrets");
+    }
+
+    if !overwrite && worktree_has_secrets(to_path) {
+        anyhow::bail!("Destination worktree already contains secrets");
+    }
+
+    let mut copied = 0;
+    for rel in source_files {
+        let src = from_path.join(&rel);
+        let dest = to_path.join(&rel);
+
+        if let Some(parent) = dest.parent() {
+            fs::create_dir_all(parent).with_context(|| {
+                format!(
+                    "Failed to create destination directory {}",
+                    parent.display()
+                )
+            })?;
+        }
+
+        fs::copy(&src, &dest).with_context(|| {
+            format!(
+                "Failed to copy secret {} to {}",
+                src.display(),
+                dest.display()
+            )
+        })?;
+        copied += 1;
+    }
+
+    Ok(copied)
 }
 
 /// Derive a default destination path from clone input.
@@ -790,15 +832,146 @@ pub fn list_workspace_worktrees(workspace_dir: &Path) -> Result<Vec<Worktree>> {
             sha,
             is_main,
             is_current,
+            has_secrets: worktree_has_secrets(&path),
         });
     }
 
     Ok(worktrees)
 }
 
+pub fn worktree_has_secrets(path: &Path) -> bool {
+    list_secret_files(path)
+        .map(|files| !files.is_empty())
+        .unwrap_or(false)
+}
+
+fn list_secret_files(root: &Path) -> Result<Vec<PathBuf>> {
+    let tracked = tracked_files(root)?;
+    let mut found = Vec::new();
+    collect_secret_files(root, root, &tracked, &mut found)?;
+    found.sort();
+    Ok(found)
+}
+
+fn tracked_files(root: &Path) -> Result<HashSet<PathBuf>> {
+    let output = Command::new("git")
+        .args(["ls-files", "-z"])
+        .current_dir(root)
+        .output()
+        .context("Failed to list tracked files")?;
+
+    if !output.status.success() {
+        return Ok(HashSet::new());
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    Ok(stdout
+        .split('\0')
+        .filter(|entry| !entry.is_empty())
+        .map(PathBuf::from)
+        .collect())
+}
+
+fn collect_secret_files(
+    root: &Path,
+    dir: &Path,
+    tracked: &HashSet<PathBuf>,
+    found: &mut Vec<PathBuf>,
+) -> Result<()> {
+    let mut entries: Vec<_> = fs::read_dir(dir)
+        .with_context(|| format!("Failed to read directory {}", dir.display()))?
+        .filter_map(|entry| entry.ok())
+        .collect();
+    entries.sort_by_key(|entry| entry.file_name());
+
+    for entry in entries {
+        let path = entry.path();
+        let metadata = entry
+            .file_type()
+            .with_context(|| format!("Failed to inspect {}", path.display()))?;
+
+        if metadata.is_dir() {
+            if should_skip_dir(&path) {
+                continue;
+            }
+            collect_secret_files(root, &path, tracked, found)?;
+            continue;
+        }
+
+        if !metadata.is_file() && !metadata.is_symlink() {
+            continue;
+        }
+
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        if !name.starts_with(".env") {
+            continue;
+        }
+
+        let rel = path
+            .strip_prefix(root)
+            .with_context(|| format!("Failed to relativize {}", path.display()))?
+            .to_path_buf();
+        if tracked.contains(&rel) {
+            continue;
+        }
+
+        found.push(rel);
+    }
+
+    Ok(())
+}
+
+fn should_skip_dir(path: &Path) -> bool {
+    matches!(
+        path.file_name().and_then(|name| name.to_str()),
+        Some(
+            ".git"
+                | "node_modules"
+                | ".next"
+                | ".nuxt"
+                | ".turbo"
+                | ".cache"
+                | "dist"
+                | "build"
+                | "target"
+                | "coverage"
+        )
+    )
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{looks_like_clone_progress, parse_clone_progress};
+    use super::{list_secret_files, looks_like_clone_progress, parse_clone_progress};
+    use std::fs;
+    use std::path::{Path, PathBuf};
+    use std::process::Command;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn make_temp_dir(name: &str) -> PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time should move forward")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("wt-{name}-{unique}"));
+        fs::create_dir_all(&dir).expect("temp dir should be created");
+        dir
+    }
+
+    fn git(dir: &Path, args: &[&str]) {
+        let status = Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .status()
+            .expect("git command should run");
+        assert!(
+            status.success(),
+            "git {:?} failed in {}",
+            args,
+            dir.display()
+        );
+    }
 
     #[test]
     fn parses_receiving_objects_progress() {
@@ -845,5 +1018,30 @@ mod tests {
             Some("Cloning into 'tea-website'...")
         );
         assert!((progress.ratio - 0.02).abs() < 0.001);
+    }
+
+    #[test]
+    fn lists_only_untracked_env_files_recursively() {
+        let dir = make_temp_dir("secret-scan");
+        git(&dir, &["init"]);
+        fs::write(dir.join(".env"), "SECRET=1\n").expect("secret file should be written");
+        fs::write(dir.join(".env.default"), "tracked=true\n")
+            .expect("tracked env template should be written");
+        fs::create_dir_all(dir.join("apps/web")).expect("nested dir should exist");
+        fs::write(dir.join("apps/web/.env.local"), "WEB_SECRET=1\n")
+            .expect("nested secret should be written");
+        fs::create_dir_all(dir.join("node_modules/pkg")).expect("ignored dir should exist");
+        fs::write(dir.join("node_modules/pkg/.env"), "IGNORE=1\n")
+            .expect("ignored secret should be written");
+        git(&dir, &["add", ".env.default"]);
+
+        let files = list_secret_files(&dir).expect("secret scan should succeed");
+
+        assert_eq!(
+            files,
+            vec![PathBuf::from(".env"), PathBuf::from("apps/web/.env.local")]
+        );
+
+        let _ = fs::remove_dir_all(dir);
     }
 }

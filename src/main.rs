@@ -21,7 +21,7 @@ use crossterm::{
 use ratatui::{Terminal, backend::CrosstermBackend};
 
 use app::App;
-use types::{ActiveAction, CloneEvent};
+use types::{ActiveAction, CloneEvent, CopySecretsPhase};
 
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -159,7 +159,7 @@ fn main() -> Result<()> {
             match event::read()? {
                 Event::Key(key) => handle_key(&mut app, key.code, key.modifiers),
                 Event::Paste(text) => handle_paste(&mut app, &text),
-                Event::Mouse(m) => handle_mouse(&mut app, m.kind, m.row),
+                Event::Mouse(m) => handle_mouse(&mut app, m.kind, m.column, m.row),
                 Event::Resize(_, _) => {}
                 _ => {}
             }
@@ -199,19 +199,30 @@ fn handle_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
         ActiveAction::SyncPr => handle_sync_pr_key(app, code),
         ActiveAction::SyncTrees => handle_sync_trees_key(app, code),
         ActiveAction::Delete => handle_delete_key(app, code),
+        ActiveAction::CopySecrets => handle_copy_secrets_key(app, code),
         ActiveAction::CloneRepo => handle_clone_key(app, code),
         ActiveAction::None => handle_nav_key(app, code, modifiers),
     }
 }
 
-fn handle_mouse(app: &mut App, kind: MouseEventKind, row: u16) {
+fn handle_mouse(app: &mut App, kind: MouseEventKind, column: u16, row: u16) {
+    if matches!(kind, MouseEventKind::Down(MouseButton::Left))
+        && app.active_action == ActiveAction::CopySecrets
+        && app.copy_secrets_phase == CopySecretsPhase::ConfirmOverwrite
+    {
+        handle_copy_secrets_confirm_click(app, column, row);
+        return;
+    }
+
     let sync_select = app.active_action == ActiveAction::SyncTrees
         && !app.sync_loading
         && app.sync_results.is_empty();
     let delete_select = app.active_action == ActiveAction::Delete && !app.delete_confirming;
+    let copy_select = app.active_action == ActiveAction::CopySecrets
+        && app.copy_secrets_phase != CopySecretsPhase::ConfirmOverwrite;
 
     // While a blocking overlay is open (not inline-select), ignore mouse.
-    if app.active_action != ActiveAction::None && !sync_select && !delete_select {
+    if app.active_action != ActiveAction::None && !sync_select && !delete_select && !copy_select {
         return;
     }
 
@@ -219,7 +230,7 @@ fn handle_mouse(app: &mut App, kind: MouseEventKind, row: u16) {
         MouseEventKind::Moved => {
             let target = app.row_to_item(row).and_then(|idx| {
                 // In inline-select mode only highlight worktree rows, not commands.
-                if (sync_select || delete_select) && idx < app::COMMANDS.len() {
+                if (sync_select || delete_select || copy_select) && idx < app::COMMANDS.len() {
                     None
                 } else {
                     Some(row)
@@ -250,6 +261,10 @@ fn handle_mouse(app: &mut App, kind: MouseEventKind, row: u16) {
                             app.delete_confirming = true;
                         }
                     }
+                } else if copy_select {
+                    if idx >= app::COMMANDS.len() {
+                        handle_copy_secrets_select(app, idx - app::COMMANDS.len());
+                    }
                 } else {
                     app.selected_index = idx;
                     activate(app);
@@ -259,6 +274,9 @@ fn handle_mouse(app: &mut App, kind: MouseEventKind, row: u16) {
         MouseEventKind::ScrollUp => {
             if sync_select {
                 app.sync_selected_idx = app.sync_selected_idx.saturating_sub(1);
+            } else if copy_select {
+                let next = copy_selection_idx(app).saturating_sub(1);
+                set_copy_selection_idx(app, next);
             } else if delete_select {
                 app.overlay_index = app.overlay_index.saturating_sub(1);
             } else if app.selected_index == 0 {
@@ -271,6 +289,10 @@ fn handle_mouse(app: &mut App, kind: MouseEventKind, row: u16) {
             if sync_select {
                 let max = app.worktrees.len().saturating_sub(1);
                 app.sync_selected_idx = (app.sync_selected_idx + 1).min(max);
+            } else if copy_select {
+                let max = app.worktrees.len().saturating_sub(1);
+                let next = (copy_selection_idx(app) + 1).min(max);
+                set_copy_selection_idx(app, next);
             } else if delete_select {
                 let max = app.deletable_worktrees().len().saturating_sub(1);
                 app.overlay_index = (app.overlay_index + 1).min(max);
@@ -316,6 +338,7 @@ fn handle_nav_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
         KeyCode::Char('p') => open_action(app, ActiveAction::SyncPr),
         KeyCode::Char('d') => open_action(app, ActiveAction::Delete),
         KeyCode::Char('s') => open_action(app, ActiveAction::SyncTrees),
+        KeyCode::Char('c') => open_action(app, ActiveAction::CopySecrets),
         KeyCode::Enter => activate(app),
         _ => {}
     }
@@ -329,6 +352,7 @@ fn activate(app: &mut App) {
             "Sync GH PR" => open_action(app, ActiveAction::SyncPr),
             "Delete Worktree" => open_action(app, ActiveAction::Delete),
             "Sync Trees" => open_action(app, ActiveAction::SyncTrees),
+            "Copy Secrets" => open_action(app, ActiveAction::CopySecrets),
             _ => {}
         }
     } else {
@@ -361,6 +385,17 @@ fn open_action(app: &mut App, action: ActiveAction) {
 
     if action == ActiveAction::Delete {
         app.overlay_index = 0;
+    }
+
+    if action == ActiveAction::CopySecrets {
+        app.copy_secrets_phase = CopySecretsPhase::SelectSource;
+        app.copy_secrets_source_idx = None;
+        app.copy_secrets_target_idx = app
+            .worktrees
+            .iter()
+            .position(|wt| wt.is_current)
+            .unwrap_or(0);
+        app.copy_secrets_confirm_yes = true;
     }
 
     app.active_action = action;
@@ -537,6 +572,175 @@ fn handle_delete_key(app: &mut App, code: KeyCode) {
         }
         KeyCode::Enter if deletable_len > 0 => app.delete_confirming = true,
         _ => {}
+    }
+}
+
+fn handle_copy_secrets_key(app: &mut App, code: KeyCode) {
+    match app.copy_secrets_phase {
+        CopySecretsPhase::SelectSource => match code {
+            KeyCode::Esc => {
+                app.active_action = ActiveAction::None;
+                app.overlay_error = None;
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                let next = copy_selection_idx(app).saturating_sub(1);
+                set_copy_selection_idx(app, next);
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                let max = app.worktrees.len().saturating_sub(1);
+                let next = (copy_selection_idx(app) + 1).min(max);
+                set_copy_selection_idx(app, next);
+            }
+            KeyCode::Enter => handle_copy_secrets_select(app, copy_selection_idx(app)),
+            _ => {}
+        },
+        CopySecretsPhase::SelectTarget => match code {
+            KeyCode::Esc => {
+                app.copy_secrets_phase = CopySecretsPhase::SelectSource;
+                app.copy_secrets_source_idx = None;
+                app.overlay_error = None;
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                let next = copy_selection_idx(app).saturating_sub(1);
+                set_copy_selection_idx(app, next);
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                let max = app.worktrees.len().saturating_sub(1);
+                let next = (copy_selection_idx(app) + 1).min(max);
+                set_copy_selection_idx(app, next);
+            }
+            KeyCode::Enter => handle_copy_secrets_select(app, copy_selection_idx(app)),
+            _ => {}
+        },
+        CopySecretsPhase::ConfirmOverwrite => match code {
+            KeyCode::Left | KeyCode::Char('h') => app.copy_secrets_confirm_yes = true,
+            KeyCode::Right | KeyCode::Char('l') => app.copy_secrets_confirm_yes = false,
+            KeyCode::Char('y') | KeyCode::Char('Y') => {
+                app.copy_secrets_confirm_yes = true;
+                finish_copy_secrets(app, true);
+            }
+            KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                app.copy_secrets_confirm_yes = false;
+                finish_copy_secrets(app, false);
+            }
+            KeyCode::Enter => finish_copy_secrets(app, app.copy_secrets_confirm_yes),
+            _ => {}
+        },
+    }
+}
+
+fn copy_selection_idx(app: &App) -> usize {
+    match app.copy_secrets_phase {
+        CopySecretsPhase::SelectSource => app.copy_secrets_source_idx.unwrap_or_else(|| {
+            app.worktrees
+                .iter()
+                .position(|wt| wt.is_current)
+                .unwrap_or(0)
+        }),
+        CopySecretsPhase::SelectTarget | CopySecretsPhase::ConfirmOverwrite => {
+            app.copy_secrets_target_idx
+        }
+    }
+}
+
+fn set_copy_selection_idx(app: &mut App, idx: usize) {
+    if app.copy_secrets_phase == CopySecretsPhase::SelectSource {
+        app.copy_secrets_source_idx = Some(idx);
+    } else {
+        app.copy_secrets_target_idx = idx;
+    }
+}
+
+fn handle_copy_secrets_select(app: &mut App, wt_idx: usize) {
+    match app.copy_secrets_phase {
+        CopySecretsPhase::SelectSource => {
+            let Some(wt) = app.worktrees.get(wt_idx) else {
+                return;
+            };
+            if !wt.has_secrets {
+                app.overlay_error = Some("this worktree doesn't contain secrets".to_string());
+                app.copy_secrets_source_idx = Some(wt_idx);
+                return;
+            }
+
+            let Some(target_idx) = app.next_copy_target_idx(wt_idx) else {
+                app.overlay_error = Some("No destination worktree available".to_string());
+                return;
+            };
+
+            app.overlay_error = None;
+            app.copy_secrets_source_idx = Some(wt_idx);
+            app.copy_secrets_target_idx = target_idx;
+            app.copy_secrets_confirm_yes = true;
+            app.copy_secrets_phase = CopySecretsPhase::SelectTarget;
+        }
+        CopySecretsPhase::SelectTarget => {
+            if Some(wt_idx) == app.copy_secrets_source_idx {
+                return;
+            }
+
+            let Some(target) = app.worktrees.get(wt_idx) else {
+                return;
+            };
+            app.copy_secrets_target_idx = wt_idx;
+            app.overlay_error = None;
+
+            if target.has_secrets {
+                app.copy_secrets_phase = CopySecretsPhase::ConfirmOverwrite;
+            } else {
+                finish_copy_secrets(app, true);
+            }
+        }
+        CopySecretsPhase::ConfirmOverwrite => {}
+    }
+}
+
+fn finish_copy_secrets(app: &mut App, confirmed: bool) {
+    if !confirmed {
+        app.copy_secrets_phase = CopySecretsPhase::SelectTarget;
+        return;
+    }
+
+    let Some(source_idx) = app.copy_secrets_source_idx else {
+        return;
+    };
+    let target_idx = app.copy_secrets_target_idx;
+    let Some(source) = app.worktrees.get(source_idx).cloned() else {
+        return;
+    };
+    let Some(target) = app.worktrees.get(target_idx).cloned() else {
+        return;
+    };
+
+    match git::copy_secret_files(&source, &target, true) {
+        Ok(_) => {
+            app.active_action = ActiveAction::None;
+            app.overlay_error = None;
+            refresh_worktrees(app);
+        }
+        Err(err) => {
+            app.copy_secrets_phase = CopySecretsPhase::SelectTarget;
+            app.overlay_error = Some(format!("Failed to copy secrets: {err}"));
+        }
+    }
+}
+
+fn handle_copy_secrets_confirm_click(app: &mut App, column: u16, row: u16) {
+    let popup_width = 60_u16;
+    let popup_height = 8_u16;
+    let popup_x = app.frame_width.saturating_sub(popup_width) / 2;
+    let popup_y = app.frame_height.saturating_sub(popup_height) / 2;
+    let relative_x = column.saturating_sub(popup_x);
+    let relative_y = row.saturating_sub(popup_y);
+
+    if (4..=5).contains(&relative_y) {
+        if relative_x <= popup_width / 2 {
+            app.copy_secrets_confirm_yes = true;
+            finish_copy_secrets(app, true);
+        } else {
+            app.copy_secrets_confirm_yes = false;
+            finish_copy_secrets(app, false);
+        }
     }
 }
 

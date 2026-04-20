@@ -7,6 +7,7 @@ pub struct Worktree {
     pub sha: String,
     pub is_main: bool,
     pub is_current: bool,
+    pub has_secrets: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -16,7 +17,15 @@ pub enum ActiveAction {
     SyncPr,
     SyncTrees,
     Delete,
+    CopySecrets,
     CloneRepo,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum CopySecretsPhase {
+    SelectSource,
+    SelectTarget,
+    ConfirmOverwrite,
 }
 
 #[derive(Debug, Clone)]

@@ -1,13 +1,16 @@
 use std::path::PathBuf;
 use std::sync::mpsc::Receiver;
 
-use crate::types::{ActiveAction, CloneEvent, CloneProgress, SyncResult, Worktree};
+use crate::types::{
+    ActiveAction, CloneEvent, CloneProgress, CopySecretsPhase, SyncResult, Worktree,
+};
 
 pub const COMMANDS: &[(&str, &str)] = &[
     ("New Branch", "n"),
     ("Sync GH PR", "p"),
     ("Delete Worktree", "d"),
     ("Sync Trees", "s"),
+    ("Copy Secrets", "c"),
 ];
 
 pub struct App {
@@ -41,6 +44,10 @@ pub struct App {
     pub overlay_index: usize,
     pub delete_confirming: bool,
     pub overlay_error: Option<String>,
+    pub copy_secrets_phase: CopySecretsPhase,
+    pub copy_secrets_source_idx: Option<usize>,
+    pub copy_secrets_target_idx: usize,
+    pub copy_secrets_confirm_yes: bool,
 
     pub exit_path: Option<String>,
     pub should_quit: bool,
@@ -49,6 +56,8 @@ pub struct App {
     pub item_rows: Vec<(u16, usize)>,
     /// Screen row currently under the mouse cursor (for hover highlight).
     pub hovered_row: Option<u16>,
+    pub frame_width: u16,
+    pub frame_height: u16,
 }
 
 impl App {
@@ -80,10 +89,16 @@ impl App {
             overlay_index: 0,
             delete_confirming: false,
             overlay_error: None,
+            copy_secrets_phase: CopySecretsPhase::SelectSource,
+            copy_secrets_source_idx: None,
+            copy_secrets_target_idx: 0,
+            copy_secrets_confirm_yes: true,
             exit_path: None,
             should_quit: false,
             item_rows: vec![],
             hovered_row: None,
+            frame_width: 0,
+            frame_height: 0,
         }
     }
 
@@ -96,6 +111,13 @@ impl App {
             .iter()
             .filter(|wt| !wt.is_main && !wt.is_current)
             .collect()
+    }
+
+    pub fn next_copy_target_idx(&self, from: usize) -> Option<usize> {
+        self.worktrees
+            .iter()
+            .enumerate()
+            .find_map(|(idx, _)| (idx != from).then_some(idx))
     }
 
     /// Returns the item index for the given screen row, if any.
