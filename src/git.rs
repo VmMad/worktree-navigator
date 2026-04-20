@@ -43,7 +43,11 @@ fn get_default_branch(git_repo: &Path) -> Option<String> {
     Some(branch.to_string())
 }
 
-fn parse_worktree_porcelain(raw: &str, cwd: &Path, default_branch: Option<&str>) -> Result<Vec<Worktree>> {
+fn parse_worktree_porcelain(
+    raw: &str,
+    cwd: &Path,
+    default_branch: Option<&str>,
+) -> Result<Vec<Worktree>> {
     let mut worktrees = Vec::new();
 
     for block in raw.trim().split("\n\n") {
@@ -632,7 +636,10 @@ pub fn list_workspace_worktrees(workspace_dir: &Path) -> Result<Vec<Worktree>> {
     entries.sort_by_key(|e| e.file_name());
 
     // Resolve default branch from the first valid git repo subdir
-    let first_git_dir = entries.iter().find(|e| e.path().join(".git").exists()).map(|e| e.path());
+    let first_git_dir = entries
+        .iter()
+        .find(|e| e.path().join(".git").exists())
+        .map(|e| e.path());
     let default_branch = first_git_dir.as_deref().and_then(get_default_branch);
 
     for entry in entries {

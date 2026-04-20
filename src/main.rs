@@ -26,16 +26,14 @@ use types::{ActiveAction, CloneEvent, CopySecretsPhase};
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
 
-    if args.iter().any(|a| a == "--update") {
-        update::run_manual_update()?;
+    if args.iter().any(|a| a == "--version" || a == "-V") {
+        println!("wt v{}", env!("CARGO_PKG_VERSION"));
         return Ok(());
     }
 
-    if !args.iter().any(|a| a == "--mark-tree") {
-        match update::maybe_prompt_for_update()? {
-            update::StartupUpdateAction::Continue => {}
-            update::StartupUpdateAction::ExitAfterUpdateFlow => return Ok(()),
-        }
+    if args.iter().any(|a| a == "--update") {
+        update::run_manual_update()?;
+        return Ok(());
     }
 
     let cwd = std::env::var("WT_CWD")
@@ -43,6 +41,8 @@ fn main() -> Result<()> {
         .unwrap_or_else(|_| std::env::current_dir().expect("no cwd"));
 
     let mark_tree = args.iter().any(|a| a == "--mark-tree");
+    let mut update_notice_rx = (!mark_tree).then(update::start_background_update_check);
+    let mut update_notice = None;
 
     if mark_tree {
         git::create_workspace_marker(&cwd)?;
@@ -110,6 +110,17 @@ fn main() -> Result<()> {
     }
 
     loop {
+        if let Some(rx) = update_notice_rx.as_ref() {
+            match rx.try_recv() {
+                Ok(notice) => {
+                    update_notice = notice;
+                    update_notice_rx = None;
+                }
+                Err(TryRecvError::Empty) => {}
+                Err(TryRecvError::Disconnected) => update_notice_rx = None,
+            }
+        }
+
         poll_clone_updates(&mut app);
         if app.clone_loading {
             app.advance_clone_animation();
@@ -181,6 +192,20 @@ fn main() -> Result<()> {
     )?;
     disable_raw_mode()?;
     terminal.show_cursor()?;
+
+    if update_notice.is_none()
+        && let Some(rx) = update_notice_rx.take()
+        && let Ok(notice) = rx.try_recv()
+    {
+        update_notice = notice;
+    }
+
+    if let Some(notice) = update_notice {
+        eprintln!(
+            "Update available for wt: v{} (current: v{}). Run `wt --update` to install.",
+            notice.latest_version, notice.current_version
+        );
+    }
 
     if let Some(ref path) = app.exit_path {
         println!("{path}");
