@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use std::sync::mpsc::Receiver;
 
 use crate::types::{
-    ActiveAction, CloneEvent, CloneProgress, CopySecretsPhase, SyncResult, Worktree,
+    ActiveAction, CloneEvent, CopySecretsPhase, SyncResult, Worktree,
 };
 
 pub const COMMANDS: &[(&str, &str)] = &[
@@ -33,7 +33,7 @@ pub struct App {
     pub clone_url: String,
     pub clone_loading: bool,
     pub clone_receiver: Option<Receiver<CloneEvent>>,
-    pub clone_progress: CloneProgress,
+    pub clone_animation_frame: usize,
     pub clone_error: Option<String>,
 
     pub selected_index: usize,
@@ -80,7 +80,7 @@ impl App {
             clone_url: String::new(),
             clone_loading: false,
             clone_receiver: None,
-            clone_progress: CloneProgress::default(),
+            clone_animation_frame: 0,
             clone_error: None,
             selected_index: 0,
             active_action: ActiveAction::None,
@@ -188,13 +188,19 @@ impl App {
         self.input_cursor = 0;
     }
 
-    pub fn reset_clone_progress(&mut self) {
-        self.clone_progress = CloneProgress::default();
+    pub fn reset_clone_animation(&mut self) {
+        self.clone_animation_frame = 0;
     }
 
-    pub fn update_clone_progress(&mut self, progress: CloneProgress) {
-        self.clone_progress.ratio = self.clone_progress.ratio.max(progress.ratio);
-        self.clone_progress.phase = progress.phase;
-        self.clone_progress.detail = progress.detail;
+    pub fn advance_clone_animation(&mut self) {
+        self.clone_animation_frame = (self.clone_animation_frame + 1) % 3;
+    }
+
+    pub fn clone_animation_dots(&self) -> &'static str {
+        match self.clone_animation_frame {
+            0 => ".  ",
+            1 => ".. ",
+            _ => "...",
+        }
     }
 }

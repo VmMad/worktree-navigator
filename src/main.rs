@@ -111,6 +111,9 @@ fn main() -> Result<()> {
 
     loop {
         poll_clone_updates(&mut app);
+        if app.clone_loading {
+            app.advance_clone_animation();
+        }
         let wants_mouse_capture = app.active_action != ActiveAction::CloneRepo;
         if wants_mouse_capture != mouse_capture_enabled {
             if wants_mouse_capture {
@@ -799,7 +802,7 @@ fn handle_clone_key(app: &mut App, code: KeyCode) {
             } else {
                 app.clone_loading = true;
                 app.clone_error = None;
-                app.reset_clone_progress();
+                app.reset_clone_animation();
                 app.clone_receiver = Some(git::start_clone_repo_with_layout(
                     app.clone_url.clone(),
                     PathBuf::from(input),
@@ -840,7 +843,6 @@ fn poll_clone_updates(app: &mut App) {
 
     for event in events {
         match event {
-            CloneEvent::Progress(progress) => app.update_clone_progress(progress),
             CloneEvent::Finished(worktree_path) => {
                 app.clone_loading = false;
                 app.exit_path = Some(worktree_path.to_string_lossy().into_owned());
