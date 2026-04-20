@@ -30,7 +30,6 @@ wt
 
 ## Expected workflow
 
-- `install.sh` installs the binary to `~/.local/bin` and sets a `wt()` zsh wrapper.
 - Running `wt` outside a repo starts clone flow and creates an initial worktree.
 - PR sync accepts `123` or `#123` and checks out `pr-<number>`.
 - Delete/Sync Trees actions are inline select modes in the worktree list.
