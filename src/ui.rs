@@ -3,7 +3,7 @@ use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Margin, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, Gauge, Paragraph, block::Title},
+    widgets::{Block, Borders, Clear, Paragraph},
 };
 
 use crate::{
@@ -84,13 +84,12 @@ fn draw_panel(f: &mut Frame, app: &mut App, area: Rect) {
     let block = Block::default()
         .title(format!(" ⎇  Worktree Navigator — {repo_name} "))
         .title_alignment(Alignment::Center)
-        .title(
-            Title::from(Span::styled(
+        .title_bottom(
+            Line::from(Span::styled(
                 format!(" v{} ", env!("CARGO_PKG_VERSION")),
                 Style::default().fg(Color::DarkGray),
             ))
-            .alignment(Alignment::Right)
-            .position(ratatui::widgets::block::Position::Bottom),
+            .alignment(Alignment::Right),
         )
         .borders(Borders::ALL)
         .border_style(Style::default().fg(border_color));
@@ -928,7 +927,7 @@ fn draw_delete_overlay(f: &mut Frame, app: &App, area: Rect) {
 fn draw_clone_overlay(f: &mut Frame, app: &App, area: Rect) {
     let has_err = app.clone_error.is_some();
     let height = if app.clone_loading {
-        8
+        7
     } else if has_err {
         11
     } else {
@@ -954,15 +953,12 @@ fn draw_clone_overlay(f: &mut Frame, app: &App, area: Rect) {
             .constraints([
                 Constraint::Length(1),
                 Constraint::Length(1),
-                Constraint::Length(1),
-                Constraint::Length(1),
             ])
             .split(inner);
-        let percent = (app.clone_progress.ratio * 100.0).round() as u16;
 
         f.render_widget(
             Paragraph::new(Span::styled(
-                format!("⟳  {}", app.clone_progress.phase),
+                format!("⟳  Cloning repository{}", app.clone_animation_dots()),
                 Style::default()
                     .fg(Color::Green)
                     .add_modifier(Modifier::BOLD),
@@ -970,21 +966,11 @@ fn draw_clone_overlay(f: &mut Frame, app: &App, area: Rect) {
             rows[0],
         );
         f.render_widget(
-            Gauge::default()
-                .ratio(app.clone_progress.ratio)
-                .label(format!("{percent}%"))
-                .gauge_style(Style::default().fg(Color::Green)),
-            rows[1],
-        );
-        f.render_widget(
             Paragraph::new(Span::styled(
-                app.clone_progress
-                    .detail
-                    .as_deref()
-                    .unwrap_or("Cloning repository…"),
+                "   Working… this may take a moment.",
                 Style::default().fg(Color::DarkGray),
             )),
-            rows[3],
+            rows[1],
         );
         return;
     }
