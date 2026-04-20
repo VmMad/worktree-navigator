@@ -21,11 +21,29 @@ pub fn list_worktrees(repo_root: &Path) -> Result<Vec<Worktree>> {
         .map(PathBuf::from)
         .unwrap_or_else(|_| repo_root.to_path_buf());
     let cwd = cwd.canonicalize().unwrap_or(cwd);
+    let default_branch = get_default_branch(repo_root);
 
-    parse_worktree_porcelain(&stdout, &cwd)
+    parse_worktree_porcelain(&stdout, &cwd, default_branch.as_deref())
 }
 
-fn parse_worktree_porcelain(raw: &str, cwd: &Path) -> Result<Vec<Worktree>> {
+fn get_default_branch(git_repo: &Path) -> Option<String> {
+    let out = Command::new("git")
+        .args(["symbolic-ref", "refs/remotes/origin/HEAD"])
+        .current_dir(git_repo)
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let raw = String::from_utf8_lossy(&out.stdout);
+    let branch = raw.trim().strip_prefix("refs/remotes/origin/")?;
+    if branch.is_empty() {
+        return None;
+    }
+    Some(branch.to_string())
+}
+
+fn parse_worktree_porcelain(raw: &str, cwd: &Path, default_branch: Option<&str>) -> Result<Vec<Worktree>> {
     let mut worktrees = Vec::new();
 
     for block in raw.trim().split("\n\n") {
@@ -54,7 +72,10 @@ fn parse_worktree_porcelain(raw: &str, cwd: &Path) -> Result<Vec<Worktree>> {
             })
             .unwrap_or_else(|| "HEAD".to_string());
 
-        let is_main = worktrees.is_empty();
+        let is_main = match default_branch {
+            Some(db) => branch == db,
+            None => worktrees.is_empty(),
+        };
         let is_current = path.canonicalize().unwrap_or(path.clone()) == cwd;
 
         worktrees.push(Worktree {
@@ -66,6 +87,7 @@ fn parse_worktree_porcelain(raw: &str, cwd: &Path) -> Result<Vec<Worktree>> {
         });
     }
 
+    worktrees.sort_by_key(|w| !w.is_main);
     Ok(worktrees)
 }
 
@@ -609,6 +631,10 @@ pub fn list_workspace_worktrees(workspace_dir: &Path) -> Result<Vec<Worktree>> {
 
     entries.sort_by_key(|e| e.file_name());
 
+    // Resolve default branch from the first valid git repo subdir
+    let first_git_dir = entries.iter().find(|e| e.path().join(".git").exists()).map(|e| e.path());
+    let default_branch = first_git_dir.as_deref().and_then(get_default_branch);
+
     for entry in entries {
         let path = entry.path();
 
@@ -629,7 +655,10 @@ pub fn list_workspace_worktrees(workspace_dir: &Path) -> Result<Vec<Worktree>> {
             .to_string();
 
         let path_str = path.to_string_lossy().to_string();
-        let is_main = worktrees.is_empty();
+        let is_main = match default_branch.as_deref() {
+            Some(db) => branch == db,
+            None => worktrees.is_empty(),
+        };
         let is_current = path.canonicalize().unwrap_or(path.clone()) == cwd;
 
         worktrees.push(Worktree {
@@ -641,6 +670,7 @@ pub fn list_workspace_worktrees(workspace_dir: &Path) -> Result<Vec<Worktree>> {
         });
     }
 
+    worktrees.sort_by_key(|w| !w.is_main);
     Ok(worktrees)
 }
 
