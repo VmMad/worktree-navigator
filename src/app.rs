@@ -27,6 +27,15 @@ pub struct App {
     pub sync_fetch_ok: bool,
     pub sync_results: Vec<SyncResult>,
 
+    pub new_branch_loading: bool,
+    pub new_branch_pending: Option<String>,
+
+    pub delete_loading: bool,
+    pub delete_pending: Option<String>,
+
+    pub copy_secrets_loading: bool,
+    pub copy_secrets_pending: bool,
+
     pub clone_step: u8,
     pub clone_url: String,
     pub clone_loading: bool,
@@ -74,6 +83,12 @@ impl App {
             sync_pending: false,
             sync_fetch_ok: true,
             sync_results: vec![],
+            new_branch_loading: false,
+            new_branch_pending: None,
+            delete_loading: false,
+            delete_pending: None,
+            copy_secrets_loading: false,
+            copy_secrets_pending: false,
             clone_step: 0,
             clone_url: String::new(),
             clone_loading: false,
@@ -190,7 +205,7 @@ impl App {
         self.clone_animation_frame = 0;
     }
 
-    pub fn advance_clone_animation(&mut self) {
+    pub fn advance_loading_animation(&mut self) {
         self.clone_animation_frame = (self.clone_animation_frame + 1) % 3;
     }
 
