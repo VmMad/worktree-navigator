@@ -76,10 +76,7 @@ You can also run:
 wt --update
 ```
 
-When a newer release is available, `wt` now checks on startup and prompts:
-
-- `y` updates immediately
-- `n` disables future startup prompts and shows a reminder to use `wt --update`
+When a newer release is available, `wt` checks in the background while you use the TUI and prints a notice after you exit. The notice goes to stderr, so the shell wrapper still receives only the selected path on stdout.
 
 `wt --update` selects the release asset matching your current binary target (for example `x86_64-linux-gnu` or `aarch64-linux-musl`) and remembers that asset for future updates.
 
@@ -112,7 +109,7 @@ If you run `wt` in a directory that is not a git repo, it opens a clone flow:
 
 1. Enter repo source (`owner/repo`, SSH URL or HTTPS URL)
 2. Confirm or edit destination (defaults to `<current-working-directory>/<repo-name>`)
-3. Clone repo, show a loading indicator while it runs, and jump into the default branch folder (for example `<repo>/main`)
+3. Clone repo, show a loading indicator and live clone output while it runs, and jump into the default branch folder (for example `<repo>/main`)
 
 For `owner/repo`, `wt` uses `gh repo clone` when available, and falls back to `git clone` using your preferred GitHub protocol (SSH/HTTPS)
 

@@ -21,9 +21,11 @@ pub fn draw(f: &mut Frame, app: &mut App) {
 
     let show_sync_overlay = app.active_action == ActiveAction::SyncTrees
         && (app.sync_loading || !app.sync_results.is_empty());
-    let show_delete_overlay = app.active_action == ActiveAction::Delete && app.delete_confirming;
+    let show_delete_overlay =
+        app.active_action == ActiveAction::Delete && (app.delete_confirming || app.delete_loading);
     let show_copy_overlay = app.active_action == ActiveAction::CopySecrets
-        && app.copy_secrets_phase == CopySecretsPhase::ConfirmOverwrite;
+        && (app.copy_secrets_phase == CopySecretsPhase::ConfirmOverwrite
+            || app.copy_secrets_loading);
 
     match app.active_action {
         ActiveAction::NewBranch => draw_new_branch_overlay(f, app, area),
@@ -70,9 +72,11 @@ fn draw_panel(f: &mut Frame, app: &mut App, area: Rect) {
     let sync_select = app.active_action == ActiveAction::SyncTrees
         && !app.sync_loading
         && app.sync_results.is_empty();
-    let delete_select = app.active_action == ActiveAction::Delete && !app.delete_confirming;
+    let delete_select =
+        app.active_action == ActiveAction::Delete && !app.delete_confirming && !app.delete_loading;
     let copy_select = app.active_action == ActiveAction::CopySecrets
-        && app.copy_secrets_phase != CopySecretsPhase::ConfirmOverwrite;
+        && app.copy_secrets_phase != CopySecretsPhase::ConfirmOverwrite
+        && !app.copy_secrets_loading;
     let is_active =
         app.active_action == ActiveAction::None || sync_select || delete_select || copy_select;
     let border_color = if is_active {
@@ -116,9 +120,11 @@ fn draw_commands(f: &mut Frame, app: &mut App, area: Rect) {
     let sync_select = app.active_action == ActiveAction::SyncTrees
         && !app.sync_loading
         && app.sync_results.is_empty();
-    let delete_select = app.active_action == ActiveAction::Delete && !app.delete_confirming;
+    let delete_select =
+        app.active_action == ActiveAction::Delete && !app.delete_confirming && !app.delete_loading;
     let copy_select = app.active_action == ActiveAction::CopySecrets
-        && app.copy_secrets_phase != CopySecretsPhase::ConfirmOverwrite;
+        && app.copy_secrets_phase != CopySecretsPhase::ConfirmOverwrite
+        && !app.copy_secrets_loading;
     let inline_select = sync_select || delete_select || copy_select;
 
     let header_style = if inline_select {
@@ -139,13 +145,13 @@ fn draw_commands(f: &mut Frame, app: &mut App, area: Rect) {
         },
     );
 
-    for (i, (label, shortcut)) in COMMANDS.iter().enumerate() {
+    for (i, command) in COMMANDS.iter().enumerate() {
         let row = area.y + 1 + i as u16;
         app.item_rows.push((row, i));
 
-        let is_sync_cmd = *label == "Sync Trees";
-        let is_delete_cmd = *label == "Delete Worktree";
-        let is_copy_cmd = *label == "Copy Secrets";
+        let is_sync_cmd = command.action == ActiveAction::SyncTrees;
+        let is_delete_cmd = command.action == ActiveAction::Delete;
+        let is_copy_cmd = command.action == ActiveAction::CopySecrets;
         let focused_cmd = if sync_select {
             is_sync_cmd
         } else if delete_select {
@@ -209,8 +215,8 @@ fn draw_commands(f: &mut Frame, app: &mut App, area: Rect) {
         f.render_widget(
             Paragraph::new(Line::from(vec![
                 Span::styled(prefix, style),
-                Span::styled(*label, style),
-                Span::styled(format!(" [{shortcut}]"), shortcut_style),
+                Span::styled(command.label, style),
+                Span::styled(format!(" [{}]", command.shortcut), shortcut_style),
             ])),
             Rect {
                 x: area.x,
@@ -226,9 +232,11 @@ fn draw_worktrees(f: &mut Frame, app: &mut App, area: Rect) {
     let sync_select = app.active_action == ActiveAction::SyncTrees
         && !app.sync_loading
         && app.sync_results.is_empty();
-    let delete_select = app.active_action == ActiveAction::Delete && !app.delete_confirming;
+    let delete_select =
+        app.active_action == ActiveAction::Delete && !app.delete_confirming && !app.delete_loading;
     let copy_select = app.active_action == ActiveAction::CopySecrets
-        && app.copy_secrets_phase != CopySecretsPhase::ConfirmOverwrite;
+        && app.copy_secrets_phase != CopySecretsPhase::ConfirmOverwrite
+        && !app.copy_secrets_loading;
 
     let header_style = Style::default()
         .fg(Color::Yellow)
@@ -448,9 +456,11 @@ fn draw_help(f: &mut Frame, app: &App, area: Rect) {
     let sync_select = app.active_action == ActiveAction::SyncTrees
         && !app.sync_loading
         && app.sync_results.is_empty();
-    let delete_select = app.active_action == ActiveAction::Delete && !app.delete_confirming;
+    let delete_select =
+        app.active_action == ActiveAction::Delete && !app.delete_confirming && !app.delete_loading;
     let copy_select = app.active_action == ActiveAction::CopySecrets
-        && app.copy_secrets_phase != CopySecretsPhase::ConfirmOverwrite;
+        && app.copy_secrets_phase != CopySecretsPhase::ConfirmOverwrite
+        && !app.copy_secrets_loading;
 
     let text = if sync_select {
         Line::from(vec![
@@ -527,6 +537,36 @@ fn draw_help(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_copy_secrets_overlay(f: &mut Frame, app: &App, area: Rect) {
+    if app.copy_secrets_loading {
+        let popup = centered_rect(60, 5, area);
+        f.render_widget(Clear, popup);
+        let block = Block::default()
+            .title(" Copy Secrets ")
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Green));
+        let inner = block.inner(popup).inner(Margin {
+            horizontal: 1,
+            vertical: 1,
+        });
+        f.render_widget(block, popup);
+        f.render_widget(
+            Paragraph::new(vec![
+                Line::from(Span::styled(
+                    format!("⟳  Copying secrets{}", app.loading_animation_dots()),
+                    Style::default()
+                        .fg(Color::Green)
+                        .add_modifier(Modifier::BOLD),
+                )),
+                Line::from(Span::styled(
+                    "   This may take a moment.",
+                    Style::default().fg(Color::DarkGray),
+                )),
+            ]),
+            inner,
+        );
+        return;
+    }
+
     let popup = centered_rect(60, 8, area);
     f.render_widget(Clear, popup);
 
@@ -612,6 +652,44 @@ fn centered_rect(percent_x: u16, height: u16, r: Rect) -> Rect {
 }
 
 fn draw_new_branch_overlay(f: &mut Frame, app: &App, area: Rect) {
+    if app.new_branch_loading {
+        let popup = centered_rect(60, 5, area);
+        f.render_widget(Clear, popup);
+        let block = Block::default()
+            .title(" New Branch / Worktree ")
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Yellow));
+        let inner = block.inner(popup).inner(Margin {
+            horizontal: 1,
+            vertical: 1,
+        });
+        f.render_widget(block, popup);
+        let branch = app
+            .new_branch_pending
+            .as_deref()
+            .unwrap_or(app.input_buffer.trim());
+        f.render_widget(
+            Paragraph::new(vec![
+                Line::from(Span::styled(
+                    format!(
+                        "⟳  Creating branch {}{}",
+                        branch,
+                        app.loading_animation_dots()
+                    ),
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                )),
+                Line::from(Span::styled(
+                    "   This may take a moment.",
+                    Style::default().fg(Color::DarkGray),
+                )),
+            ]),
+            inner,
+        );
+        return;
+    }
+
     let has_err = app.overlay_error.is_some();
     let has_base = app.new_branch_base.is_some();
     let mut height = 7;
@@ -706,7 +784,7 @@ fn draw_new_branch_overlay(f: &mut Frame, app: &App, area: Rect) {
 
 fn draw_sync_pr_overlay(f: &mut Frame, app: &App, area: Rect) {
     if app.sync_pr_loading {
-        let popup = centered_rect(50, 5, area);
+        let popup = centered_rect(50, 7, area);
         f.render_widget(Clear, popup);
         let block = Block::default()
             .title(" Sync GitHub PR as Worktree ")
@@ -717,21 +795,42 @@ fn draw_sync_pr_overlay(f: &mut Frame, app: &App, area: Rect) {
             vertical: 1,
         });
         f.render_widget(block, popup);
+        let rows = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(1),
+                Constraint::Length(1),
+                Constraint::Length(1),
+            ])
+            .split(inner);
         f.render_widget(
-            Paragraph::new(vec![
-                Line::from(Span::styled(
-                    "⟳  Fetching PR and creating worktree…",
-                    Style::default()
-                        .fg(Color::Magenta)
-                        .add_modifier(Modifier::BOLD),
-                )),
-                Line::from(Span::styled(
-                    "   This may take a moment.",
+            Paragraph::new(Span::styled(
+                format!(
+                    "⟳  Fetching PR and creating worktree{}",
+                    app.loading_animation_dots()
+                ),
+                Style::default()
+                    .fg(Color::Magenta)
+                    .add_modifier(Modifier::BOLD),
+            )),
+            rows[0],
+        );
+        f.render_widget(
+            Paragraph::new(Span::styled(
+                "   This may take a moment.",
+                Style::default().fg(Color::DarkGray),
+            )),
+            rows[1],
+        );
+        if let Some(line) = app.sync_pr_output.last() {
+            f.render_widget(
+                Paragraph::new(Span::styled(
+                    format!("   {line}"),
                     Style::default().fg(Color::DarkGray),
                 )),
-            ]),
-            inner,
-        );
+                rows[2],
+            );
+        }
         return;
     }
 
@@ -814,7 +913,7 @@ fn draw_sync_overlay(f: &mut Frame, app: &App, area: Rect) {
         f.render_widget(
             Paragraph::new(vec![
                 Line::from(Span::styled(
-                    "⟳  Fetching from remote…",
+                    format!("⟳  Fetching from remote{}", app.loading_animation_dots()),
                     Style::default()
                         .fg(Color::Cyan)
                         .add_modifier(Modifier::BOLD),
@@ -913,6 +1012,40 @@ fn draw_sync_overlay(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_delete_overlay(f: &mut Frame, app: &App, area: Rect) {
+    if app.delete_loading {
+        let popup = centered_rect(60, 5, area);
+        f.render_widget(Clear, popup);
+        let block = Block::default()
+            .title(" Delete Worktree ")
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Red));
+        let inner = block.inner(popup).inner(Margin {
+            horizontal: 1,
+            vertical: 1,
+        });
+        f.render_widget(block, popup);
+        let branch = app
+            .delete_pending
+            .as_deref()
+            .and_then(|path| app.worktrees.iter().find(|wt| wt.path == path))
+            .map(|wt| wt.branch.as_str())
+            .unwrap_or("worktree");
+        f.render_widget(
+            Paragraph::new(vec![
+                Line::from(Span::styled(
+                    format!("⟳  Deleting {}{}", branch, app.loading_animation_dots()),
+                    Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                )),
+                Line::from(Span::styled(
+                    "   This may take a moment.",
+                    Style::default().fg(Color::DarkGray),
+                )),
+            ]),
+            inner,
+        );
+        return;
+    }
+
     let deletable = app.deletable_worktrees();
     if let Some(wt) = deletable.get(app.overlay_index) {
         let popup = centered_rect(60, 8, area);
@@ -982,12 +1115,13 @@ fn draw_clone_overlay(f: &mut Frame, app: &App, area: Rect) {
             .constraints([
                 Constraint::Length(1),
                 Constraint::Length(1),
+                Constraint::Length(1),
             ])
             .split(inner);
 
         f.render_widget(
             Paragraph::new(Span::styled(
-                format!("⟳  Cloning repository{}", app.clone_animation_dots()),
+                format!("⟳  Cloning repository{}", app.loading_animation_dots()),
                 Style::default()
                     .fg(Color::Green)
                     .add_modifier(Modifier::BOLD),
@@ -1001,6 +1135,16 @@ fn draw_clone_overlay(f: &mut Frame, app: &App, area: Rect) {
             )),
             rows[1],
         );
+
+        if let Some(line) = app.clone_output.last() {
+            f.render_widget(
+                Paragraph::new(Span::styled(
+                    format!("   {line}"),
+                    Style::default().fg(Color::DarkGray),
+                )),
+                rows[2],
+            );
+        }
         return;
     }
 
