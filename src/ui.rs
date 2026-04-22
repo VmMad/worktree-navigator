@@ -1044,10 +1044,7 @@ fn draw_clone_overlay(f: &mut Frame, app: &App, area: Rect) {
     if app.clone_loading {
         let rows = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(1),
-                Constraint::Length(1),
-            ])
+            .constraints([Constraint::Length(1), Constraint::Length(1)])
             .split(inner);
 
         f.render_widget(

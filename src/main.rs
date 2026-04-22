@@ -26,16 +26,14 @@ use types::{ActiveAction, CloneEvent, CopySecretsPhase};
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
 
-    if args.iter().any(|a| a == "--update") {
-        update::run_manual_update()?;
+    if args.iter().any(|a| a == "--version" || a == "-V") {
+        println!("wt v{}", env!("CARGO_PKG_VERSION"));
         return Ok(());
     }
 
-    if !args.iter().any(|a| a == "--mark-tree") {
-        match update::maybe_prompt_for_update()? {
-            update::StartupUpdateAction::Continue => {}
-            update::StartupUpdateAction::ExitAfterUpdateFlow => return Ok(()),
-        }
+    if args.iter().any(|a| a == "--update") {
+        update::run_manual_update()?;
+        return Ok(());
     }
 
     let cwd = std::env::var("WT_CWD")
@@ -43,6 +41,8 @@ fn main() -> Result<()> {
         .unwrap_or_else(|_| std::env::current_dir().expect("no cwd"));
 
     let mark_tree = args.iter().any(|a| a == "--mark-tree");
+    let mut update_notice_rx = (!mark_tree).then(update::start_background_update_check);
+    let mut update_notice = None;
 
     if mark_tree {
         git::create_workspace_marker(&cwd)?;
@@ -110,8 +110,23 @@ fn main() -> Result<()> {
     }
 
     loop {
+        if let Some(rx) = update_notice_rx.as_ref() {
+            match rx.try_recv() {
+                Ok(notice) => {
+                    update_notice = notice;
+                    update_notice_rx = None;
+                }
+                Err(TryRecvError::Empty) => {}
+                Err(TryRecvError::Disconnected) => update_notice_rx = None,
+            }
+        }
+
         poll_clone_updates(&mut app);
-        if app.clone_loading || app.new_branch_loading || app.delete_loading || app.copy_secrets_loading {
+        if app.clone_loading
+            || app.new_branch_loading
+            || app.delete_loading
+            || app.copy_secrets_loading
+        {
             app.advance_loading_animation();
         }
         let wants_mouse_capture = app.active_action != ActiveAction::CloneRepo;
@@ -179,7 +194,10 @@ fn main() -> Result<()> {
         // Execute pending copy secrets after the loading frame has been rendered.
         if app.copy_secrets_pending {
             app.copy_secrets_pending = false;
-            let source = app.copy_secrets_source_idx.and_then(|i| app.worktrees.get(i)).cloned();
+            let source = app
+                .copy_secrets_source_idx
+                .and_then(|i| app.worktrees.get(i))
+                .cloned();
             let target = app.worktrees.get(app.copy_secrets_target_idx).cloned();
             if let (Some(source), Some(target)) = (source, target) {
                 match git::copy_secret_files(&source, &target, true) {
@@ -234,8 +252,12 @@ fn main() -> Result<()> {
         }
     }
 
-    // Disable mouse capture first so the terminal stops sending events, then
-    // drain whatever arrived before the disable was processed.
+    // Drain any mouse/key events buffered while the event loop was blocked
+    // (e.g. during synchronous git operations) so they don't leak into the shell.
+    while event::poll(Duration::from_millis(0)).unwrap_or(false) {
+        let _ = event::read();
+    }
+
     execute!(
         terminal.backend_mut(),
         DisableBracketedPaste,
@@ -248,6 +270,20 @@ fn main() -> Result<()> {
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
     disable_raw_mode()?;
     terminal.show_cursor()?;
+
+    if update_notice.is_none()
+        && let Some(rx) = update_notice_rx.take()
+        && let Ok(notice) = rx.try_recv()
+    {
+        update_notice = notice;
+    }
+
+    if let Some(notice) = update_notice {
+        eprintln!(
+            "Update available for wt: v{} (current: v{}). Run `wt --update` to install.",
+            notice.latest_version, notice.current_version
+        );
+    }
 
     if let Some(ref path) = app.exit_path {
         println!("{path}");
@@ -287,9 +323,8 @@ fn handle_mouse(app: &mut App, kind: MouseEventKind, column: u16, row: u16) {
     let sync_select = app.active_action == ActiveAction::SyncTrees
         && !app.sync_loading
         && app.sync_results.is_empty();
-    let delete_select = app.active_action == ActiveAction::Delete
-        && !app.delete_confirming
-        && !app.delete_loading;
+    let delete_select =
+        app.active_action == ActiveAction::Delete && !app.delete_confirming && !app.delete_loading;
     let copy_select = app.active_action == ActiveAction::CopySecrets
         && app.copy_secrets_phase != CopySecretsPhase::ConfirmOverwrite
         && !app.copy_secrets_loading;

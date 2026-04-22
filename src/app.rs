@@ -1,9 +1,7 @@
 use std::path::PathBuf;
 use std::sync::mpsc::Receiver;
 
-use crate::types::{
-    ActiveAction, CloneEvent, CopySecretsPhase, SyncResult, Worktree,
-};
+use crate::types::{ActiveAction, CloneEvent, CopySecretsPhase, SyncResult, Worktree};
 
 pub const COMMANDS: &[(&str, &str)] = &[
     ("New Branch", "n"),
