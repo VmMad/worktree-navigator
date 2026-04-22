@@ -109,7 +109,7 @@ If you run `wt` in a directory that is not a git repo, it opens a clone flow:
 
 1. Enter repo source (`owner/repo`, SSH URL or HTTPS URL)
 2. Confirm or edit destination (defaults to `<current-working-directory>/<repo-name>`)
-3. Clone repo, show a loading indicator while it runs, and jump into the default branch folder (for example `<repo>/main`)
+3. Clone repo, show a loading indicator and live clone output while it runs, and jump into the default branch folder (for example `<repo>/main`)
 
 For `owner/repo`, `wt` uses `gh repo clone` when available, and falls back to `git clone` using your preferred GitHub protocol (SSH/HTTPS)
 
