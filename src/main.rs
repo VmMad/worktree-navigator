@@ -243,8 +243,12 @@ fn main() -> Result<()> {
         terminal.backend_mut(),
         DisableBracketedPaste,
         DisableMouseCapture,
-        LeaveAlternateScreen
     )?;
+    while event::poll(Duration::from_millis(0)).unwrap_or(false) {
+        let _ = event::read();
+    }
+
+    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
     disable_raw_mode()?;
     terminal.show_cursor()?;
 
@@ -620,10 +624,8 @@ fn poll_sync_pr_updates(app: &mut App) {
         loop {
             match receiver.try_recv() {
                 Ok(event) => {
-                    let is_terminal = matches!(
-                        event,
-                        SyncPrEvent::Finished(_) | SyncPrEvent::Error(_)
-                    );
+                    let is_terminal =
+                        matches!(event, SyncPrEvent::Finished(_) | SyncPrEvent::Error(_));
                     events.push(event);
                     if is_terminal {
                         clear_receiver = true;
