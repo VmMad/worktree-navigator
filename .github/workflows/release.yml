@@ -38,13 +38,9 @@ jobs:
           key: ${{ matrix.target }}-cargo-${{ hashFiles('Cargo.lock') }}
           restore-keys: ${{ matrix.target }}-cargo-
 
-      - name: Set version from tag
-        run: |
-          VERSION="${GITHUB_REF_NAME#v}"
-          sed -i "s/^version = \".*\"/version = \"${VERSION}\"/" Cargo.toml
-          sed -i "/^name = \"worktree-navigator\"/{n;s/^version = \".*\"/version = \"${VERSION}\"/}" Cargo.lock
-
       - name: Build release binary
+        env:
+          WT_VERSION: ${{ github.ref_name }}
         run: cargo build --locked --release --target ${{ matrix.target }}
 
       - name: Package binary

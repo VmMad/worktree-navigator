@@ -76,9 +76,11 @@ You can also run:
 wt --update
 ```
 
-When a newer release is available, `wt` checks in the background while you use the TUI and prints a notice after you exit. The notice goes to stderr, so the shell wrapper still receives only the selected path on stdout.
+When a newer release is available, `wt` checks in the background while you use the TUI and prints a notice at most once per day after you exit. The notice goes to stderr, so the shell wrapper still receives only the selected path on stdout.
 
 `wt --update` selects the release asset matching your current binary target (for example `x86_64-linux-gnu` or `aarch64-linux-musl`) and remembers that asset for future updates.
+
+Release builds keep the tagged version. Local builds report a `-dev`-suffixed version and do not show update notices.
 
 ## Usage
 

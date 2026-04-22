@@ -9,6 +9,7 @@ use ratatui::{
 use crate::{
     app::{App, COMMANDS},
     types::{ActiveAction, CopySecretsPhase, SyncStatus},
+    version,
 };
 
 pub fn draw(f: &mut Frame, app: &mut App) {
@@ -88,9 +89,9 @@ fn draw_panel(f: &mut Frame, app: &mut App, area: Rect) {
     let block = Block::default()
         .title(format!(" ⎇  Worktree Navigator — {repo_name} "))
         .title_alignment(Alignment::Center)
-        .title_bottom(
+            .title_bottom(
             Line::from(Span::styled(
-                format!(" v{} ", env!("CARGO_PKG_VERSION")),
+                format!(" v{} ", version::current_version()),
                 Style::default().fg(Color::DarkGray),
             ))
             .alignment(Alignment::Right),
