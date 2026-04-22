@@ -372,6 +372,17 @@ fn open_action(app: &mut App, action: ActiveAction) {
     app.clear_input();
     app.delete_confirming = false;
     app.overlay_error = None;
+    app.new_branch_base = None;
+
+    if action == ActiveAction::NewBranch {
+        let idx = app.selected_index;
+        if idx >= app::COMMANDS.len() {
+            let wt_idx = idx - app::COMMANDS.len();
+            if let Some(wt) = app.worktrees.get(wt_idx) {
+                app.new_branch_base = Some(wt.branch.clone());
+            }
+        }
+    }
 
     if action == ActiveAction::SyncTrees {
         app.sync_results.clear();
@@ -476,7 +487,8 @@ fn handle_new_branch_key(app: &mut App, code: KeyCode) {
                 return;
             }
             let root = app.repo_root.clone();
-            match git::add_worktree(&root, &branch) {
+            let base = app.new_branch_base.as_deref();
+            match git::add_worktree(&root, &branch, base) {
                 Ok((_, dest)) => {
                     app.active_action = ActiveAction::None;
                     app.clear_input();
