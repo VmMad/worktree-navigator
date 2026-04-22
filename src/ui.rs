@@ -691,7 +691,16 @@ fn draw_new_branch_overlay(f: &mut Frame, app: &App, area: Rect) {
     }
 
     let has_err = app.overlay_error.is_some();
-    let popup = centered_rect(60, if has_err { 9 } else { 7 }, area);
+    let has_base = app.new_branch_base.is_some();
+    let mut height = 7;
+    if has_err {
+        height += 2;
+    }
+    if has_base {
+        height += 1;
+    }
+
+    let popup = centered_rect(60, height, area);
     f.render_widget(Clear, popup);
 
     let block = Block::default()
@@ -707,9 +716,13 @@ fn draw_new_branch_overlay(f: &mut Frame, app: &App, area: Rect) {
 
     let mut constraints = vec![
         Constraint::Length(1), // input
-        Constraint::Length(1), // spacer
-        Constraint::Length(1), // hint
     ];
+    if has_base {
+        constraints.push(Constraint::Length(1)); // base branch
+    }
+    constraints.push(Constraint::Length(1)); // spacer
+    constraints.push(Constraint::Length(1)); // hint
+
     if has_err {
         constraints.push(Constraint::Length(1)); // spacer
         constraints.push(Constraint::Length(1)); // error
@@ -720,6 +733,7 @@ fn draw_new_branch_overlay(f: &mut Frame, app: &App, area: Rect) {
         .constraints(constraints)
         .split(inner);
 
+    let mut row_idx = 0;
     f.render_widget(
         Paragraph::new(Line::from(vec![
             Span::styled("Branch name: ", Style::default().fg(Color::Gray)),
@@ -731,24 +745,39 @@ fn draw_new_branch_overlay(f: &mut Frame, app: &App, area: Rect) {
             ),
             Span::styled("█", Style::default().fg(Color::Yellow)),
         ])),
-        rows[0],
+        rows[row_idx],
     );
+    row_idx += 1;
 
+    if let Some(base) = &app.new_branch_base {
+        f.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled("Base: ", Style::default().fg(Color::Gray)),
+                Span::styled(base, Style::default().fg(Color::Cyan)),
+            ])),
+            rows[row_idx],
+        );
+        row_idx += 1;
+    }
+
+    row_idx += 1; // spacer
     f.render_widget(
         Paragraph::new(Span::styled(
             "Enter to create  Esc to cancel",
             Style::default().fg(Color::DarkGray),
         )),
-        rows[2],
+        rows[row_idx],
     );
+    row_idx += 1;
 
     if let Some(err) = &app.overlay_error {
+        row_idx += 1; // spacer
         f.render_widget(
             Paragraph::new(Span::styled(
                 format!("✗ {err}"),
                 Style::default().fg(Color::Red),
             )),
-            rows[4],
+            rows[row_idx],
         );
     }
 }

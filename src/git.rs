@@ -60,6 +60,7 @@ fn parse_worktree_porcelain(
 
         let path_line = lines.iter().find(|l| l.starts_with("worktree "));
         let branch_line = lines.iter().find(|l| l.starts_with("branch "));
+        let head_line = lines.iter().find(|l| l.starts_with("HEAD "));
         let is_bare = lines.iter().any(|l| *l == "bare");
 
         let Some(path_str) = path_line.map(|l| l.trim_start_matches("worktree ")) else {
@@ -75,6 +76,9 @@ fn parse_worktree_porcelain(
                 l.trim_start_matches("branch ")
                     .trim_start_matches("refs/heads/")
                     .to_string()
+            })
+            .or_else(|| {
+                head_line.map(|l| l.trim_start_matches("HEAD ").to_string())
             })
             .unwrap_or_else(|| "HEAD".to_string());
 
@@ -97,7 +101,11 @@ fn parse_worktree_porcelain(
     Ok(worktrees)
 }
 
-pub fn add_worktree(repo_root: &Path, branch_name: &str) -> Result<(Vec<String>, PathBuf)> {
+pub fn add_worktree(
+    repo_root: &Path,
+    branch_name: &str,
+    base_branch: Option<&str>,
+) -> Result<(Vec<String>, PathBuf)> {
     let mut messages = Vec::new();
 
     let sanitized = branch_name.replace('/', "-");
@@ -105,10 +113,16 @@ pub fn add_worktree(repo_root: &Path, branch_name: &str) -> Result<(Vec<String>,
     let dest_str = dest.to_string_lossy().to_string();
     let git_cwd = resolve_git_cwd(repo_root);
 
-    messages.push(format!("$ git worktree add {dest_str} -b {branch_name}"));
+    let mut args = vec!["worktree", "add", &dest_str, "-b", branch_name];
+    if let Some(base) = base_branch {
+        args.push(base);
+        messages.push(format!("$ git worktree add {dest_str} -b {branch_name} {base}"));
+    } else {
+        messages.push(format!("$ git worktree add {dest_str} -b {branch_name}"));
+    }
 
     let output = Command::new("git")
-        .args(["worktree", "add", &dest_str, "-b", branch_name])
+        .args(&args)
         .current_dir(&git_cwd)
         .output()
         .context("Failed to run git worktree add")?;
@@ -793,16 +807,22 @@ pub fn list_workspace_worktrees(workspace_dir: &Path) -> Result<Vec<Worktree>> {
             .current_dir(&path)
             .output();
 
-        let Ok(branch_out) = branch_output else {
-            continue;
+        let branch = match branch_output {
+            Ok(out) if out.status.success() => String::from_utf8_lossy(&out.stdout).trim().to_string(),
+            _ => {
+                let head_output = Command::new("git")
+                    .args(["rev-parse", "HEAD"])
+                    .current_dir(&path)
+                    .output();
+                let Ok(head_out) = head_output else {
+                    continue;
+                };
+                if !head_out.status.success() {
+                    continue;
+                }
+                String::from_utf8_lossy(&head_out.stdout).trim().to_string()
+            }
         };
-        if !branch_out.status.success() {
-            continue;
-        }
-
-        let branch = String::from_utf8_lossy(&branch_out.stdout)
-            .trim()
-            .to_string();
 
         let path_str = path.to_string_lossy().to_string();
         let is_main = match default_branch.as_deref() {
@@ -928,7 +948,7 @@ fn should_skip_dir(path: &Path) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{list_secret_files};
+    use super::list_secret_files;
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::process::Command;

@@ -78,6 +78,7 @@ pub struct App {
 
     pub input_buffer: String,
     pub input_cursor: usize,
+    pub new_branch_base: Option<String>,
     pub overlay_index: usize,
     pub delete_confirming: bool,
     pub overlay_error: Option<String>,
@@ -132,6 +133,7 @@ impl App {
             active_action: ActiveAction::None,
             input_buffer: String::new(),
             input_cursor: 0,
+            new_branch_base: None,
             overlay_index: 0,
             delete_confirming: false,
             overlay_error: None,
