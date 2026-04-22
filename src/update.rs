@@ -9,8 +9,11 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
+use crate::version;
+
 const REPO_FULL_NAME: &str = "VmMad/worktree-navigator";
 const UPDATE_CACHE_FILE: &str = "update-check.json";
+const UPDATE_CACHE_TTL_SECS: u64 = 24 * 60 * 60;
 const INSTALL_STATE_FILE: &str = "install-state.json";
 const BINARY_NAME_PREFIX: &str = "worktree-navigator-";
 
@@ -153,7 +156,19 @@ fn latest_release_for_manual_update() -> Result<Option<LatestRelease>> {
 }
 
 fn background_update_notice() -> Result<Option<UpdateNotice>> {
-    let current = normalize_version(env!("CARGO_PKG_VERSION"));
+    let current = version::current_version();
+    if version::is_dev_build(current) {
+        return Ok(None);
+    }
+    let current = normalize_version(current);
+
+    let now = now_unix_seconds();
+    if let Some(cache) = read_update_cache()
+        .filter(|cache| update_cache_is_fresh(cache.last_checked_unix, now))
+    {
+        return Ok(cached_update_notice(&cache, &current));
+    }
+
     let Some(latest) = fetch_latest_release(preferred_asset_name().as_deref(), None)? else {
         return Ok(None);
     };
@@ -165,6 +180,18 @@ fn background_update_notice() -> Result<Option<UpdateNotice>> {
         latest_version: latest.version,
         current_version: current,
     }))
+}
+
+fn cached_update_notice(cache: &UpdateCache, current: &str) -> Option<UpdateNotice> {
+    let latest_version = cache.latest_version.clone();
+    if cache.latest_asset_name.is_none() || !is_newer_version(&latest_version, current) {
+        return None;
+    }
+
+    Some(UpdateNotice {
+        latest_version,
+        current_version: current.to_string(),
+    })
 }
 
 fn fetch_latest_release(
@@ -412,9 +439,49 @@ fn update_state_dir() -> PathBuf {
     }
 }
 
+fn update_cache_is_fresh(last_checked_unix: u64, now_unix: u64) -> bool {
+    now_unix.saturating_sub(last_checked_unix) < UPDATE_CACHE_TTL_SECS
+}
+
 fn now_unix_seconds() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cache_is_fresh_for_less_than_24_hours() {
+        assert!(update_cache_is_fresh(1_000, 1_000 + UPDATE_CACHE_TTL_SECS - 1));
+        assert!(!update_cache_is_fresh(1_000, 1_000 + UPDATE_CACHE_TTL_SECS));
+    }
+
+    #[test]
+    fn cached_notice_requires_newer_version_and_asset() {
+        let current = "1.2.3";
+        let cache = UpdateCache {
+            last_checked_unix: 1_000,
+            latest_version: "1.2.4".to_string(),
+            latest_asset_name: Some("worktree-navigator-linux-x86_64".to_string()),
+        };
+        let notice = cached_update_notice(&cache, current).expect("expected notice");
+        assert_eq!(notice.latest_version, "1.2.4");
+        assert_eq!(notice.current_version, current);
+
+        let older_cache = UpdateCache {
+            latest_version: "1.2.2".to_string(),
+            ..cache
+        };
+        assert!(cached_update_notice(&older_cache, current).is_none());
+
+        let no_asset_cache = UpdateCache {
+            latest_asset_name: None,
+            ..older_cache
+        };
+        assert!(cached_update_notice(&no_asset_cache, current).is_none());
+    }
 }

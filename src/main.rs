@@ -3,6 +3,7 @@ mod git;
 mod types;
 mod ui;
 mod update;
+mod version;
 
 use std::io::stderr;
 use std::path::PathBuf;
@@ -27,7 +28,7 @@ fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
 
     if args.iter().any(|a| a == "--version" || a == "-V") {
-        println!("wt v{}", env!("CARGO_PKG_VERSION"));
+        println!("wt v{}", version::current_version());
         return Ok(());
     }
 
