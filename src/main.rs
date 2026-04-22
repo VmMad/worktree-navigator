@@ -234,18 +234,18 @@ fn main() -> Result<()> {
         }
     }
 
-    // Drain any mouse/key events buffered while the event loop was blocked
-    // (e.g. during synchronous git operations) so they don't leak into the shell.
-    while event::poll(Duration::from_millis(0)).unwrap_or(false) {
-        let _ = event::read();
-    }
-
+    // Disable mouse capture first so the terminal stops sending events, then
+    // drain whatever arrived before the disable was processed.
     execute!(
         terminal.backend_mut(),
         DisableBracketedPaste,
         DisableMouseCapture,
-        LeaveAlternateScreen
     )?;
+    while event::poll(Duration::from_millis(0)).unwrap_or(false) {
+        let _ = event::read();
+    }
+
+    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
     disable_raw_mode()?;
     terminal.show_cursor()?;
 
