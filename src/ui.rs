@@ -953,6 +953,7 @@ fn draw_clone_overlay(f: &mut Frame, app: &App, area: Rect) {
             .constraints([
                 Constraint::Length(1),
                 Constraint::Length(1),
+                Constraint::Length(1),
             ])
             .split(inner);
 
@@ -972,6 +973,16 @@ fn draw_clone_overlay(f: &mut Frame, app: &App, area: Rect) {
             )),
             rows[1],
         );
+
+        if let Some(line) = app.clone_output.last() {
+            f.render_widget(
+                Paragraph::new(Span::styled(
+                    format!("   {line}"),
+                    Style::default().fg(Color::DarkGray),
+                )),
+                rows[2],
+            );
+        }
         return;
     }
 

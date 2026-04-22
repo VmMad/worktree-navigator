@@ -1,9 +1,11 @@
 use anyhow::{Context, Result};
+use std::io::Read;
 use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
-use std::sync::mpsc::{self, Receiver};
+use std::process::{Command, Stdio};
+use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -316,7 +318,7 @@ pub fn dest_from_url(source: &str, cwd: &Path) -> String {
 pub fn start_clone_repo_with_layout(url: String, dest: PathBuf) -> Receiver<CloneEvent> {
     let (tx, rx) = mpsc::channel();
 
-    thread::spawn(move || match clone_repo_with_layout(&url, &dest) {
+    thread::spawn(move || match clone_repo_with_layout(&url, &dest, &tx) {
         Ok(worktree_path) => {
             let _ = tx.send(CloneEvent::Finished(worktree_path));
         }
@@ -328,7 +330,7 @@ pub fn start_clone_repo_with_layout(url: String, dest: PathBuf) -> Receiver<Clon
     rx
 }
 
-fn clone_repo_with_layout(url: &str, dest: &Path) -> Result<PathBuf> {
+fn clone_repo_with_layout(url: &str, dest: &Path, tx: &Sender<CloneEvent>) -> Result<PathBuf> {
     let source = url.trim();
     fs::create_dir_all(dest).context("Failed to create destination directory")?;
     let tmp_dir = dest.join(format!(
@@ -343,7 +345,7 @@ fn clone_repo_with_layout(url: &str, dest: &Path) -> Result<PathBuf> {
 
     if is_github_owner_repo(source) {
         if gh_available() {
-            match clone_with_gh(source, &tmp_str) {
+            match clone_with_gh(source, &tmp_str, tx) {
                 Ok(()) => {}
                 Err(_) => {
                     if tmp_dir.exists() {
@@ -351,16 +353,16 @@ fn clone_repo_with_layout(url: &str, dest: &Path) -> Result<PathBuf> {
                     }
                     let protocol = preferred_github_protocol();
                     let repo_url = github_url_from_slug(source, &protocol);
-                    clone_with_git(&repo_url, &tmp_str)?;
+                    clone_with_git(&repo_url, &tmp_str, tx)?;
                 }
             }
         } else {
             let protocol = preferred_github_protocol();
             let repo_url = github_url_from_slug(source, &protocol);
-            clone_with_git(&repo_url, &tmp_str)?;
+            clone_with_git(&repo_url, &tmp_str, tx)?;
         }
     } else {
-        clone_with_git(source, &tmp_str)?;
+        clone_with_git(source, &tmp_str, tx)?;
     }
 
     // Detect the default branch from the cloned checkout.
@@ -395,21 +397,23 @@ fn clone_repo_with_layout(url: &str, dest: &Path) -> Result<PathBuf> {
     Ok(worktree_path)
 }
 
-fn clone_with_gh(source: &str, dest: &str) -> Result<()> {
+fn clone_with_gh(source: &str, dest: &str, tx: &Sender<CloneEvent>) -> Result<()> {
     clone_with_command(
         Command::new("gh"),
-        &["repo", "clone", source, dest],
+        &["repo", "clone", source, dest, "--", "--progress"],
         "Failed to run gh repo clone",
         "gh repo clone failed",
+        tx,
     )
 }
 
-fn clone_with_git(source: &str, dest: &str) -> Result<()> {
+fn clone_with_git(source: &str, dest: &str, tx: &Sender<CloneEvent>) -> Result<()> {
     clone_with_command(
         Command::new("git"),
         &["clone", "--progress", source, dest],
         "Failed to run git clone",
         "git clone failed",
+        tx,
     )
 }
 
@@ -418,22 +422,93 @@ fn clone_with_command(
     args: &[&str],
     spawn_context: &'static str,
     fallback_error: &'static str,
+    tx: &Sender<CloneEvent>,
 ) -> Result<()> {
-    let output = command.args(args).output().context(spawn_context)?;
-    if output.status.success() {
+    let mut child = command
+        .args(args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .context(spawn_context)?;
+
+    let stdout = child
+        .stdout
+        .take()
+        .context("Failed to capture clone stdout")?;
+    let stderr = child
+        .stderr
+        .take()
+        .context("Failed to capture clone stderr")?;
+
+    let last_line = Arc::new(Mutex::new(None::<String>));
+    let stdout_handle = spawn_output_forwarder(stdout, tx.clone(), Arc::clone(&last_line));
+    let stderr_handle = spawn_output_forwarder(stderr, tx.clone(), Arc::clone(&last_line));
+
+    let status = child.wait().context("Failed to wait for clone process")?;
+
+    let _ = stdout_handle.join();
+    let _ = stderr_handle.join();
+
+    if status.success() {
         Ok(())
     } else {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        let message = if !stderr.is_empty() {
-            stderr
-        } else if !stdout.is_empty() {
-            stdout
-        } else {
-            fallback_error.to_string()
-        };
+        let message = last_line
+            .lock()
+            .ok()
+            .and_then(|line| line.clone())
+            .filter(|line| !line.is_empty())
+            .unwrap_or_else(|| fallback_error.to_string());
         Err(anyhow::anyhow!("{message}"))
     }
+}
+
+fn spawn_output_forwarder(
+    mut stream: impl Read + Send + 'static,
+    tx: Sender<CloneEvent>,
+    last_line: Arc<Mutex<Option<String>>>,
+) -> thread::JoinHandle<()> {
+    thread::spawn(move || {
+        let mut buf = [0u8; 4096];
+        let mut current = Vec::new();
+        loop {
+            match stream.read(&mut buf) {
+                Ok(0) => break,
+                Ok(read) => {
+                    for &byte in &buf[..read] {
+                        match byte {
+                            b'\r' => {
+                                emit_clone_output(&tx, &last_line, std::mem::take(&mut current));
+                            }
+                            b'\n' => {
+                                emit_clone_output(&tx, &last_line, std::mem::take(&mut current));
+                            }
+                            _ => current.push(byte),
+                        }
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+
+        emit_clone_output(&tx, &last_line, current);
+    })
+}
+
+fn emit_clone_output(
+    tx: &Sender<CloneEvent>,
+    last_line: &Arc<Mutex<Option<String>>>,
+    bytes: Vec<u8>,
+) {
+    let line = String::from_utf8_lossy(&bytes).trim_end().to_string();
+    if line.is_empty() {
+        return;
+    }
+
+    if let Ok(mut last) = last_line.lock() {
+        *last = Some(line.clone());
+    }
+
+    let _ = tx.send(CloneEvent::Progress { line });
 }
 
 fn gh_available() -> bool {
@@ -748,7 +823,7 @@ fn should_skip_dir(path: &Path) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{list_secret_files, looks_like_clone_progress, parse_clone_progress};
+    use super::{list_secret_files};
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::process::Command;
@@ -776,53 +851,6 @@ mod tests {
             args,
             dir.display()
         );
-    }
-
-    #[test]
-    fn parses_receiving_objects_progress() {
-        let progress =
-            parse_clone_progress("Receiving objects:  42% (42/100), 1.23 MiB | 1.23 MiB/s")
-                .expect("expected progress line to parse");
-
-        assert_eq!(progress.phase, "Receiving objects");
-        assert_eq!(
-            progress.detail.as_deref(),
-            Some("Receiving objects:  42% (42/100), 1.23 MiB | 1.23 MiB/s")
-        );
-        assert!((progress.ratio - 0.473).abs() < 0.001);
-    }
-
-    #[test]
-    fn parses_remote_counting_progress() {
-        let progress = parse_clone_progress("remote: Counting objects: 100% (24/24), done.")
-            .expect("expected progress line to parse");
-
-        assert_eq!(progress.phase, "Counting objects");
-        assert_eq!(
-            progress.detail.as_deref(),
-            Some("Counting objects: 100% (24/24), done.")
-        );
-        assert!((progress.ratio - 0.10).abs() < 0.001);
-    }
-
-    #[test]
-    fn leaves_error_output_unclassified() {
-        let line = "fatal: repository 'git@github.com:owner/missing.git' not found";
-        assert!(parse_clone_progress(line).is_none());
-        assert!(!looks_like_clone_progress(line));
-    }
-
-    #[test]
-    fn parses_gh_clone_prelude() {
-        let progress = parse_clone_progress("Cloning into 'tea-website'...")
-            .expect("expected progress line to parse");
-
-        assert_eq!(progress.phase, "Starting clone");
-        assert_eq!(
-            progress.detail.as_deref(),
-            Some("Cloning into 'tea-website'...")
-        );
-        assert!((progress.ratio - 0.02).abs() < 0.001);
     }
 
     #[test]

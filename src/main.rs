@@ -802,6 +802,7 @@ fn handle_clone_key(app: &mut App, code: KeyCode) {
             } else {
                 app.clone_loading = true;
                 app.clone_error = None;
+                app.clear_clone_output();
                 app.reset_clone_animation();
                 app.clone_receiver = Some(git::start_clone_repo_with_layout(
                     app.clone_url.clone(),
@@ -843,6 +844,9 @@ fn poll_clone_updates(app: &mut App) {
 
     for event in events {
         match event {
+            CloneEvent::Progress { line } => {
+                app.push_clone_output(line);
+            }
             CloneEvent::Finished(worktree_path) => {
                 app.clone_loading = false;
                 app.exit_path = Some(worktree_path.to_string_lossy().into_owned());

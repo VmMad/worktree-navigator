@@ -1,9 +1,7 @@
 use std::path::PathBuf;
 use std::sync::mpsc::Receiver;
 
-use crate::types::{
-    ActiveAction, CloneEvent, CopySecretsPhase, SyncResult, Worktree,
-};
+use crate::types::{ActiveAction, CloneEvent, CopySecretsPhase, SyncResult, Worktree};
 
 pub const COMMANDS: &[(&str, &str)] = &[
     ("New Branch", "n"),
@@ -35,6 +33,7 @@ pub struct App {
     pub clone_receiver: Option<Receiver<CloneEvent>>,
     pub clone_animation_frame: usize,
     pub clone_error: Option<String>,
+    pub clone_output: Vec<String>,
 
     pub selected_index: usize,
     pub active_action: ActiveAction,
@@ -82,6 +81,7 @@ impl App {
             clone_receiver: None,
             clone_animation_frame: 0,
             clone_error: None,
+            clone_output: vec![],
             selected_index: 0,
             active_action: ActiveAction::None,
             input_buffer: String::new(),
@@ -190,6 +190,15 @@ impl App {
 
     pub fn reset_clone_animation(&mut self) {
         self.clone_animation_frame = 0;
+    }
+
+    pub fn clear_clone_output(&mut self) {
+        self.clone_output.clear();
+    }
+
+    pub fn push_clone_output(&mut self, line: String) {
+        self.clone_output.clear();
+        self.clone_output.push(line);
     }
 
     pub fn advance_clone_animation(&mut self) {

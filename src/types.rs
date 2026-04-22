@@ -43,6 +43,7 @@ pub struct SyncResult {
 
 #[derive(Debug)]
 pub enum CloneEvent {
+    Progress { line: String },
     Finished(PathBuf),
     Error(String),
 }
