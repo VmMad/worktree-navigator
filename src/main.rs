@@ -111,8 +111,8 @@ fn main() -> Result<()> {
 
     loop {
         poll_clone_updates(&mut app);
-        if app.clone_loading {
-            app.advance_clone_animation();
+        if app.clone_loading || app.new_branch_loading || app.delete_loading || app.copy_secrets_loading {
+            app.advance_loading_animation();
         }
         let wants_mouse_capture = app.active_action != ActiveAction::CloneRepo;
         if wants_mouse_capture != mouse_capture_enabled {
@@ -136,6 +136,67 @@ fn main() -> Result<()> {
                 app.sync_results = vec![result];
                 app.sync_loading = false;
                 refresh_worktrees(&mut app);
+            }
+        }
+
+        // Execute pending new branch after the loading frame has been rendered.
+        if let Some(branch) = app.new_branch_pending.take() {
+            let root = app.repo_root.clone();
+            match git::add_worktree(&root, &branch) {
+                Ok((_, dest)) => {
+                    app.new_branch_loading = false;
+                    app.active_action = ActiveAction::None;
+                    app.clear_input();
+                    refresh_worktrees(&mut app);
+                    app.exit_path = Some(dest.to_string_lossy().into_owned());
+                    app.should_quit = true;
+                }
+                Err(e) => {
+                    app.new_branch_loading = false;
+                    app.overlay_error = Some(format!("Failed to create branch: {e}"));
+                }
+            }
+        }
+
+        // Execute pending delete after the loading frame has been rendered.
+        if let Some(path) = app.delete_pending.take() {
+            let root = app.repo_root.clone();
+            match git::remove_worktree(&root, &path) {
+                Ok(_) => {
+                    app.delete_loading = false;
+                    app.active_action = ActiveAction::None;
+                    app.overlay_error = None;
+                    refresh_worktrees(&mut app);
+                }
+                Err(e) => {
+                    app.delete_loading = false;
+                    app.active_action = ActiveAction::None;
+                    app.overlay_error = Some(format!("Failed to delete worktree: {e}"));
+                }
+            }
+        }
+
+        // Execute pending copy secrets after the loading frame has been rendered.
+        if app.copy_secrets_pending {
+            app.copy_secrets_pending = false;
+            let source = app.copy_secrets_source_idx.and_then(|i| app.worktrees.get(i)).cloned();
+            let target = app.worktrees.get(app.copy_secrets_target_idx).cloned();
+            if let (Some(source), Some(target)) = (source, target) {
+                match git::copy_secret_files(&source, &target, true) {
+                    Ok(_) => {
+                        app.copy_secrets_loading = false;
+                        app.active_action = ActiveAction::None;
+                        app.overlay_error = None;
+                        refresh_worktrees(&mut app);
+                    }
+                    Err(e) => {
+                        app.copy_secrets_loading = false;
+                        app.copy_secrets_phase = CopySecretsPhase::SelectTarget;
+                        app.overlay_error = Some(format!("Failed to copy secrets: {e}"));
+                    }
+                }
+            } else {
+                app.copy_secrets_loading = false;
             }
         }
 
@@ -171,6 +232,12 @@ fn main() -> Result<()> {
         if app.should_quit {
             break;
         }
+    }
+
+    // Drain any mouse/key events buffered while the event loop was blocked
+    // (e.g. during synchronous git operations) so they don't leak into the shell.
+    while event::poll(Duration::from_millis(0)).unwrap_or(false) {
+        let _ = event::read();
     }
 
     execute!(
@@ -220,9 +287,12 @@ fn handle_mouse(app: &mut App, kind: MouseEventKind, column: u16, row: u16) {
     let sync_select = app.active_action == ActiveAction::SyncTrees
         && !app.sync_loading
         && app.sync_results.is_empty();
-    let delete_select = app.active_action == ActiveAction::Delete && !app.delete_confirming;
+    let delete_select = app.active_action == ActiveAction::Delete
+        && !app.delete_confirming
+        && !app.delete_loading;
     let copy_select = app.active_action == ActiveAction::CopySecrets
-        && app.copy_secrets_phase != CopySecretsPhase::ConfirmOverwrite;
+        && app.copy_secrets_phase != CopySecretsPhase::ConfirmOverwrite
+        && !app.copy_secrets_loading;
 
     // While a blocking overlay is open (not inline-select), ignore mouse.
     if app.active_action != ActiveAction::None && !sync_select && !delete_select && !copy_select {
@@ -463,6 +533,9 @@ fn handle_sync_trees_key(app: &mut App, code: KeyCode) {
 }
 
 fn handle_new_branch_key(app: &mut App, code: KeyCode) {
+    if app.new_branch_loading {
+        return;
+    }
     match code {
         KeyCode::Esc => {
             app.active_action = ActiveAction::None;
@@ -475,19 +548,9 @@ fn handle_new_branch_key(app: &mut App, code: KeyCode) {
             if branch.is_empty() {
                 return;
             }
-            let root = app.repo_root.clone();
-            match git::add_worktree(&root, &branch) {
-                Ok((_, dest)) => {
-                    app.active_action = ActiveAction::None;
-                    app.clear_input();
-                    refresh_worktrees(app);
-                    app.exit_path = Some(dest.to_string_lossy().into_owned());
-                    app.should_quit = true;
-                }
-                Err(e) => {
-                    app.overlay_error = Some(format!("Failed to create branch: {e}"));
-                }
-            }
+            app.overlay_error = None;
+            app.new_branch_loading = true;
+            app.new_branch_pending = Some(branch);
         }
         KeyCode::Char(c) => app.input_char(c),
         _ => {}
@@ -531,6 +594,9 @@ fn handle_sync_pr_key(app: &mut App, code: KeyCode) {
 }
 
 fn handle_delete_key(app: &mut App, code: KeyCode) {
+    if app.delete_loading {
+        return;
+    }
     let deletable_len = app.deletable_worktrees().len();
 
     if app.delete_confirming {
@@ -542,18 +608,8 @@ fn handle_delete_key(app: &mut App, code: KeyCode) {
                     .map(|wt| wt.path.clone());
                 app.delete_confirming = false;
                 if let Some(path) = path {
-                    let root = app.repo_root.clone();
-                    match git::remove_worktree(&root, &path) {
-                        Ok(_) => {
-                            app.active_action = ActiveAction::None;
-                            app.overlay_error = None;
-                            refresh_worktrees(app);
-                        }
-                        Err(e) => {
-                            app.active_action = ActiveAction::None;
-                            app.overlay_error = Some(format!("Failed to delete worktree: {e}"));
-                        }
-                    }
+                    app.delete_loading = true;
+                    app.delete_pending = Some(path);
                 }
             }
             KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
@@ -579,6 +635,9 @@ fn handle_delete_key(app: &mut App, code: KeyCode) {
 }
 
 fn handle_copy_secrets_key(app: &mut App, code: KeyCode) {
+    if app.copy_secrets_loading {
+        return;
+    }
     match app.copy_secrets_phase {
         CopySecretsPhase::SelectSource => match code {
             KeyCode::Esc => {
@@ -703,29 +762,11 @@ fn finish_copy_secrets(app: &mut App, confirmed: bool) {
         app.copy_secrets_phase = CopySecretsPhase::SelectTarget;
         return;
     }
-
-    let Some(source_idx) = app.copy_secrets_source_idx else {
+    if app.copy_secrets_source_idx.is_none() {
         return;
-    };
-    let target_idx = app.copy_secrets_target_idx;
-    let Some(source) = app.worktrees.get(source_idx).cloned() else {
-        return;
-    };
-    let Some(target) = app.worktrees.get(target_idx).cloned() else {
-        return;
-    };
-
-    match git::copy_secret_files(&source, &target, true) {
-        Ok(_) => {
-            app.active_action = ActiveAction::None;
-            app.overlay_error = None;
-            refresh_worktrees(app);
-        }
-        Err(err) => {
-            app.copy_secrets_phase = CopySecretsPhase::SelectTarget;
-            app.overlay_error = Some(format!("Failed to copy secrets: {err}"));
-        }
     }
+    app.copy_secrets_loading = true;
+    app.copy_secrets_pending = true;
 }
 
 fn handle_copy_secrets_confirm_click(app: &mut App, column: u16, row: u16) {
