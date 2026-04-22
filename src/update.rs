@@ -1,16 +1,16 @@
 use std::fs;
-use std::io::{self, IsTerminal, Write};
+use std::io::{self, Write};
 use std::path::PathBuf;
 use std::process::Command;
+use std::sync::mpsc::{self, Receiver};
+use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 const REPO_FULL_NAME: &str = "VmMad/worktree-navigator";
-const CACHE_TTL_SECS: u64 = 60 * 60 * 6;
 const UPDATE_CACHE_FILE: &str = "update-check.json";
-const AUTO_UPDATE_SUPPRESS_FILE: &str = "auto-update-suppressed";
 const INSTALL_STATE_FILE: &str = "install-state.json";
 const BINARY_NAME_PREFIX: &str = "worktree-navigator-";
 
@@ -32,6 +32,7 @@ struct InstallState {
 struct LatestRelease {
     version: String,
     asset_name: Option<String>,
+    from_cache: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -45,69 +46,28 @@ struct GhAsset {
     name: String,
 }
 
-pub enum StartupUpdateAction {
-    Continue,
-    ExitAfterUpdateFlow,
+pub struct UpdateNotice {
+    pub latest_version: String,
+    pub current_version: String,
 }
 
-pub fn maybe_prompt_for_update() -> Result<StartupUpdateAction> {
-    if is_auto_update_suppressed() {
-        return Ok(StartupUpdateAction::Continue);
-    }
-
-    let current = normalize_version(env!("CARGO_PKG_VERSION"));
-    let Some(latest) = latest_release_quick()? else {
-        return Ok(StartupUpdateAction::Continue);
-    };
-
-    if !is_newer_version(&latest.version, &current) {
-        return Ok(StartupUpdateAction::Continue);
-    }
-
-    // Skip prompt when we cannot map this installation to a compatible release asset.
-    if latest.asset_name.is_none() {
-        return Ok(StartupUpdateAction::Continue);
-    }
-
-    if !io::stdin().is_terminal() {
-        return Ok(StartupUpdateAction::Continue);
-    }
-
-    let mut stderr = io::stderr();
-    writeln!(
-        stderr,
-        "Update available for wt: v{} (current: v{})",
-        latest.version, current
-    )?;
-    write!(stderr, "Update now? [y/N]: ")?;
-    stderr.flush()?;
-
-    let mut answer = String::new();
-    io::stdin().read_line(&mut answer)?;
-    let accepted = matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes");
-
-    if accepted {
-        run_update_internal(latest.asset_name.as_deref(), Some(latest.version.as_str()))?;
-        writeln!(
-            stderr,
-            "wt updated. Run `wt` again to start the new version."
-        )?;
-        Ok(StartupUpdateAction::ExitAfterUpdateFlow)
-    } else {
-        suppress_auto_updates()?;
-        writeln!(
-            stderr,
-            "Auto-update prompts disabled. Use `wt --update` whenever you want to update."
-        )?;
-        Ok(StartupUpdateAction::Continue)
-    }
+pub fn start_background_update_check() -> Receiver<Option<UpdateNotice>> {
+    let (tx, rx) = mpsc::channel();
+    thread::spawn(move || {
+        let notice = background_update_notice().ok().flatten();
+        let _ = tx.send(notice);
+    });
+    rx
 }
 
 pub fn run_manual_update() -> Result<()> {
-    let latest = latest_release_quick()?;
+    let latest = latest_release_for_manual_update()?;
     run_update_internal(
         latest.as_ref().and_then(|r| r.asset_name.as_deref()),
-        latest.as_ref().map(|r| r.version.as_str()),
+        latest
+            .as_ref()
+            .filter(|r| !r.from_cache)
+            .map(|r| r.version.as_str()),
     )
 }
 
@@ -159,7 +119,6 @@ fn run_update_internal(asset_name_hint: Option<&str>, latest_hint: Option<&str>)
     }
 
     fs::rename(&tmp, &target).context("Failed to replace wt binary with updated version")?;
-    clear_auto_update_suppression();
     let _ = write_install_state(&InstallState {
         preferred_asset_name: Some(asset_name.to_string()),
     });
@@ -179,73 +138,53 @@ fn run_update_internal(asset_name_hint: Option<&str>, latest_hint: Option<&str>)
     Ok(())
 }
 
-fn latest_release_quick() -> Result<Option<LatestRelease>> {
-    let install_state = read_install_state();
-    let preferred_asset = install_state
-        .as_ref()
-        .and_then(|s| s.preferred_asset_name.as_deref());
-    let cache = read_update_cache();
-    let now = now_unix_seconds();
-    if let Some(cache) = &cache {
-        let age = now.saturating_sub(cache.last_checked_unix);
-        if age <= CACHE_TTL_SECS && !cache.latest_version.is_empty() {
-            let asset_name = cache
-                .latest_asset_name
-                .clone()
-                .or_else(|| preferred_asset.map(str::to_string));
-            return Ok(Some(LatestRelease {
-                version: cache.latest_version.clone(),
-                asset_name,
-            }));
-        }
+fn latest_release_for_manual_update() -> Result<Option<LatestRelease>> {
+    let preferred_asset = preferred_asset_name();
+    if let Some(release) = fetch_latest_release(preferred_asset.as_deref(), None)? {
+        return Ok(Some(release));
     }
 
-    // Keep startup snappy by bounding this call to ~1 second.
-    let out = Command::new("timeout")
-        .args([
-            "1",
-            "gh",
-            "api",
-            &format!("repos/{REPO_FULL_NAME}/releases/latest"),
-        ])
-        .output();
+    let cache = read_update_cache();
+    Ok(cache.map(|c| LatestRelease {
+        version: c.latest_version,
+        asset_name: c.latest_asset_name.or(preferred_asset),
+        from_cache: true,
+    }))
+}
 
-    let Ok(out) = out else {
-        return Ok(cache.map(|c| LatestRelease {
-            version: c.latest_version,
-            asset_name: c
-                .latest_asset_name
-                .or_else(|| preferred_asset.map(str::to_string)),
-        }));
+fn background_update_notice() -> Result<Option<UpdateNotice>> {
+    let current = normalize_version(env!("CARGO_PKG_VERSION"));
+    let Some(latest) = fetch_latest_release(preferred_asset_name().as_deref(), None)? else {
+        return Ok(None);
     };
+    if latest.asset_name.is_none() || !is_newer_version(&latest.version, &current) {
+        return Ok(None);
+    }
+
+    Ok(Some(UpdateNotice {
+        latest_version: latest.version,
+        current_version: current,
+    }))
+}
+
+fn fetch_latest_release(
+    preferred_asset: Option<&str>,
+    timeout_secs: Option<u64>,
+) -> Result<Option<LatestRelease>> {
+    let out = latest_release_command(timeout_secs)
+        .output()
+        .context("Failed to run `gh api` while checking the latest wt release")?;
+
     if !out.status.success() {
-        return Ok(cache.map(|c| LatestRelease {
-            version: c.latest_version,
-            asset_name: c
-                .latest_asset_name
-                .or_else(|| preferred_asset.map(str::to_string)),
-        }));
+        return Ok(None);
     }
 
     let release: GhRelease = match serde_json::from_slice(&out.stdout) {
         Ok(r) => r,
-        Err(_) => {
-            return Ok(cache.map(|c| LatestRelease {
-                version: c.latest_version,
-                asset_name: c
-                    .latest_asset_name
-                    .or_else(|| preferred_asset.map(str::to_string)),
-            }));
-        }
+        Err(_) => return Ok(None),
     };
-
     if release.tag_name.trim().is_empty() {
-        return Ok(cache.map(|c| LatestRelease {
-            version: c.latest_version,
-            asset_name: c
-                .latest_asset_name
-                .or_else(|| preferred_asset.map(str::to_string)),
-        }));
+        return Ok(None);
     }
 
     let latest = normalize_version(&release.tag_name);
@@ -253,7 +192,7 @@ fn latest_release_quick() -> Result<Option<LatestRelease>> {
     let selected_asset = select_asset_name(&asset_names, preferred_asset);
 
     let cache_value = UpdateCache {
-        last_checked_unix: now,
+        last_checked_unix: now_unix_seconds(),
         latest_version: latest.clone(),
         latest_asset_name: selected_asset.clone(),
     };
@@ -267,7 +206,30 @@ fn latest_release_quick() -> Result<Option<LatestRelease>> {
     Ok(Some(LatestRelease {
         version: latest,
         asset_name: selected_asset,
+        from_cache: false,
     }))
+}
+
+fn latest_release_command(timeout_secs: Option<u64>) -> Command {
+    let endpoint = format!("repos/{REPO_FULL_NAME}/releases/latest");
+
+    if let Some(timeout_secs) = timeout_secs {
+        let mut command = Command::new("timeout");
+        command.arg(timeout_secs.to_string());
+        command.arg("gh");
+        command.arg("api");
+        command.arg(endpoint);
+        return command;
+    }
+
+    let mut command = Command::new("gh");
+    command.arg("api");
+    command.arg(endpoint);
+    command
+}
+
+fn preferred_asset_name() -> Option<String> {
+    read_install_state().and_then(|s| s.preferred_asset_name)
 }
 
 fn normalize_version(raw: &str) -> String {
@@ -438,22 +400,6 @@ fn write_install_state(state: &InstallState) -> Result<()> {
     let data = serde_json::to_string(state).context("Failed to serialize install state")?;
     fs::write(dir.join(INSTALL_STATE_FILE), data).context("Failed to write install state")?;
     Ok(())
-}
-
-fn is_auto_update_suppressed() -> bool {
-    update_state_dir().join(AUTO_UPDATE_SUPPRESS_FILE).exists()
-}
-
-fn suppress_auto_updates() -> Result<()> {
-    let dir = update_state_dir();
-    fs::create_dir_all(&dir).context("Failed to create update state directory")?;
-    fs::write(dir.join(AUTO_UPDATE_SUPPRESS_FILE), "")
-        .context("Failed to persist auto-update preference")?;
-    Ok(())
-}
-
-fn clear_auto_update_suppression() {
-    let _ = fs::remove_file(update_state_dir().join(AUTO_UPDATE_SUPPRESS_FILE));
 }
 
 fn update_state_dir() -> PathBuf {

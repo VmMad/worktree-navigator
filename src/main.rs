@@ -21,21 +21,19 @@ use crossterm::{
 use ratatui::{Terminal, backend::CrosstermBackend};
 
 use app::App;
-use types::{ActiveAction, CloneEvent, CopySecretsPhase};
+use types::{ActiveAction, CloneEvent, CopySecretsPhase, SyncPrEvent};
 
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
 
-    if args.iter().any(|a| a == "--update") {
-        update::run_manual_update()?;
+    if args.iter().any(|a| a == "--version" || a == "-V") {
+        println!("wt v{}", env!("CARGO_PKG_VERSION"));
         return Ok(());
     }
 
-    if !args.iter().any(|a| a == "--mark-tree") {
-        match update::maybe_prompt_for_update()? {
-            update::StartupUpdateAction::Continue => {}
-            update::StartupUpdateAction::ExitAfterUpdateFlow => return Ok(()),
-        }
+    if args.iter().any(|a| a == "--update") {
+        update::run_manual_update()?;
+        return Ok(());
     }
 
     let cwd = std::env::var("WT_CWD")
@@ -43,6 +41,8 @@ fn main() -> Result<()> {
         .unwrap_or_else(|_| std::env::current_dir().expect("no cwd"));
 
     let mark_tree = args.iter().any(|a| a == "--mark-tree");
+    let mut update_notice_rx = (!mark_tree).then(update::start_background_update_check);
+    let mut update_notice = None;
 
     if mark_tree {
         git::create_workspace_marker(&cwd)?;
@@ -110,9 +110,28 @@ fn main() -> Result<()> {
     }
 
     loop {
+        if let Some(rx) = update_notice_rx.as_ref() {
+            match rx.try_recv() {
+                Ok(notice) => {
+                    update_notice = notice;
+                    update_notice_rx = None;
+                }
+                Err(TryRecvError::Empty) => {}
+                Err(TryRecvError::Disconnected) => update_notice_rx = None,
+            }
+        }
+
         poll_clone_updates(&mut app);
-        if app.clone_loading {
-            app.advance_clone_animation();
+        poll_sync_pr_updates(&mut app);
+        poll_sync_updates(&mut app);
+        if app.sync_loading
+            || app.sync_pr_loading
+            || app.clone_loading
+            || app.new_branch_loading
+            || app.delete_loading
+            || app.copy_secrets_loading
+        {
+            app.advance_loading_animation();
         }
         let wants_mouse_capture = app.active_action != ActiveAction::CloneRepo;
         if wants_mouse_capture != mouse_capture_enabled {
@@ -125,26 +144,22 @@ fn main() -> Result<()> {
         }
         terminal.draw(|f| ui::draw(f, &mut app))?;
 
-        // Execute pending sync after the loading frame has been rendered.
+        // Start sync after the loading frame has been rendered.
         if app.sync_pending {
             app.sync_pending = false;
             let wt = app.worktrees.get(app.sync_selected_idx).cloned();
             if let Some(wt) = wt {
                 let root = app.repo_root.clone();
-                let (fetch_ok, result) = git::sync_one_worktree(&root, &wt);
-                app.sync_fetch_ok = fetch_ok;
-                app.sync_results = vec![result];
-                app.sync_loading = false;
-                refresh_worktrees(&mut app);
+                app.sync_receiver = Some(git::start_sync_one_worktree(root, wt));
             }
         }
 
-        // Execute pending PR sync after the loading frame has been rendered.
-        if let Some(pr_number) = app.sync_pr_pending.take() {
+        // Execute pending new branch after the loading frame has been rendered.
+        if let Some(branch) = app.new_branch_pending.take() {
             let root = app.repo_root.clone();
-            match git::checkout_pr_as_worktree(&root, pr_number) {
+            match git::add_worktree(&root, &branch) {
                 Ok((_, dest)) => {
-                    app.sync_pr_loading = false;
+                    app.new_branch_loading = false;
                     app.active_action = ActiveAction::None;
                     app.clear_input();
                     refresh_worktrees(&mut app);
@@ -152,9 +167,54 @@ fn main() -> Result<()> {
                     app.should_quit = true;
                 }
                 Err(e) => {
-                    app.sync_pr_loading = false;
-                    app.overlay_error = Some(format!("Failed to sync PR #{pr_number}: {e}"));
+                    app.new_branch_loading = false;
+                    app.overlay_error = Some(format!("Failed to create branch: {e}"));
                 }
+            }
+        }
+
+        // Execute pending delete after the loading frame has been rendered.
+        if let Some(path) = app.delete_pending.take() {
+            let root = app.repo_root.clone();
+            match git::remove_worktree(&root, &path) {
+                Ok(_) => {
+                    app.delete_loading = false;
+                    app.active_action = ActiveAction::None;
+                    app.overlay_error = None;
+                    refresh_worktrees(&mut app);
+                }
+                Err(e) => {
+                    app.delete_loading = false;
+                    app.active_action = ActiveAction::None;
+                    app.overlay_error = Some(format!("Failed to delete worktree: {e}"));
+                }
+            }
+        }
+
+        // Execute pending copy secrets after the loading frame has been rendered.
+        if app.copy_secrets_pending {
+            app.copy_secrets_pending = false;
+            let source = app
+                .copy_secrets_source_idx
+                .and_then(|i| app.worktrees.get(i))
+                .cloned();
+            let target = app.worktrees.get(app.copy_secrets_target_idx).cloned();
+            if let (Some(source), Some(target)) = (source, target) {
+                match git::copy_secret_files(&source, &target, true) {
+                    Ok(_) => {
+                        app.copy_secrets_loading = false;
+                        app.active_action = ActiveAction::None;
+                        app.overlay_error = None;
+                        refresh_worktrees(&mut app);
+                    }
+                    Err(e) => {
+                        app.copy_secrets_loading = false;
+                        app.copy_secrets_phase = CopySecretsPhase::SelectTarget;
+                        app.overlay_error = Some(format!("Failed to copy secrets: {e}"));
+                    }
+                }
+            } else {
+                app.copy_secrets_loading = false;
             }
         }
 
@@ -173,6 +233,12 @@ fn main() -> Result<()> {
         }
     }
 
+    // Drain any mouse/key events buffered while the event loop was blocked
+    // (e.g. during synchronous git operations) so they don't leak into the shell.
+    while event::poll(Duration::from_millis(0)).unwrap_or(false) {
+        let _ = event::read();
+    }
+
     execute!(
         terminal.backend_mut(),
         DisableBracketedPaste,
@@ -181,6 +247,20 @@ fn main() -> Result<()> {
     )?;
     disable_raw_mode()?;
     terminal.show_cursor()?;
+
+    if update_notice.is_none()
+        && let Some(rx) = update_notice_rx.take()
+        && let Ok(notice) = rx.try_recv()
+    {
+        update_notice = notice;
+    }
+
+    if let Some(notice) = update_notice {
+        eprintln!(
+            "Update available for wt: v{} (current: v{}). Run `wt --update` to install.",
+            notice.latest_version, notice.current_version
+        );
+    }
 
     if let Some(ref path) = app.exit_path {
         println!("{path}");
@@ -220,9 +300,11 @@ fn handle_mouse(app: &mut App, kind: MouseEventKind, column: u16, row: u16) {
     let sync_select = app.active_action == ActiveAction::SyncTrees
         && !app.sync_loading
         && app.sync_results.is_empty();
-    let delete_select = app.active_action == ActiveAction::Delete && !app.delete_confirming;
+    let delete_select =
+        app.active_action == ActiveAction::Delete && !app.delete_confirming && !app.delete_loading;
     let copy_select = app.active_action == ActiveAction::CopySecrets
-        && app.copy_secrets_phase != CopySecretsPhase::ConfirmOverwrite;
+        && app.copy_secrets_phase != CopySecretsPhase::ConfirmOverwrite
+        && !app.copy_secrets_loading;
 
     // While a blocking overlay is open (not inline-select), ignore mouse.
     if app.active_action != ActiveAction::None && !sync_select && !delete_select && !copy_select {
@@ -248,6 +330,7 @@ fn handle_mouse(app: &mut App, kind: MouseEventKind, column: u16, row: u16) {
                     if idx >= app::COMMANDS.len() {
                         app.sync_selected_idx = idx - app::COMMANDS.len();
                         app.sync_loading = true;
+                        app.reset_loading_animation();
                         app.sync_pending = true;
                     }
                 } else if delete_select {
@@ -337,11 +420,11 @@ fn handle_nav_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
                 app.selected_index += 1;
             }
         }
-        KeyCode::Char('n') => open_action(app, ActiveAction::NewBranch),
-        KeyCode::Char('p') => open_action(app, ActiveAction::SyncPr),
-        KeyCode::Char('d') => open_action(app, ActiveAction::Delete),
-        KeyCode::Char('s') => open_action(app, ActiveAction::SyncTrees),
-        KeyCode::Char('c') => open_action(app, ActiveAction::CopySecrets),
+        KeyCode::Char(c) => {
+            if let Some(action) = App::command_action_for_shortcut(c) {
+                open_action(app, action);
+            }
+        }
         KeyCode::Enter => activate(app),
         _ => {}
     }
@@ -350,13 +433,8 @@ fn handle_nav_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
 fn activate(app: &mut App) {
     let idx = app.selected_index;
     if idx < app::COMMANDS.len() {
-        match app::COMMANDS[idx].0 {
-            "New Branch" => open_action(app, ActiveAction::NewBranch),
-            "Sync GH PR" => open_action(app, ActiveAction::SyncPr),
-            "Delete Worktree" => open_action(app, ActiveAction::Delete),
-            "Sync Trees" => open_action(app, ActiveAction::SyncTrees),
-            "Copy Secrets" => open_action(app, ActiveAction::CopySecrets),
-            _ => {}
+        if let Some(action) = App::command_action_for_index(idx) {
+            open_action(app, action);
         }
     } else {
         let wt_idx = idx - app::COMMANDS.len();
@@ -377,13 +455,17 @@ fn open_action(app: &mut App, action: ActiveAction) {
         app.sync_results.clear();
         app.sync_loading = false;
         app.sync_pending = false;
+        app.sync_receiver = None;
+        app.sync_fetch_ok = true;
+        app.reset_loading_animation();
         // Pre-select the main (first) worktree
         app.sync_selected_idx = app.worktrees.iter().position(|w| w.is_main).unwrap_or(0);
     }
 
     if action == ActiveAction::SyncPr {
         app.sync_pr_loading = false;
-        app.sync_pr_pending = None;
+        app.sync_pr_receiver = None;
+        app.clear_sync_pr_output();
     }
 
     if action == ActiveAction::Delete {
@@ -455,6 +537,7 @@ fn handle_sync_trees_key(app: &mut App, code: KeyCode) {
         KeyCode::Enter => {
             if !app.worktrees.is_empty() {
                 app.sync_loading = true;
+                app.reset_loading_animation();
                 app.sync_pending = true;
             }
         }
@@ -463,6 +546,9 @@ fn handle_sync_trees_key(app: &mut App, code: KeyCode) {
 }
 
 fn handle_new_branch_key(app: &mut App, code: KeyCode) {
+    if app.new_branch_loading {
+        return;
+    }
     match code {
         KeyCode::Esc => {
             app.active_action = ActiveAction::None;
@@ -475,19 +561,9 @@ fn handle_new_branch_key(app: &mut App, code: KeyCode) {
             if branch.is_empty() {
                 return;
             }
-            let root = app.repo_root.clone();
-            match git::add_worktree(&root, &branch) {
-                Ok((_, dest)) => {
-                    app.active_action = ActiveAction::None;
-                    app.clear_input();
-                    refresh_worktrees(app);
-                    app.exit_path = Some(dest.to_string_lossy().into_owned());
-                    app.should_quit = true;
-                }
-                Err(e) => {
-                    app.overlay_error = Some(format!("Failed to create branch: {e}"));
-                }
-            }
+            app.overlay_error = None;
+            app.new_branch_loading = true;
+            app.new_branch_pending = Some(branch);
         }
         KeyCode::Char(c) => app.input_char(c),
         _ => {}
@@ -523,14 +599,114 @@ fn handle_sync_pr_key(app: &mut App, code: KeyCode) {
 
             app.overlay_error = None;
             app.sync_pr_loading = true;
-            app.sync_pr_pending = Some(pr_number);
+            app.clear_sync_pr_output();
+            app.reset_loading_animation();
+            app.sync_pr_receiver = Some(git::start_checkout_pr_as_worktree(
+                app.repo_root.clone(),
+                pr_number,
+            ));
         }
         KeyCode::Char(c) => app.input_char(c),
         _ => {}
     }
 }
 
+fn poll_sync_pr_updates(app: &mut App) {
+    let mut events = Vec::new();
+    let mut disconnected = false;
+    let mut clear_receiver = false;
+
+    if let Some(receiver) = app.sync_pr_receiver.as_ref() {
+        loop {
+            match receiver.try_recv() {
+                Ok(event) => {
+                    let is_terminal = matches!(
+                        event,
+                        SyncPrEvent::Finished(_) | SyncPrEvent::Error(_)
+                    );
+                    events.push(event);
+                    if is_terminal {
+                        clear_receiver = true;
+                        break;
+                    }
+                }
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => {
+                    disconnected = true;
+                    clear_receiver = true;
+                    break;
+                }
+            }
+        }
+    }
+
+    for event in events {
+        match event {
+            SyncPrEvent::Progress { line } => {
+                app.push_sync_pr_output(line);
+            }
+            SyncPrEvent::Finished(worktree_path) => {
+                app.sync_pr_loading = false;
+                app.active_action = ActiveAction::None;
+                app.clear_input();
+                refresh_worktrees(app);
+                app.exit_path = Some(worktree_path.to_string_lossy().into_owned());
+                app.should_quit = true;
+            }
+            SyncPrEvent::Error(err) => {
+                app.sync_pr_loading = false;
+                app.overlay_error = Some(format!("Failed to sync PR: {err}"));
+            }
+        }
+    }
+
+    if disconnected && app.sync_pr_loading {
+        app.sync_pr_loading = false;
+        app.overlay_error = Some("PR sync ended unexpectedly.".to_string());
+    }
+
+    if clear_receiver {
+        app.sync_pr_receiver = None;
+    }
+}
+
+fn poll_sync_updates(app: &mut App) {
+    let mut completed = None;
+    let mut disconnected = false;
+
+    if let Some(receiver) = app.sync_receiver.as_ref() {
+        loop {
+            match receiver.try_recv() {
+                Ok(result) => {
+                    completed = Some(result);
+                    break;
+                }
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => {
+                    disconnected = true;
+                    break;
+                }
+            }
+        }
+    }
+
+    if let Some((fetch_ok, result)) = completed {
+        app.sync_fetch_ok = fetch_ok;
+        app.sync_results = vec![result];
+        app.sync_loading = false;
+        app.sync_receiver = None;
+        refresh_worktrees(app);
+    } else if disconnected && app.sync_loading {
+        app.sync_loading = false;
+        app.sync_receiver = None;
+        app.overlay_error = Some("Sync ended unexpectedly.".to_string());
+    }
+}
+
 fn handle_delete_key(app: &mut App, code: KeyCode) {
+    if app.delete_loading {
+        return;
+    }
     let deletable_len = app.deletable_worktrees().len();
 
     if app.delete_confirming {
@@ -542,18 +718,8 @@ fn handle_delete_key(app: &mut App, code: KeyCode) {
                     .map(|wt| wt.path.clone());
                 app.delete_confirming = false;
                 if let Some(path) = path {
-                    let root = app.repo_root.clone();
-                    match git::remove_worktree(&root, &path) {
-                        Ok(_) => {
-                            app.active_action = ActiveAction::None;
-                            app.overlay_error = None;
-                            refresh_worktrees(app);
-                        }
-                        Err(e) => {
-                            app.active_action = ActiveAction::None;
-                            app.overlay_error = Some(format!("Failed to delete worktree: {e}"));
-                        }
-                    }
+                    app.delete_loading = true;
+                    app.delete_pending = Some(path);
                 }
             }
             KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
@@ -579,6 +745,9 @@ fn handle_delete_key(app: &mut App, code: KeyCode) {
 }
 
 fn handle_copy_secrets_key(app: &mut App, code: KeyCode) {
+    if app.copy_secrets_loading {
+        return;
+    }
     match app.copy_secrets_phase {
         CopySecretsPhase::SelectSource => match code {
             KeyCode::Esc => {
@@ -703,29 +872,11 @@ fn finish_copy_secrets(app: &mut App, confirmed: bool) {
         app.copy_secrets_phase = CopySecretsPhase::SelectTarget;
         return;
     }
-
-    let Some(source_idx) = app.copy_secrets_source_idx else {
+    if app.copy_secrets_source_idx.is_none() {
         return;
-    };
-    let target_idx = app.copy_secrets_target_idx;
-    let Some(source) = app.worktrees.get(source_idx).cloned() else {
-        return;
-    };
-    let Some(target) = app.worktrees.get(target_idx).cloned() else {
-        return;
-    };
-
-    match git::copy_secret_files(&source, &target, true) {
-        Ok(_) => {
-            app.active_action = ActiveAction::None;
-            app.overlay_error = None;
-            refresh_worktrees(app);
-        }
-        Err(err) => {
-            app.copy_secrets_phase = CopySecretsPhase::SelectTarget;
-            app.overlay_error = Some(format!("Failed to copy secrets: {err}"));
-        }
     }
+    app.copy_secrets_loading = true;
+    app.copy_secrets_pending = true;
 }
 
 fn handle_copy_secrets_confirm_click(app: &mut App, column: u16, row: u16) {
@@ -803,7 +954,7 @@ fn handle_clone_key(app: &mut App, code: KeyCode) {
                 app.clone_loading = true;
                 app.clone_error = None;
                 app.clear_clone_output();
-                app.reset_clone_animation();
+                app.reset_loading_animation();
                 app.clone_receiver = Some(git::start_clone_repo_with_layout(
                     app.clone_url.clone(),
                     PathBuf::from(input),

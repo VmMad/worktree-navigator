@@ -3,12 +3,39 @@ use std::sync::mpsc::Receiver;
 
 use crate::types::{ActiveAction, CloneEvent, CopySecretsPhase, SyncResult, Worktree};
 
-pub const COMMANDS: &[(&str, &str)] = &[
-    ("New Branch", "n"),
-    ("Sync GH PR", "p"),
-    ("Delete Worktree", "d"),
-    ("Sync Trees", "s"),
-    ("Copy Secrets", "c"),
+#[derive(Debug, Clone, Copy)]
+pub struct CommandSpec {
+    pub label: &'static str,
+    pub shortcut: char,
+    pub action: ActiveAction,
+}
+
+pub const COMMANDS: &[CommandSpec] = &[
+    CommandSpec {
+        label: "New Branch",
+        shortcut: 'b',
+        action: ActiveAction::NewBranch,
+    },
+    CommandSpec {
+        label: "Sync with PR",
+        shortcut: 'p',
+        action: ActiveAction::SyncPr,
+    },
+    CommandSpec {
+        label: "Delete Worktree",
+        shortcut: 'd',
+        action: ActiveAction::Delete,
+    },
+    CommandSpec {
+        label: "Sync Worktree",
+        shortcut: 's',
+        action: ActiveAction::SyncTrees,
+    },
+    CommandSpec {
+        label: "Copy Secrets",
+        shortcut: 'c',
+        action: ActiveAction::CopySecrets,
+    },
 ];
 
 pub struct App {
@@ -21,17 +48,28 @@ pub struct App {
 
     pub sync_selected_idx: usize,
     pub sync_pr_loading: bool,
-    pub sync_pr_pending: Option<u32>,
+    pub sync_pr_receiver: Option<Receiver<crate::types::SyncPrEvent>>,
+    pub sync_pr_output: Vec<String>,
     pub sync_loading: bool,
     pub sync_pending: bool,
+    pub sync_receiver: Option<Receiver<(bool, SyncResult)>>,
     pub sync_fetch_ok: bool,
     pub sync_results: Vec<SyncResult>,
+
+    pub new_branch_loading: bool,
+    pub new_branch_pending: Option<String>,
+
+    pub delete_loading: bool,
+    pub delete_pending: Option<String>,
+
+    pub copy_secrets_loading: bool,
+    pub copy_secrets_pending: bool,
 
     pub clone_step: u8,
     pub clone_url: String,
     pub clone_loading: bool,
     pub clone_receiver: Option<Receiver<CloneEvent>>,
-    pub clone_animation_frame: usize,
+    pub loading_animation_frame: usize,
     pub clone_error: Option<String>,
     pub clone_output: Vec<String>,
 
@@ -70,16 +108,24 @@ impl App {
             worktrees_error: None,
             sync_selected_idx: 0,
             sync_pr_loading: false,
-            sync_pr_pending: None,
+            sync_pr_receiver: None,
+            sync_pr_output: vec![],
             sync_loading: false,
             sync_pending: false,
+            sync_receiver: None,
             sync_fetch_ok: true,
             sync_results: vec![],
+            new_branch_loading: false,
+            new_branch_pending: None,
+            delete_loading: false,
+            delete_pending: None,
+            copy_secrets_loading: false,
+            copy_secrets_pending: false,
             clone_step: 0,
             clone_url: String::new(),
             clone_loading: false,
             clone_receiver: None,
-            clone_animation_frame: 0,
+            loading_animation_frame: 0,
             clone_error: None,
             clone_output: vec![],
             selected_index: 0,
@@ -104,6 +150,17 @@ impl App {
 
     pub fn total_items(&self) -> usize {
         COMMANDS.len() + self.worktrees.len()
+    }
+
+    pub fn command_action_for_shortcut(shortcut: char) -> Option<ActiveAction> {
+        COMMANDS
+            .iter()
+            .find(|command| command.shortcut == shortcut)
+            .map(|command| command.action)
+    }
+
+    pub fn command_action_for_index(idx: usize) -> Option<ActiveAction> {
+        COMMANDS.get(idx).map(|command| command.action)
     }
 
     pub fn deletable_worktrees(&self) -> Vec<&Worktree> {
@@ -188,8 +245,8 @@ impl App {
         self.input_cursor = 0;
     }
 
-    pub fn reset_clone_animation(&mut self) {
-        self.clone_animation_frame = 0;
+    pub fn reset_loading_animation(&mut self) {
+        self.loading_animation_frame = 0;
     }
 
     pub fn clear_clone_output(&mut self) {
@@ -201,12 +258,21 @@ impl App {
         self.clone_output.push(line);
     }
 
-    pub fn advance_clone_animation(&mut self) {
-        self.clone_animation_frame = (self.clone_animation_frame + 1) % 3;
+    pub fn clear_sync_pr_output(&mut self) {
+        self.sync_pr_output.clear();
     }
 
-    pub fn clone_animation_dots(&self) -> &'static str {
-        match self.clone_animation_frame {
+    pub fn push_sync_pr_output(&mut self, line: String) {
+        self.sync_pr_output.clear();
+        self.sync_pr_output.push(line);
+    }
+
+    pub fn advance_loading_animation(&mut self) {
+        self.loading_animation_frame = (self.loading_animation_frame + 1) % 3;
+    }
+
+    pub fn loading_animation_dots(&self) -> &'static str {
+        match self.loading_animation_frame {
             0 => ".  ",
             1 => ".. ",
             _ => "...",

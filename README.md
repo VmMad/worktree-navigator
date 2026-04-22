@@ -76,10 +76,7 @@ You can also run:
 wt --update
 ```
 
-When a newer release is available, `wt` now checks on startup and prompts:
-
-- `y` updates immediately
-- `n` disables future startup prompts and shows a reminder to use `wt --update`
+When a newer release is available, `wt` checks in the background while you use the TUI and prints a notice after you exit. The notice goes to stderr, so the shell wrapper still receives only the selected path on stdout.
 
 `wt --update` selects the release asset matching your current binary target (for example `x86_64-linux-gnu` or `aarch64-linux-musl`) and remembers that asset for future updates.
 

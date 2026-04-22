@@ -9,7 +9,7 @@ pub struct Worktree {
     pub has_secrets: bool,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ActiveAction {
     None,
     NewBranch,
@@ -43,6 +43,13 @@ pub struct SyncResult {
 
 #[derive(Debug)]
 pub enum CloneEvent {
+    Progress { line: String },
+    Finished(PathBuf),
+    Error(String),
+}
+
+#[derive(Debug)]
+pub enum SyncPrEvent {
     Progress { line: String },
     Finished(PathBuf),
     Error(String),
