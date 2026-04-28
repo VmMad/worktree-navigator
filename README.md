@@ -29,58 +29,12 @@ bash <(curl -fsSL https://raw.githubusercontent.com/VmMad/worktree-navigator/mai
   && source ~/.bashrc
 ```
 
-### From source
-
-```bash
-cargo build --release && cp target/release/worktree-navigator ~/.local/bin/wt
-```
-
-Then add the `wt()` shell wrapper so navigating to a worktree changes your shell's directory. Pick the installer that matches your shell:
-
-**zsh**
-
-```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/VmMad/worktree-navigator/main/scripts/zsh-install.sh) \
-  && source ~/.zshrc
-```
-
-**bash**
-
-```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/VmMad/worktree-navigator/main/scripts/bash-install.sh) \
-  && source ~/.bashrc
-```
 
 ### Update existing install
-
-If you already have the `wt` binary installed and the `wt()` wrapper in `~/.zshrc`, you only need to replace the binary.
-
-From the latest GitHub release:
-
-```bash
-curl -fsSL https://github.com/VmMad/worktree-navigator/releases/latest/download/worktree-navigator-x86_64-linux-gnu \
-  -o ~/.local/bin/wt && chmod +x ~/.local/bin/wt
-```
-
-From source:
-
-```bash
-cargo build --release && cp target/release/worktree-navigator ~/.local/bin/wt
-```
-
-No `~/.zshrc` changes are needed if `wt()` is already present.
-
-You can also run:
 
 ```bash
 wt --update
 ```
-
-When a newer release is available, `wt` checks in the background while you use the TUI and prints a notice at most once per day after you exit. The notice goes to stderr, so the shell wrapper still receives only the selected path on stdout.
-
-`wt --update` selects the release asset matching your current binary target (for example `x86_64-linux-gnu` or `aarch64-linux-musl`) and remembers that asset for future updates.
-
-Release builds keep the tagged version. Local builds report a `-dev`-suffixed version and do not show update notices.
 
 ## Usage
 
@@ -90,12 +44,20 @@ Run inside a repo or inside a worktree:
 wt
 ```
 
+Mark existing worktree repo:
+
+```bash
+wt --mark-tree
+```
+
 Main commands:
 
-- `New Branch [n]` create a new branch worktree and jump into it
-- `Sync GH PR [p]` enter a PR number (`#123` or `123`) and create/sync its worktree
+- `New Branch [b]` create a new branch worktree and jump into it
+- `Sync with PR [p]` enter a PR number (`#123` or `123`) and create/sync its worktree
 - `Delete Worktree [d]` inline select in the worktree list, then confirm with `Enter` or `y` (`n`/`Esc` cancels)
-- `Sync Trees [s]` inline select a branch to sync from `origin/<branch>`
+- `Sync Worktree [s]` inline select a worktree to fast-forward from `origin/<branch>`
+- `Copy Secrets [c]` copy secret files into the selected worktree
+- `Checkout Remote [r]` fetch a remote branch and create a worktree for it
 
 Navigation:
 
@@ -105,19 +67,9 @@ Navigation:
 - `Esc` cancel current mode
 - `q` quit
 
-## No-repo flow
-
-If you run `wt` in a directory that is not a git repo, it opens a clone flow:
-
-1. Enter repo source (`owner/repo`, SSH URL or HTTPS URL)
-2. Confirm or edit destination (defaults to `<current-working-directory>/<repo-name>`)
-3. Clone repo, show a loading indicator and live clone output while it runs, and jump into the default branch folder (for example `<repo>/main`)
-
-For `owner/repo`, `wt` uses `gh repo clone` when available, and falls back to `git clone` using your preferred GitHub protocol (SSH/HTTPS)
-
 ## Requirements
 
-- Linux (Ubuntu tested)
+- Linux
 - `git`
 - `gh` for PR sync
 - `zsh` or `bash` if you want the `wt` shell wrapper

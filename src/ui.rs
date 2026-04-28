@@ -8,7 +8,7 @@ use ratatui::{
 
 use crate::{
     app::{App, COMMANDS},
-    types::{ActiveAction, CopySecretsPhase, SyncStatus},
+    types::{ActiveAction, CheckoutRemotePhase, CopySecretsPhase, SyncStatus},
     version,
 };
 
@@ -35,6 +35,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         ActiveAction::Delete if show_delete_overlay => draw_delete_overlay(f, app, area),
         ActiveAction::CopySecrets if show_copy_overlay => draw_copy_secrets_overlay(f, app, area),
         ActiveAction::CloneRepo => draw_clone_overlay(f, app, area),
+        ActiveAction::CheckoutRemote => draw_checkout_remote_overlay(f, app, area),
         _ => {}
     }
 
@@ -1249,6 +1250,209 @@ fn draw_clone_overlay(f: &mut Frame, app: &App, area: Rect) {
             )),
             rows[6],
         );
+    }
+}
+
+fn draw_checkout_remote_overlay(f: &mut Frame, app: &App, area: Rect) {
+    const COLOR: Color = Color::Blue;
+
+    match app.checkout_remote_phase {
+        CheckoutRemotePhase::FetchingRemote => {
+            let popup = centered_rect(60, 7, area);
+            f.render_widget(Clear, popup);
+            let block = Block::default()
+                .title(" Checkout Remote Branch ")
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(COLOR));
+            let inner = block.inner(popup).inner(Margin {
+                horizontal: 1,
+                vertical: 1,
+            });
+            f.render_widget(block, popup);
+            let rows = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Length(1),
+                    Constraint::Length(1),
+                    Constraint::Length(1),
+                ])
+                .split(inner);
+            f.render_widget(
+                Paragraph::new(Line::from(vec![
+                    Span::styled("Remote:  ", Style::default().fg(Color::Gray)),
+                    Span::styled(
+                        &app.checkout_remote_name,
+                        Style::default().fg(Color::DarkGray),
+                    ),
+                ])),
+                rows[0],
+            );
+            f.render_widget(
+                Paragraph::new(Span::styled(
+                    format!(
+                        "⟳  Fetching {}{}",
+                        app.checkout_remote_name,
+                        app.loading_animation_dots()
+                    ),
+                    Style::default().fg(COLOR).add_modifier(Modifier::BOLD),
+                )),
+                rows[1],
+            );
+        }
+        CheckoutRemotePhase::CreatingWorktree => {
+            let popup = centered_rect(60, 5, area);
+            f.render_widget(Clear, popup);
+            let block = Block::default()
+                .title(" Checkout Remote Branch ")
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(COLOR));
+            let inner = block.inner(popup).inner(Margin {
+                horizontal: 1,
+                vertical: 1,
+            });
+            f.render_widget(block, popup);
+            f.render_widget(
+                Paragraph::new(vec![
+                    Line::from(Span::styled(
+                        format!("⟳  Creating worktree{}", app.loading_animation_dots()),
+                        Style::default().fg(COLOR).add_modifier(Modifier::BOLD),
+                    )),
+                    Line::from(Span::styled(
+                        "   This may take a moment.",
+                        Style::default().fg(Color::DarkGray),
+                    )),
+                ]),
+                inner,
+            );
+        }
+        CheckoutRemotePhase::SelectRemote | CheckoutRemotePhase::EnterBranch => {
+            let has_err = app.overlay_error.is_some();
+            let height = if has_err { 10 } else { 8 };
+            let popup = centered_rect(60, height, area);
+            f.render_widget(Clear, popup);
+            let block = Block::default()
+                .title(" Checkout Remote Branch ")
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(COLOR));
+            let inner = block.inner(popup).inner(Margin {
+                horizontal: 1,
+                vertical: 1,
+            });
+            f.render_widget(block, popup);
+
+            let mut constraints = vec![
+                Constraint::Length(1), // remote line
+                Constraint::Length(1), // branch line
+                Constraint::Length(1), // spacer
+                Constraint::Length(1), // hint
+            ];
+            if has_err {
+                constraints.push(Constraint::Length(1)); // spacer
+                constraints.push(Constraint::Length(1)); // error
+            }
+            let rows = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints(constraints)
+                .split(inner);
+
+            if app.checkout_remote_phase == CheckoutRemotePhase::SelectRemote {
+                let before: String = app.input_buffer.chars().take(app.input_cursor).collect();
+                let after: String = app.input_buffer.chars().skip(app.input_cursor).collect();
+                f.render_widget(
+                    Paragraph::new(Line::from(vec![
+                        Span::styled("Remote:  ", Style::default().fg(Color::Gray)),
+                        Span::styled(
+                            before,
+                            Style::default()
+                                .fg(Color::White)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                        Span::styled("█", Style::default().fg(COLOR)),
+                        Span::styled(
+                            after,
+                            Style::default()
+                                .fg(Color::White)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                    ])),
+                    rows[0],
+                );
+                f.render_widget(
+                    Paragraph::new(Line::from(vec![
+                        Span::styled("Branch:  ", Style::default().fg(Color::Gray)),
+                        Span::styled(
+                            "(enter remote first)",
+                            Style::default().fg(Color::DarkGray),
+                        ),
+                    ])),
+                    rows[1],
+                );
+                f.render_widget(
+                    Paragraph::new(Span::styled(
+                        "Enter to fetch  Esc to cancel",
+                        Style::default().fg(Color::DarkGray),
+                    )),
+                    rows[3],
+                );
+            } else {
+                let before: String = app.input_buffer.chars().take(app.input_cursor).collect();
+                let after: String = app.input_buffer.chars().skip(app.input_cursor).collect();
+                let ghost = app.checkout_remote_ghost().unwrap_or_else(String::new);
+                f.render_widget(
+                    Paragraph::new(Line::from(vec![
+                        Span::styled("Remote:  ", Style::default().fg(Color::Gray)),
+                        Span::styled(
+                            &app.checkout_remote_name,
+                            Style::default().fg(Color::DarkGray),
+                        ),
+                        Span::styled("  ✓", Style::default().fg(Color::Green)),
+                    ])),
+                    rows[0],
+                );
+                let mut branch_spans = vec![
+                    Span::styled("Branch:  ", Style::default().fg(Color::Gray)),
+                    Span::styled(
+                        before,
+                        Style::default()
+                            .fg(Color::White)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled("█", Style::default().fg(COLOR)),
+                    Span::styled(
+                        after,
+                        Style::default()
+                            .fg(Color::White)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                ];
+                if !ghost.is_empty() {
+                    branch_spans.push(Span::styled(ghost, Style::default().fg(Color::DarkGray)));
+                }
+                f.render_widget(
+                    Paragraph::new(Line::from(branch_spans)),
+                    rows[1],
+                );
+                let hint = if app.checkout_remote_ghost().is_some() {
+                    "Tab to complete  Enter to checkout  Esc to go back"
+                } else {
+                    "Enter to checkout  Esc to go back"
+                };
+                f.render_widget(
+                    Paragraph::new(Span::styled(hint, Style::default().fg(Color::DarkGray))),
+                    rows[3],
+                );
+            }
+
+            if let Some(err) = &app.overlay_error {
+                f.render_widget(
+                    Paragraph::new(Span::styled(
+                        format!("✗ {err}"),
+                        Style::default().fg(Color::Red),
+                    )),
+                    rows[5],
+                );
+            }
+        }
     }
 }
 

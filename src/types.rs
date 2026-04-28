@@ -18,6 +18,15 @@ pub enum ActiveAction {
     Delete,
     CopySecrets,
     CloneRepo,
+    CheckoutRemote,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum CheckoutRemotePhase {
+    SelectRemote,
+    FetchingRemote,
+    EnterBranch,
+    CreatingWorktree,
 }
 
 #[derive(Debug, Clone, PartialEq)]

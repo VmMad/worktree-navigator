@@ -22,7 +22,7 @@ use crossterm::{
 use ratatui::{Terminal, backend::CrosstermBackend};
 
 use app::App;
-use types::{ActiveAction, CloneEvent, CopySecretsPhase, SyncPrEvent};
+use types::{ActiveAction, CheckoutRemotePhase, CloneEvent, CopySecretsPhase, SyncPrEvent};
 
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -132,12 +132,14 @@ fn main() -> Result<()> {
         poll_clone_updates(&mut app);
         poll_sync_pr_updates(&mut app);
         poll_sync_updates(&mut app);
+        poll_checkout_remote_fetch(&mut app);
         if app.sync_loading
             || app.sync_pr_loading
             || app.clone_loading
             || app.new_branch_loading
             || app.delete_loading
             || app.copy_secrets_loading
+            || app.checkout_remote_is_loading()
         {
             app.advance_loading_animation();
         }
@@ -227,6 +229,23 @@ fn main() -> Result<()> {
             }
         }
 
+        if let Some((remote, branch)) = app.checkout_remote_pending.take() {
+            match git::checkout_remote_branch(&app.repo_root, &remote, &branch) {
+                Ok(dest) => {
+                    app.checkout_remote_phase = CheckoutRemotePhase::SelectRemote;
+                    app.active_action = ActiveAction::None;
+                    app.clear_input();
+                    refresh_worktrees(&mut app);
+                    app.exit_path = Some(dest.to_string_lossy().into_owned());
+                    app.should_quit = true;
+                }
+                Err(e) => {
+                    app.checkout_remote_phase = CheckoutRemotePhase::EnterBranch;
+                    app.overlay_error = Some(e.to_string());
+                }
+            }
+        }
+
         if event::poll(Duration::from_millis(100))? {
             match event::read()? {
                 Event::Key(key) => handle_key(&mut app, key.code, key.modifiers),
@@ -297,6 +316,7 @@ fn handle_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
         ActiveAction::Delete => handle_delete_key(app, code),
         ActiveAction::CopySecrets => handle_copy_secrets_key(app, code),
         ActiveAction::CloneRepo => handle_clone_key(app, code),
+        ActiveAction::CheckoutRemote => handle_checkout_remote_key(app, code),
         ActiveAction::None => handle_nav_key(app, code, modifiers),
     }
 }
@@ -505,6 +525,31 @@ fn open_action(app: &mut App, action: ActiveAction) {
             .position(|wt| wt.is_current)
             .unwrap_or(0);
         app.copy_secrets_confirm_yes = true;
+    }
+
+    if action == ActiveAction::CheckoutRemote {
+        app.checkout_remote_name.clear();
+        app.checkout_remote_fetch_receiver = None;
+        app.checkout_remote_pending = None;
+
+        let remotes = git::list_remotes(&app.repo_root).unwrap_or_default();
+        if remotes.is_empty() {
+            app.checkout_remote_remotes = vec![];
+            app.checkout_remote_phase = CheckoutRemotePhase::SelectRemote;
+            app.overlay_error = Some("No remotes configured for this repository.".to_string());
+        } else if remotes.len() == 1 {
+            app.checkout_remote_name = remotes[0].clone();
+            app.checkout_remote_remotes = remotes;
+            app.checkout_remote_phase = CheckoutRemotePhase::FetchingRemote;
+            app.checkout_remote_fetch_receiver = Some(git::start_fetch_remote(
+                app.repo_root.clone(),
+                app.checkout_remote_name.clone(),
+            ));
+            app.reset_loading_animation();
+        } else {
+            app.checkout_remote_remotes = remotes;
+            app.checkout_remote_phase = CheckoutRemotePhase::SelectRemote;
+        }
     }
 
     app.active_action = action;
@@ -1042,8 +1087,129 @@ fn poll_clone_updates(app: &mut App) {
     }
 }
 
+fn handle_checkout_remote_key(app: &mut App, code: KeyCode) {
+    if app.checkout_remote_is_loading() {
+        return;
+    }
+
+    match app.checkout_remote_phase {
+        CheckoutRemotePhase::SelectRemote => match code {
+            KeyCode::Esc => {
+                app.active_action = ActiveAction::None;
+                app.overlay_error = None;
+                app.clear_input();
+            }
+            KeyCode::Backspace => app.input_backspace(),
+            KeyCode::Delete => app.input_delete(),
+            KeyCode::Left => app.input_left(),
+            KeyCode::Right => app.input_right(),
+            KeyCode::Home => app.input_home(),
+            KeyCode::End => app.input_end(),
+            KeyCode::Char(c) => app.input_char(c),
+            KeyCode::Enter => {
+                let remote = app.input_buffer.trim().to_string();
+                if remote.is_empty() {
+                    return;
+                }
+                app.checkout_remote_name = remote.clone();
+                app.overlay_error = None;
+                app.checkout_remote_phase = CheckoutRemotePhase::FetchingRemote;
+                app.checkout_remote_fetch_receiver =
+                    Some(git::start_fetch_remote(app.repo_root.clone(), remote));
+                app.reset_loading_animation();
+            }
+            _ => {}
+        },
+        CheckoutRemotePhase::EnterBranch => match code {
+            KeyCode::Esc => {
+                app.checkout_remote_phase = CheckoutRemotePhase::SelectRemote;
+                app.input_buffer = app.checkout_remote_name.clone();
+                app.input_cursor = app.checkout_remote_name.chars().count();
+                app.overlay_error = None;
+            }
+            KeyCode::Backspace => app.input_backspace(),
+            KeyCode::Delete => app.input_delete(),
+            KeyCode::Left => app.input_left(),
+            KeyCode::Right => app.input_right(),
+            KeyCode::Home => app.input_home(),
+            KeyCode::End => app.input_end(),
+            KeyCode::Tab => {
+                if let Some(ghost) = app.checkout_remote_ghost() {
+                    app.input_str(&ghost);
+                }
+            }
+            KeyCode::Char(c) => app.input_char(c),
+            KeyCode::Enter => {
+                let branch = app.input_buffer.trim().to_string();
+                if branch.is_empty() {
+                    return;
+                }
+                if branch.contains('/') {
+                    app.overlay_error =
+                        Some("Enter just the branch name, not remote/branch.".to_string());
+                    return;
+                }
+                if app.worktrees.iter().any(|wt| wt.branch == branch) {
+                    app.overlay_error =
+                        Some(format!("'{branch}' is already checked out."));
+                    return;
+                }
+                app.overlay_error = None;
+                app.checkout_remote_phase = CheckoutRemotePhase::CreatingWorktree;
+                app.checkout_remote_pending =
+                    Some((app.checkout_remote_name.clone(), branch));
+                app.reset_loading_animation();
+            }
+            _ => {}
+        },
+        CheckoutRemotePhase::FetchingRemote | CheckoutRemotePhase::CreatingWorktree => {}
+    }
+}
+
+fn poll_checkout_remote_fetch(app: &mut App) {
+    if app.checkout_remote_phase != CheckoutRemotePhase::FetchingRemote {
+        return;
+    }
+
+    let result = app
+        .checkout_remote_fetch_receiver
+        .as_ref()
+        .and_then(|rx| match rx.try_recv() {
+            Ok(r) => Some(r),
+            Err(TryRecvError::Disconnected) => {
+                Some(Err("Fetch ended unexpectedly.".to_string()))
+            }
+            Err(TryRecvError::Empty) => None,
+        });
+
+    if let Some(result) = result {
+        app.checkout_remote_fetch_receiver = None;
+        match result {
+            Ok(()) => {
+                app.checkout_remote_branches =
+                    git::list_remote_branches(&app.repo_root, &app.checkout_remote_name);
+                app.checkout_remote_phase = CheckoutRemotePhase::EnterBranch;
+                app.clear_input();
+                app.overlay_error = None;
+            }
+            Err(e) => {
+                app.checkout_remote_phase = CheckoutRemotePhase::SelectRemote;
+                app.input_buffer = app.checkout_remote_name.clone();
+                app.input_cursor = app.checkout_remote_name.chars().count();
+                app.overlay_error = Some(format!("Fetch failed: {e}"));
+            }
+        }
+    }
+}
+
 fn handle_paste(app: &mut App, text: &str) {
-    if app.active_action != ActiveAction::CloneRepo || app.clone_loading {
+    let is_clone = app.active_action == ActiveAction::CloneRepo && !app.clone_loading;
+    let is_checkout_remote = app.active_action == ActiveAction::CheckoutRemote
+        && matches!(
+            app.checkout_remote_phase,
+            CheckoutRemotePhase::SelectRemote | CheckoutRemotePhase::EnterBranch
+        );
+    if !is_clone && !is_checkout_remote {
         return;
     }
 

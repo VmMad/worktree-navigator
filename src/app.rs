@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use std::sync::mpsc::Receiver;
 
-use crate::types::{ActiveAction, CloneEvent, CopySecretsPhase, SyncResult, Worktree};
+use crate::types::{ActiveAction, CheckoutRemotePhase, CloneEvent, CopySecretsPhase, SyncResult, Worktree};
 
 #[derive(Debug, Clone, Copy)]
 pub struct CommandSpec {
@@ -35,6 +35,11 @@ pub const COMMANDS: &[CommandSpec] = &[
         label: "Copy Secrets",
         shortcut: 'c',
         action: ActiveAction::CopySecrets,
+    },
+    CommandSpec {
+        label: "Checkout Remote",
+        shortcut: 'r',
+        action: ActiveAction::CheckoutRemote,
     },
 ];
 
@@ -86,6 +91,13 @@ pub struct App {
     pub copy_secrets_source_idx: Option<usize>,
     pub copy_secrets_target_idx: usize,
     pub copy_secrets_confirm_yes: bool,
+
+    pub checkout_remote_phase: CheckoutRemotePhase,
+    pub checkout_remote_name: String,
+    pub checkout_remote_remotes: Vec<String>,
+    pub checkout_remote_branches: Vec<String>,
+    pub checkout_remote_fetch_receiver: Option<Receiver<Result<(), String>>>,
+    pub checkout_remote_pending: Option<(String, String)>,
 
     pub exit_path: Option<String>,
     pub should_quit: bool,
@@ -141,6 +153,12 @@ impl App {
             copy_secrets_source_idx: None,
             copy_secrets_target_idx: 0,
             copy_secrets_confirm_yes: true,
+            checkout_remote_phase: CheckoutRemotePhase::SelectRemote,
+            checkout_remote_name: String::new(),
+            checkout_remote_remotes: vec![],
+            checkout_remote_branches: vec![],
+            checkout_remote_fetch_receiver: None,
+            checkout_remote_pending: None,
             exit_path: None,
             should_quit: false,
             item_rows: vec![],
@@ -148,6 +166,26 @@ impl App {
             frame_width: 0,
             frame_height: 0,
         }
+    }
+
+    pub fn checkout_remote_is_loading(&self) -> bool {
+        matches!(
+            self.checkout_remote_phase,
+            CheckoutRemotePhase::FetchingRemote | CheckoutRemotePhase::CreatingWorktree
+        )
+    }
+
+    /// Returns the completion suffix for the current branch input, if any branch
+    /// in `checkout_remote_branches` starts with `input_buffer`.
+    pub fn checkout_remote_ghost(&self) -> Option<String> {
+        let input = &self.input_buffer;
+        if input.is_empty() {
+            return None;
+        }
+        self.checkout_remote_branches
+            .iter()
+            .find(|b| b.starts_with(input.as_str()) && b.len() > input.len())
+            .map(|b| b[input.len()..].to_string())
     }
 
     pub fn total_items(&self) -> usize {
