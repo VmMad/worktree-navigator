@@ -11,6 +11,20 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::types::{CloneEvent, SyncPrEvent, SyncResult, SyncStatus, Worktree};
 
+const MAX_WORKTREE_SCAN_DEPTH: usize = 3;
+
+fn worktree_path_for_name(base_dir: &Path, name: &str) -> PathBuf {
+    base_dir.join(Path::new(name))
+}
+
+fn ensure_parent_dirs(path: &Path) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("Failed to create parent directory {}", parent.display()))?;
+    }
+    Ok(())
+}
+
 pub fn list_worktrees(repo_root: &Path) -> Result<Vec<Worktree>> {
     let output = Command::new("git")
         .args(["worktree", "list", "--porcelain"])
@@ -108,8 +122,8 @@ pub fn add_worktree(
 ) -> Result<(Vec<String>, PathBuf)> {
     let mut messages = Vec::new();
 
-    let sanitized = branch_name.replace('/', "-");
-    let dest = worktree_base_dir(repo_root).join(&sanitized);
+    let dest = worktree_path_for_name(&worktree_base_dir(repo_root), branch_name);
+    ensure_parent_dirs(&dest)?;
     let dest_str = dest.to_string_lossy().to_string();
     let git_cwd = resolve_git_cwd(repo_root);
 
@@ -242,8 +256,9 @@ fn checkout_pr_as_worktree_impl(
         _ => {}
     }
 
-    let dest = worktree_base_dir(repo_root).join(branch_name.replace('/', "-"));
+    let dest = worktree_path_for_name(&worktree_base_dir(repo_root), &branch_name);
     let dest_str = dest.to_string_lossy().to_string();
+    ensure_parent_dirs(&dest)?;
 
     push_sync_pr_progress(
         tx,
@@ -491,7 +506,7 @@ fn clone_repo_with_layout(url: &str, dest: &Path, tx: &Sender<CloneEvent>) -> Re
         .filter(|b| !b.is_empty())
         .unwrap_or_else(|| "main".to_string());
 
-    let worktree_path = dest.join(default_branch.replace('/', "-"));
+    let worktree_path = worktree_path_for_name(dest, &default_branch);
     if worktree_path.exists() {
         let _ = fs::remove_dir_all(&tmp_dir);
         anyhow::bail!(
@@ -499,6 +514,7 @@ fn clone_repo_with_layout(url: &str, dest: &Path, tx: &Sender<CloneEvent>) -> Re
             worktree_path.to_string_lossy()
         );
     }
+    ensure_parent_dirs(&worktree_path)?;
     fs::rename(&tmp_dir, &worktree_path).context("Failed to finalize cloned repository layout")?;
     fs::write(dest.join(".wt-workspace"), "").context("Failed to create .wt-workspace")?;
 
@@ -631,24 +647,16 @@ fn gh_available() -> bool {
 ///
 /// In workspace mode `repo_root` is the parent directory holding individual
 /// worktrees as subdirectories — it is not itself a git repo. We fall back to
-/// the first valid git-repo subdirectory so git commands have a working context
+/// the first valid nested git-repo path so git commands have a working context
 /// while `worktree_base_dir` still uses `repo_root` to place new trees.
 fn resolve_git_cwd(repo_root: &Path) -> PathBuf {
     if is_git_repo(repo_root) {
         return repo_root.to_path_buf();
     }
 
-    if let Ok(entries) = fs::read_dir(repo_root) {
-        let mut dirs: Vec<_> = entries
-            .filter_map(|e| e.ok())
-            .filter(|e| e.path().is_dir())
-            .collect();
-        dirs.sort_by_key(|e| e.file_name());
-        for entry in dirs {
-            let path = entry.path();
-            if is_git_repo(&path) {
-                return path;
-            }
+    if let Ok(repos) = collect_workspace_git_repos(repo_root) {
+        if let Some(path) = repos.into_iter().next() {
+            return path;
         }
     }
 
@@ -676,6 +684,45 @@ fn worktree_base_dir(repo_root: &Path) -> PathBuf {
         // Bare repositories already use repo_root as the common directory.
         repo_root.to_path_buf()
     }
+}
+
+fn collect_workspace_git_repos(root: &Path) -> Result<Vec<PathBuf>> {
+    let mut repos = Vec::new();
+    collect_workspace_git_repos_recursive(root, MAX_WORKTREE_SCAN_DEPTH, &mut repos)?;
+    repos.sort();
+    Ok(repos)
+}
+
+fn collect_workspace_git_repos_recursive(
+    dir: &Path,
+    remaining_depth: usize,
+    repos: &mut Vec<PathBuf>,
+) -> Result<()> {
+    if is_git_repo(dir) {
+        repos.push(dir.to_path_buf());
+        return Ok(());
+    }
+
+    if remaining_depth == 0 {
+        return Ok(());
+    }
+
+    let mut entries: Vec<_> = fs::read_dir(dir)
+        .with_context(|| format!("Failed to read directory {}", dir.display()))?
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| entry.path().is_dir())
+        .collect();
+    entries.sort_by_key(|entry| entry.file_name());
+
+    for entry in entries {
+        let path = entry.path();
+        if should_skip_dir(&path) {
+            continue;
+        }
+        collect_workspace_git_repos_recursive(&path, remaining_depth - 1, repos)?;
+    }
+
+    Ok(())
 }
 
 fn is_github_owner_repo(input: &str) -> bool {
@@ -774,34 +821,20 @@ pub fn find_workspace_root(start: &Path) -> Option<PathBuf> {
     }
 }
 
-/// Scan immediate subdirectories of `workspace_dir` for git repos and return
-/// them as `Worktree` entries. Each valid git subdir is treated as one worktree.
+/// Recursively scan `workspace_dir` up to 3 directory levels and return nested git repos as worktrees.
 pub fn list_workspace_worktrees(workspace_dir: &Path) -> Result<Vec<Worktree>> {
     let cwd = std::env::var("WT_CWD")
         .map(PathBuf::from)
         .unwrap_or_else(|_| workspace_dir.to_path_buf());
     let cwd = cwd.canonicalize().unwrap_or(cwd);
 
+    let repos = collect_workspace_git_repos(workspace_dir)?;
+
+    // Resolve default branch from the first valid git repo path.
+    let default_branch = repos.first().and_then(|path| get_default_branch(path));
     let mut worktrees = Vec::new();
 
-    let mut entries: Vec<_> = fs::read_dir(workspace_dir)
-        .context("Failed to read workspace directory")?
-        .filter_map(|e| e.ok())
-        .filter(|e| e.path().is_dir())
-        .collect();
-
-    entries.sort_by_key(|e| e.file_name());
-
-    // Resolve default branch from the first valid git repo subdir
-    let first_git_dir = entries
-        .iter()
-        .find(|e| e.path().join(".git").exists())
-        .map(|e| e.path());
-    let default_branch = first_git_dir.as_deref().and_then(get_default_branch);
-
-    for entry in entries {
-        let path = entry.path();
-
+    for path in repos {
         let branch_output = Command::new("git")
             .args(["symbolic-ref", "--short", "HEAD"])
             .current_dir(&path)
@@ -948,7 +981,7 @@ fn should_skip_dir(path: &Path) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::list_secret_files;
+    use super::{add_worktree, list_secret_files, list_workspace_worktrees, resolve_git_cwd};
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::process::Command;
@@ -978,6 +1011,16 @@ mod tests {
         );
     }
 
+    fn init_repo(dir: &Path) {
+        git(dir, &["init"]);
+        git(dir, &["checkout", "-b", "main"]);
+        git(dir, &["config", "user.email", "wt@example.com"]);
+        git(dir, &["config", "user.name", "wt"]);
+        fs::write(dir.join("README.md"), "hello\n").expect("repo file should be written");
+        git(dir, &["add", "README.md"]);
+        git(dir, &["commit", "-m", "init"]);
+    }
+
     #[test]
     fn lists_only_untracked_env_files_recursively() {
         let dir = make_temp_dir("secret-scan");
@@ -1001,5 +1044,61 @@ mod tests {
         );
 
         let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn add_worktree_preserves_nested_branch_paths() {
+        let workspace = make_temp_dir("nested-worktree-add");
+        let repo = workspace.join("repo");
+        fs::create_dir_all(&repo).expect("repo dir should be created");
+        init_repo(&repo);
+
+        let branch = "feat/team/branch";
+        let expected = workspace.join(branch);
+        let (_messages, dest) =
+            add_worktree(&repo, branch, None).expect("nested worktree should be created");
+
+        assert_eq!(dest, expected);
+        assert!(dest.exists());
+
+        let head = Command::new("git")
+            .args(["symbolic-ref", "--short", "HEAD"])
+            .current_dir(&dest)
+            .output()
+            .expect("git should inspect nested worktree");
+        assert!(head.status.success());
+        assert_eq!(String::from_utf8_lossy(&head.stdout).trim(), branch);
+
+        let _ = fs::remove_dir_all(workspace);
+    }
+
+    #[test]
+    fn lists_nested_workspace_repos_recursively() {
+        let workspace = make_temp_dir("nested-workspace");
+        fs::write(workspace.join(".wt-workspace"), "").expect("workspace marker should be written");
+
+        let first_repo = workspace.join("feat/team/branch-a");
+        let second_repo = workspace.join("fix/branch-b");
+        fs::create_dir_all(&first_repo).expect("first repo dir should be created");
+        fs::create_dir_all(&second_repo).expect("second repo dir should be created");
+        init_repo(&first_repo);
+        init_repo(&second_repo);
+
+        let ignored_repo = workspace.join("skip/too/deep/branch-c/more");
+        fs::create_dir_all(&ignored_repo).expect("deep repo dir should be created");
+        init_repo(&ignored_repo);
+
+        let worktrees = list_workspace_worktrees(&workspace).expect("workspace scan should succeed");
+        assert_eq!(worktrees.len(), 2);
+        assert_eq!(worktrees[0].path, first_repo.to_string_lossy().to_string());
+        assert_eq!(worktrees[0].branch, "main");
+        assert_eq!(worktrees[1].path, second_repo.to_string_lossy().to_string());
+        assert_eq!(worktrees[1].branch, "main");
+        assert_eq!(resolve_git_cwd(&workspace), first_repo);
+        assert!(!worktrees
+            .iter()
+            .any(|wt| wt.path == ignored_repo.to_string_lossy().to_string()));
+
+        let _ = fs::remove_dir_all(workspace);
     }
 }
