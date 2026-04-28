@@ -1038,6 +1038,137 @@ fn should_skip_dir(path: &Path) -> bool {
     )
 }
 
+pub fn list_remotes(repo_root: &Path) -> Result<Vec<String>> {
+    let git_cwd = resolve_git_cwd(repo_root);
+    let out = Command::new("git")
+        .args(["remote"])
+        .current_dir(&git_cwd)
+        .output()
+        .context("Failed to run git remote")?;
+    Ok(String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .map(|l| l.trim().to_string())
+        .filter(|l| !l.is_empty())
+        .collect())
+}
+
+pub fn start_fetch_remote(repo_root: PathBuf, remote: String) -> Receiver<Result<(), String>> {
+    let (tx, rx) = mpsc::channel();
+    thread::spawn(move || {
+        let git_cwd = resolve_git_cwd(&repo_root);
+        let out = Command::new("git")
+            .args(["fetch", &remote])
+            .current_dir(&git_cwd)
+            .output();
+        let result = match out {
+            Ok(o) if o.status.success() => Ok(()),
+            Ok(o) => {
+                let stderr = String::from_utf8_lossy(&o.stderr).trim().to_string();
+                Err(if stderr.is_empty() {
+                    format!("git fetch {remote} failed")
+                } else {
+                    stderr
+                })
+            }
+            Err(e) => Err(e.to_string()),
+        };
+        let _ = tx.send(result);
+    });
+    rx
+}
+
+pub fn list_remote_branches(repo_root: &Path, remote: &str) -> Vec<String> {
+    let git_cwd = resolve_git_cwd(repo_root);
+    let prefix = format!("{remote}/");
+    let pattern = format!("{remote}/*");
+    let out = Command::new("git")
+        .args(["branch", "-r", "--list", &pattern])
+        .current_dir(&git_cwd)
+        .output()
+        .unwrap_or_else(|_| std::process::Output {
+            status: std::process::ExitStatus::default(),
+            stdout: vec![],
+            stderr: vec![],
+        });
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .map(|l| l.trim())
+        .filter(|l| l.starts_with(&prefix) && !l.contains("HEAD"))
+        .map(|l| l[prefix.len()..].to_string())
+        .collect()
+}
+
+pub fn checkout_remote_branch(repo_root: &Path, remote: &str, branch: &str) -> Result<PathBuf> {
+    let git_cwd = resolve_git_cwd(repo_root);
+
+    let remote_ref = format!("refs/remotes/{remote}/{branch}");
+    let ref_exists = Command::new("git")
+        .args(["rev-parse", "--verify", &remote_ref])
+        .current_dir(&git_cwd)
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    if !ref_exists {
+        anyhow::bail!("{remote}/{branch} not found after fetch");
+    }
+
+    let dest = worktree_path_for_name(&worktree_base_dir(repo_root), branch);
+    ensure_parent_dirs(&dest)?;
+    let dest_str = dest.to_string_lossy().to_string();
+
+    let local_exists = Command::new("git")
+        .args(["rev-parse", "--verify", branch])
+        .current_dir(&git_cwd)
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+
+    let output = if local_exists {
+        let upstream = Command::new("git")
+            .args(["rev-parse", "--abbrev-ref", &format!("{branch}@{{upstream}}")])
+            .current_dir(&git_cwd)
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string());
+
+        let expected = format!("{remote}/{branch}");
+        if upstream.as_deref() != Some(expected.as_str()) {
+            anyhow::bail!(
+                "Local branch '{branch}' tracks '{}', not '{expected}'",
+                upstream.as_deref().unwrap_or("(none)")
+            );
+        }
+
+        Command::new("git")
+            .args(["worktree", "add", &dest_str, branch])
+            .current_dir(&git_cwd)
+            .output()
+            .context("Failed to run git worktree add")?
+    } else {
+        Command::new("git")
+            .args([
+                "worktree",
+                "add",
+                "--track",
+                "-b",
+                branch,
+                &dest_str,
+                &format!("{remote}/{branch}"),
+            ])
+            .current_dir(&git_cwd)
+            .output()
+            .context("Failed to run git worktree add")?
+    };
+
+    if output.status.success() {
+        Ok(dest)
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        anyhow::bail!("{stderr}")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
