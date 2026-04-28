@@ -49,11 +49,11 @@ fn main() -> Result<()> {
         git::create_workspace_marker(&cwd)?;
     }
 
-    let repo_root_opt = git::find_repo_root(&cwd);
-    let workspace_root_opt = if repo_root_opt.is_none() {
-        git::find_workspace_root(&cwd)
-    } else {
+    let workspace_root_opt = git::find_workspace_root(&cwd);
+    let repo_root_opt = if workspace_root_opt.is_some() {
         None
+    } else {
+        git::find_repo_root(&cwd)
     };
 
     let no_repo = repo_root_opt.is_none() && workspace_root_opt.is_none();
