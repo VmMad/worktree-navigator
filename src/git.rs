@@ -774,6 +774,65 @@ pub fn find_workspace_root(start: &Path) -> Option<PathBuf> {
     }
 }
 
+fn read_git_origin_from_config(git_config: &Path) -> Option<String> {
+    let content = fs::read_to_string(git_config).ok()?;
+    let mut in_origin = false;
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') {
+            in_origin = trimmed == r#"[remote "origin"]"#;
+            continue;
+        }
+        if in_origin {
+            if let Some(rest) = trimmed.strip_prefix("url") {
+                if let Some(url) = rest.trim_start().strip_prefix('=') {
+                    let url = url.trim().trim_end_matches(".git").to_lowercase();
+                    if !url.is_empty() {
+                        return Some(url);
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+pub fn detect_worktree_workspace(dir: &Path) -> bool {
+    const MAX_SCAN: usize = 50;
+
+    let entries = match fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(_) => return false,
+    };
+
+    let mut origin: Option<String> = None;
+    let mut main_count = 0usize;
+    let mut linked_count = 0usize;
+
+    for entry in entries.flatten().take(MAX_SCAN) {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let git_path = path.join(".git");
+        if git_path.is_dir() {
+            let Some(url) = read_git_origin_from_config(&git_path.join("config")) else {
+                continue;
+            };
+            match &origin {
+                None => origin = Some(url),
+                Some(existing) if existing == &url => {}
+                Some(_) => return false,
+            }
+            main_count += 1;
+        } else if git_path.is_file() {
+            linked_count += 1;
+        }
+    }
+
+    (linked_count > 0 && main_count > 0) || main_count >= 2
+}
+
 /// Scan immediate subdirectories of `workspace_dir` for git repos and return
 /// them as `Worktree` entries. Each valid git subdir is treated as one worktree.
 pub fn list_workspace_worktrees(workspace_dir: &Path) -> Result<Vec<Worktree>> {
@@ -948,7 +1007,7 @@ fn should_skip_dir(path: &Path) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::list_secret_files;
+    use super::{detect_worktree_workspace, list_secret_files, read_git_origin_from_config};
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::process::Command;
@@ -978,6 +1037,14 @@ mod tests {
         );
     }
 
+    fn make_git_repo_with_origin(parent: &Path, name: &str, origin: &str) -> PathBuf {
+        let repo = parent.join(name);
+        fs::create_dir_all(&repo).unwrap();
+        git(&repo, &["init"]);
+        git(&repo, &["remote", "add", "origin", origin]);
+        repo
+    }
+
     #[test]
     fn lists_only_untracked_env_files_recursively() {
         let dir = make_temp_dir("secret-scan");
@@ -1000,6 +1067,82 @@ mod tests {
             vec![PathBuf::from(".env"), PathBuf::from("apps/web/.env.local")]
         );
 
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn read_git_origin_parses_and_normalizes_url() {
+        let dir = make_temp_dir("origin-parse");
+        let config = dir.join("config");
+
+        fs::write(
+            &config,
+            "[core]\n\trepositoryformatversion = 0\n[remote \"origin\"]\n\turl = git@github.com:owner/repo.git\n\tfetch = +refs/heads/*:refs/remotes/origin/*\n",
+        ).unwrap();
+        assert_eq!(
+            read_git_origin_from_config(&config),
+            Some("git@github.com:owner/repo".to_string())
+        );
+
+        fs::write(
+            &config,
+            "[remote \"origin\"]\n\turl = https://github.com/owner/repo\n",
+        ).unwrap();
+        assert_eq!(
+            read_git_origin_from_config(&config),
+            Some("https://github.com/owner/repo".to_string())
+        );
+
+        fs::write(&config, "[core]\n\tbare = false\n").unwrap();
+        assert_eq!(read_git_origin_from_config(&config), None);
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn detect_returns_false_for_empty_dir() {
+        let dir = make_temp_dir("detect-empty");
+        assert!(!detect_worktree_workspace(&dir));
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn detect_returns_false_for_single_main_worktree() {
+        let dir = make_temp_dir("detect-single");
+        make_git_repo_with_origin(&dir, "main", "git@github.com:owner/repo.git");
+        assert!(!detect_worktree_workspace(&dir));
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn detect_returns_true_for_two_clones_same_origin() {
+        let dir = make_temp_dir("detect-two-clones");
+        make_git_repo_with_origin(&dir, "main", "git@github.com:owner/repo.git");
+        make_git_repo_with_origin(&dir, "feature", "git@github.com:owner/repo.git");
+        assert!(detect_worktree_workspace(&dir));
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn detect_returns_false_for_two_clones_different_origins() {
+        let dir = make_temp_dir("detect-diff-origins");
+        make_git_repo_with_origin(&dir, "repo1", "git@github.com:owner/repo-a.git");
+        make_git_repo_with_origin(&dir, "repo2", "git@github.com:owner/repo-b.git");
+        assert!(!detect_worktree_workspace(&dir));
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn detect_returns_true_for_linked_worktree_alongside_main() {
+        let dir = make_temp_dir("detect-linked");
+        make_git_repo_with_origin(&dir, "main", "git@github.com:owner/repo.git");
+        let linked = dir.join("feature");
+        fs::create_dir_all(&linked).unwrap();
+        fs::write(
+            linked.join(".git"),
+            "gitdir: ../main/.git/worktrees/feature\n",
+        ).unwrap();
+        assert!(detect_worktree_workspace(&dir));
         let _ = fs::remove_dir_all(dir);
     }
 }
