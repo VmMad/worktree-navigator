@@ -49,7 +49,14 @@ fn main() -> Result<()> {
         git::create_workspace_marker(&cwd)?;
     }
 
-    let workspace_root_opt = git::find_workspace_root(&cwd);
+    let workspace_root_opt = git::find_workspace_root(&cwd).or_else(|| {
+        if git::detect_worktree_workspace(&cwd) {
+            let _ = git::create_workspace_marker(&cwd);
+            Some(cwd.clone())
+        } else {
+            None
+        }
+    });
     let repo_root_opt = if workspace_root_opt.is_some() {
         None
     } else {
