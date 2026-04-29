@@ -14,7 +14,7 @@ use crate::types::{CloneEvent, SyncPrEvent, SyncResult, SyncStatus, Worktree};
 const MAX_WORKTREE_SCAN_DEPTH: usize = 3;
 
 fn worktree_path_for_name(base_dir: &Path, name: &str) -> PathBuf {
-    base_dir.join(Path::new(name))
+    base_dir.join(name.replace('/', "-"))
 }
 
 fn ensure_parent_dirs(path: &Path) -> Result<()> {
@@ -1277,16 +1277,16 @@ mod tests {
     }
 
     #[test]
-    fn add_worktree_preserves_nested_branch_paths() {
-        let workspace = make_temp_dir("nested-worktree-add");
+    fn add_worktree_uses_flat_branch_name() {
+        let workspace = make_temp_dir("flat-worktree-add");
         let repo = workspace.join("repo");
         fs::create_dir_all(&repo).expect("repo dir should be created");
         init_repo(&repo);
 
         let branch = "feat/team/branch";
-        let expected = workspace.join(branch);
+        let expected = workspace.join("feat-team-branch");
         let (_messages, dest) =
-            add_worktree(&repo, branch, None).expect("nested worktree should be created");
+            add_worktree(&repo, branch, None).expect("flat worktree should be created");
 
         assert_eq!(dest, expected);
         assert!(dest.exists());
@@ -1295,7 +1295,7 @@ mod tests {
             .args(["symbolic-ref", "--short", "HEAD"])
             .current_dir(&dest)
             .output()
-            .expect("git should inspect nested worktree");
+            .expect("git should inspect flat worktree");
         assert!(head.status.success());
         assert_eq!(String::from_utf8_lossy(&head.stdout).trim(), branch);
 
