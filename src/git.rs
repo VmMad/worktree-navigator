@@ -256,6 +256,11 @@ fn checkout_pr_as_worktree_impl(
         _ => {}
     }
 
+    let _ = Command::new("git")
+        .args(["worktree", "prune"])
+        .current_dir(&git_cwd)
+        .output();
+
     let dest = worktree_path_for_name(&worktree_base_dir(repo_root), &branch_name);
     let dest_str = dest.to_string_lossy().to_string();
     ensure_parent_dirs(&dest)?;
@@ -280,7 +285,9 @@ fn checkout_pr_as_worktree_impl(
         );
     } else {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        push_sync_pr_progress(tx, &mut messages, format!("✗ {}", stderr.trim()));
+        let msg = stderr.trim().to_string();
+        push_sync_pr_progress(tx, &mut messages, format!("✗ {msg}"));
+        anyhow::bail!("{msg}");
     }
 
     Ok((messages, dest))
