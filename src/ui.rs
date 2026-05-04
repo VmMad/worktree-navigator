@@ -3,7 +3,7 @@ use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Margin, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, Paragraph},
+    widgets::{Block, Borders, Clear, Paragraph, Wrap},
 };
 
 use crate::{
@@ -837,7 +837,7 @@ fn draw_sync_pr_overlay(f: &mut Frame, app: &App, area: Rect) {
     }
 
     let has_err = app.overlay_error.is_some();
-    let popup = centered_rect(60, if has_err { 9 } else { 7 }, area);
+    let popup = centered_rect(60, if has_err { 11 } else { 7 }, area);
     f.render_widget(Clear, popup);
 
     let block = Block::default()
@@ -858,7 +858,7 @@ fn draw_sync_pr_overlay(f: &mut Frame, app: &App, area: Rect) {
     ];
     if has_err {
         constraints.push(Constraint::Length(1)); // spacer
-        constraints.push(Constraint::Length(1)); // error
+        constraints.push(Constraint::Min(1));    // error (wraps)
     }
 
     let rows = Layout::default()
@@ -892,7 +892,8 @@ fn draw_sync_pr_overlay(f: &mut Frame, app: &App, area: Rect) {
             Paragraph::new(Span::styled(
                 format!("✗ {err}"),
                 Style::default().fg(Color::Red),
-            )),
+            ))
+            .wrap(Wrap { trim: false }),
             rows[4],
         );
     }
