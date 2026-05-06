@@ -43,8 +43,24 @@ pub fn list_worktrees(repo_root: &Path) -> Result<Vec<Worktree>> {
 }
 
 fn get_default_branch(git_repo: &Path) -> Option<String> {
+    // Fast path: local symbolic ref set during clone or via `git remote set-head origin -a`.
     let out = Command::new("git")
         .args(["symbolic-ref", "refs/remotes/origin/HEAD"])
+        .current_dir(git_repo)
+        .output()
+        .ok()?;
+    if out.status.success() {
+        let raw = String::from_utf8_lossy(&out.stdout);
+        let branch = raw.trim().strip_prefix("refs/remotes/origin/")?;
+        if !branch.is_empty() {
+            return Some(branch.to_string());
+        }
+    }
+
+    // Fallback: query the remote directly. Needed when origin was removed and
+    // re-added (which drops refs/remotes/origin/HEAD without recreating it).
+    let out = Command::new("git")
+        .args(["ls-remote", "--symref", "origin", "HEAD"])
         .current_dir(git_repo)
         .output()
         .ok()?;
@@ -52,11 +68,30 @@ fn get_default_branch(git_repo: &Path) -> Option<String> {
         return None;
     }
     let raw = String::from_utf8_lossy(&out.stdout);
-    let branch = raw.trim().strip_prefix("refs/remotes/origin/")?;
-    if branch.is_empty() {
-        return None;
+    for line in raw.lines() {
+        // Format: "ref: refs/heads/<branch>\tHEAD"
+        if let Some(branch) = line
+            .split('\t')
+            .next()
+            .and_then(|r| r.trim().strip_prefix("ref: refs/heads/"))
+        {
+            if !branch.is_empty() {
+                // Persist so the fast path works on the next startup.
+                // Use symbolic-ref directly because `git remote set-head` requires
+                // refs/remotes/origin/<branch> to already exist locally.
+                let _ = Command::new("git")
+                    .args([
+                        "symbolic-ref",
+                        "refs/remotes/origin/HEAD",
+                        &format!("refs/remotes/origin/{branch}"),
+                    ])
+                    .current_dir(git_repo)
+                    .output();
+                return Some(branch.to_string());
+            }
+        }
     }
-    Some(branch.to_string())
+    None
 }
 
 fn parse_worktree_porcelain(
