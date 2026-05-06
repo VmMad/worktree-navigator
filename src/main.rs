@@ -1,5 +1,6 @@
 mod app;
 mod git;
+mod text_input;
 mod types;
 mod ui;
 mod update;
@@ -22,6 +23,7 @@ use crossterm::{
 use ratatui::{Terminal, backend::CrosstermBackend};
 
 use app::App;
+use text_input::TextInputKeyResult;
 use types::{ActiveAction, CheckoutRemotePhase, CloneEvent, CopySecretsPhase, SyncPrEvent};
 
 fn main() -> Result<()> {
@@ -143,7 +145,7 @@ fn main() -> Result<()> {
         {
             app.advance_loading_animation();
         }
-        let wants_mouse_capture = app.active_action != ActiveAction::CloneRepo;
+        let wants_mouse_capture = text_input::wants_mouse_capture(&app);
         if wants_mouse_capture != mouse_capture_enabled {
             if wants_mouse_capture {
                 execute!(terminal.backend_mut(), EnableMouseCapture)?;
@@ -618,14 +620,13 @@ fn handle_new_branch_key(app: &mut App, code: KeyCode) {
     if app.new_branch_loading {
         return;
     }
-    match code {
-        KeyCode::Esc => {
+    match text_input::handle_key(app, code) {
+        TextInputKeyResult::Cancel => {
             app.active_action = ActiveAction::None;
             app.clear_input();
             app.overlay_error = None;
         }
-        KeyCode::Backspace => app.input_backspace(),
-        KeyCode::Enter => {
+        TextInputKeyResult::Submit => {
             let branch = app.input_buffer.trim().to_string();
             if branch.is_empty() {
                 return;
@@ -634,8 +635,7 @@ fn handle_new_branch_key(app: &mut App, code: KeyCode) {
             app.new_branch_loading = true;
             app.new_branch_pending = Some(branch);
         }
-        KeyCode::Char(c) => app.input_char(c),
-        _ => {}
+        TextInputKeyResult::Updated | TextInputKeyResult::Ignored | TextInputKeyResult::Complete => {}
     }
 }
 
@@ -644,14 +644,13 @@ fn handle_sync_pr_key(app: &mut App, code: KeyCode) {
         return;
     }
 
-    match code {
-        KeyCode::Esc => {
+    match text_input::handle_key(app, code) {
+        TextInputKeyResult::Cancel => {
             app.active_action = ActiveAction::None;
             app.overlay_error = None;
             app.clear_input();
         }
-        KeyCode::Backspace => app.input_backspace(),
-        KeyCode::Enter => {
+        TextInputKeyResult::Submit => {
             let raw = app.input_buffer.trim();
             let pr_input = raw.trim_start_matches('#');
             if pr_input.is_empty() || !pr_input.chars().all(|c| c.is_ascii_digit()) {
@@ -675,8 +674,7 @@ fn handle_sync_pr_key(app: &mut App, code: KeyCode) {
                 pr_number,
             ));
         }
-        KeyCode::Char(c) => app.input_char(c),
-        _ => {}
+        TextInputKeyResult::Updated | TextInputKeyResult::Ignored | TextInputKeyResult::Complete => {}
     }
 }
 
@@ -983,8 +981,8 @@ fn handle_clone_key(app: &mut App, code: KeyCode) {
         return;
     }
 
-    match code {
-        KeyCode::Esc => {
+    match text_input::handle_key(app, code) {
+        TextInputKeyResult::Cancel => {
             if app.clone_step == 1 {
                 app.clone_step = 0;
                 app.input_buffer = app.clone_url.clone();
@@ -998,13 +996,7 @@ fn handle_clone_key(app: &mut App, code: KeyCode) {
                 app.clear_input();
             }
         }
-        KeyCode::Backspace => app.input_backspace(),
-        KeyCode::Delete => app.input_delete(),
-        KeyCode::Left => app.input_left(),
-        KeyCode::Right => app.input_right(),
-        KeyCode::Home => app.input_home(),
-        KeyCode::End => app.input_end(),
-        KeyCode::Enter => {
+        TextInputKeyResult::Submit => {
             let input = app.input_buffer.trim().to_string();
             if input.is_empty() {
                 return;
@@ -1028,8 +1020,7 @@ fn handle_clone_key(app: &mut App, code: KeyCode) {
                 ));
             }
         }
-        KeyCode::Char(c) => app.input_char(c),
-        _ => {}
+        TextInputKeyResult::Updated | TextInputKeyResult::Ignored | TextInputKeyResult::Complete => {}
     }
 }
 
@@ -1093,20 +1084,13 @@ fn handle_checkout_remote_key(app: &mut App, code: KeyCode) {
     }
 
     match app.checkout_remote_phase {
-        CheckoutRemotePhase::SelectRemote => match code {
-            KeyCode::Esc => {
+        CheckoutRemotePhase::SelectRemote => match text_input::handle_key(app, code) {
+            TextInputKeyResult::Cancel => {
                 app.active_action = ActiveAction::None;
                 app.overlay_error = None;
                 app.clear_input();
             }
-            KeyCode::Backspace => app.input_backspace(),
-            KeyCode::Delete => app.input_delete(),
-            KeyCode::Left => app.input_left(),
-            KeyCode::Right => app.input_right(),
-            KeyCode::Home => app.input_home(),
-            KeyCode::End => app.input_end(),
-            KeyCode::Char(c) => app.input_char(c),
-            KeyCode::Enter => {
+            TextInputKeyResult::Submit => {
                 let remote = app.input_buffer.trim().to_string();
                 if remote.is_empty() {
                     return;
@@ -1118,28 +1102,23 @@ fn handle_checkout_remote_key(app: &mut App, code: KeyCode) {
                     Some(git::start_fetch_remote(app.repo_root.clone(), remote));
                 app.reset_loading_animation();
             }
-            _ => {}
+            TextInputKeyResult::Updated
+            | TextInputKeyResult::Ignored
+            | TextInputKeyResult::Complete => {}
         },
-        CheckoutRemotePhase::EnterBranch => match code {
-            KeyCode::Esc => {
+        CheckoutRemotePhase::EnterBranch => match text_input::handle_key(app, code) {
+            TextInputKeyResult::Cancel => {
                 app.checkout_remote_phase = CheckoutRemotePhase::SelectRemote;
                 app.input_buffer = app.checkout_remote_name.clone();
                 app.input_cursor = app.checkout_remote_name.chars().count();
                 app.overlay_error = None;
             }
-            KeyCode::Backspace => app.input_backspace(),
-            KeyCode::Delete => app.input_delete(),
-            KeyCode::Left => app.input_left(),
-            KeyCode::Right => app.input_right(),
-            KeyCode::Home => app.input_home(),
-            KeyCode::End => app.input_end(),
-            KeyCode::Tab => {
+            TextInputKeyResult::Complete => {
                 if let Some(ghost) = app.checkout_remote_ghost() {
                     app.input_str(&ghost);
                 }
             }
-            KeyCode::Char(c) => app.input_char(c),
-            KeyCode::Enter => {
+            TextInputKeyResult::Submit => {
                 let branch = app.input_buffer.trim().to_string();
                 if branch.is_empty() {
                     return;
@@ -1150,8 +1129,7 @@ fn handle_checkout_remote_key(app: &mut App, code: KeyCode) {
                     return;
                 }
                 if app.worktrees.iter().any(|wt| wt.branch == branch) {
-                    app.overlay_error =
-                        Some(format!("'{branch}' is already checked out."));
+                    app.overlay_error = Some(format!("'{branch}' is already checked out."));
                     return;
                 }
                 app.overlay_error = None;
@@ -1160,7 +1138,7 @@ fn handle_checkout_remote_key(app: &mut App, code: KeyCode) {
                     Some((app.checkout_remote_name.clone(), branch));
                 app.reset_loading_animation();
             }
-            _ => {}
+            TextInputKeyResult::Updated | TextInputKeyResult::Ignored => {}
         },
         CheckoutRemotePhase::FetchingRemote | CheckoutRemotePhase::CreatingWorktree => {}
     }
@@ -1203,20 +1181,5 @@ fn poll_checkout_remote_fetch(app: &mut App) {
 }
 
 fn handle_paste(app: &mut App, text: &str) {
-    let is_clone = app.active_action == ActiveAction::CloneRepo && !app.clone_loading;
-    let is_checkout_remote = app.active_action == ActiveAction::CheckoutRemote
-        && matches!(
-            app.checkout_remote_phase,
-            CheckoutRemotePhase::SelectRemote | CheckoutRemotePhase::EnterBranch
-        );
-    if !is_clone && !is_checkout_remote {
-        return;
-    }
-
-    let text = text.trim_end_matches(['\r', '\n']);
-    if text.is_empty() {
-        return;
-    }
-
-    app.input_str(text);
+    let _ = text_input::handle_paste(app, text);
 }
