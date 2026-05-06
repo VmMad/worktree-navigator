@@ -43,7 +43,6 @@ pub fn list_worktrees(repo_root: &Path) -> Result<Vec<Worktree>> {
 }
 
 fn get_default_branch(git_repo: &Path) -> Option<String> {
-    // Fast path: local symbolic ref set during clone or via `git remote set-head origin -a`.
     let out = Command::new("git")
         .args(["symbolic-ref", "refs/remotes/origin/HEAD"])
         .current_dir(git_repo)
@@ -57,8 +56,9 @@ fn get_default_branch(git_repo: &Path) -> Option<String> {
         }
     }
 
-    // Fallback: query the remote directly. Needed when origin was removed and
-    // re-added (which drops refs/remotes/origin/HEAD without recreating it).
+    // `git remote remove` + `git remote add` drops refs/remotes/origin/HEAD without
+    // recreating it. Query the remote directly as a fallback and persist the result
+    // so subsequent startups use the fast local path.
     let out = Command::new("git")
         .args(["ls-remote", "--symref", "origin", "HEAD"])
         .current_dir(git_repo)
@@ -69,16 +69,13 @@ fn get_default_branch(git_repo: &Path) -> Option<String> {
     }
     let raw = String::from_utf8_lossy(&out.stdout);
     for line in raw.lines() {
-        // Format: "ref: refs/heads/<branch>\tHEAD"
         if let Some(branch) = line
             .split('\t')
             .next()
             .and_then(|r| r.trim().strip_prefix("ref: refs/heads/"))
         {
             if !branch.is_empty() {
-                // Persist so the fast path works on the next startup.
-                // Use symbolic-ref directly because `git remote set-head` requires
-                // refs/remotes/origin/<branch> to already exist locally.
+                // symbolic-ref writes without requiring refs/remotes/origin/<branch> to exist locally
                 let _ = Command::new("git")
                     .args([
                         "symbolic-ref",
