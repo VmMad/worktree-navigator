@@ -143,7 +143,7 @@ fn main() -> Result<()> {
         {
             app.advance_loading_animation();
         }
-        let wants_mouse_capture = app.active_action != ActiveAction::CloneRepo;
+        let wants_mouse_capture = !text_input_overlay_active(&app);
         if wants_mouse_capture != mouse_capture_enabled {
             if wants_mouse_capture {
                 execute!(terminal.backend_mut(), EnableMouseCapture)?;
@@ -310,13 +310,13 @@ fn handle_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
     }
 
     match app.active_action {
-        ActiveAction::NewBranch => handle_new_branch_key(app, code),
-        ActiveAction::SyncPr => handle_sync_pr_key(app, code),
+        ActiveAction::NewBranch => handle_new_branch_key(app, code, modifiers),
+        ActiveAction::SyncPr => handle_sync_pr_key(app, code, modifiers),
         ActiveAction::SyncTrees => handle_sync_trees_key(app, code),
         ActiveAction::Delete => handle_delete_key(app, code),
         ActiveAction::CopySecrets => handle_copy_secrets_key(app, code),
-        ActiveAction::CloneRepo => handle_clone_key(app, code),
-        ActiveAction::CheckoutRemote => handle_checkout_remote_key(app, code),
+        ActiveAction::CloneRepo => handle_clone_key(app, code, modifiers),
+        ActiveAction::CheckoutRemote => handle_checkout_remote_key(app, code, modifiers),
         ActiveAction::None => handle_nav_key(app, code, modifiers),
     }
 }
@@ -425,6 +425,21 @@ fn handle_mouse(app: &mut App, kind: MouseEventKind, column: u16, row: u16) {
             }
         }
         _ => {}
+    }
+}
+
+fn text_input_overlay_active(app: &App) -> bool {
+    match app.active_action {
+        ActiveAction::NewBranch => !app.new_branch_loading,
+        ActiveAction::SyncPr => !app.sync_pr_loading,
+        ActiveAction::CloneRepo => !app.clone_loading,
+        ActiveAction::CheckoutRemote => {
+            matches!(
+                app.checkout_remote_phase,
+                CheckoutRemotePhase::SelectRemote | CheckoutRemotePhase::EnterBranch
+            )
+        }
+        _ => false,
     }
 }
 
@@ -614,7 +629,57 @@ fn handle_sync_trees_key(app: &mut App, code: KeyCode) {
     }
 }
 
-fn handle_new_branch_key(app: &mut App, code: KeyCode) {
+fn handle_input_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) -> bool {
+    let ctrl = modifiers.contains(KeyModifiers::CONTROL);
+
+    match code {
+        KeyCode::Backspace => {
+            app.input_backspace();
+            true
+        }
+        KeyCode::Delete if ctrl => {
+            app.input_delete_next_word();
+            true
+        }
+        KeyCode::Delete => {
+            app.input_delete();
+            true
+        }
+        KeyCode::Left if ctrl => {
+            app.input_left_word();
+            true
+        }
+        KeyCode::Left => {
+            app.input_left();
+            true
+        }
+        KeyCode::Right if ctrl => {
+            app.input_right_word();
+            true
+        }
+        KeyCode::Right => {
+            app.input_right();
+            true
+        }
+        KeyCode::Home => {
+            app.input_home();
+            true
+        }
+        KeyCode::End => {
+            app.input_end();
+            true
+        }
+        KeyCode::Char(c)
+            if !modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+        {
+            app.input_char(c);
+            true
+        }
+        _ => false,
+    }
+}
+
+fn handle_new_branch_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
     if app.new_branch_loading {
         return;
     }
@@ -634,12 +699,12 @@ fn handle_new_branch_key(app: &mut App, code: KeyCode) {
             app.new_branch_loading = true;
             app.new_branch_pending = Some(branch);
         }
-        KeyCode::Char(c) => app.input_char(c),
+        _ if handle_input_key(app, code, modifiers) => {}
         _ => {}
     }
 }
 
-fn handle_sync_pr_key(app: &mut App, code: KeyCode) {
+fn handle_sync_pr_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
     if app.sync_pr_loading {
         return;
     }
@@ -675,7 +740,7 @@ fn handle_sync_pr_key(app: &mut App, code: KeyCode) {
                 pr_number,
             ));
         }
-        KeyCode::Char(c) => app.input_char(c),
+        _ if handle_input_key(app, code, modifiers) => {}
         _ => {}
     }
 }
@@ -978,7 +1043,7 @@ fn delete_overlay_index_for_worktree(app: &App, worktree_idx: usize) -> usize {
     0
 }
 
-fn handle_clone_key(app: &mut App, code: KeyCode) {
+fn handle_clone_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
     if app.clone_loading {
         return;
     }
@@ -998,12 +1063,6 @@ fn handle_clone_key(app: &mut App, code: KeyCode) {
                 app.clear_input();
             }
         }
-        KeyCode::Backspace => app.input_backspace(),
-        KeyCode::Delete => app.input_delete(),
-        KeyCode::Left => app.input_left(),
-        KeyCode::Right => app.input_right(),
-        KeyCode::Home => app.input_home(),
-        KeyCode::End => app.input_end(),
         KeyCode::Enter => {
             let input = app.input_buffer.trim().to_string();
             if input.is_empty() {
@@ -1028,7 +1087,7 @@ fn handle_clone_key(app: &mut App, code: KeyCode) {
                 ));
             }
         }
-        KeyCode::Char(c) => app.input_char(c),
+        _ if handle_input_key(app, code, modifiers) => {}
         _ => {}
     }
 }
@@ -1087,7 +1146,7 @@ fn poll_clone_updates(app: &mut App) {
     }
 }
 
-fn handle_checkout_remote_key(app: &mut App, code: KeyCode) {
+fn handle_checkout_remote_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
     if app.checkout_remote_is_loading() {
         return;
     }
@@ -1099,13 +1158,6 @@ fn handle_checkout_remote_key(app: &mut App, code: KeyCode) {
                 app.overlay_error = None;
                 app.clear_input();
             }
-            KeyCode::Backspace => app.input_backspace(),
-            KeyCode::Delete => app.input_delete(),
-            KeyCode::Left => app.input_left(),
-            KeyCode::Right => app.input_right(),
-            KeyCode::Home => app.input_home(),
-            KeyCode::End => app.input_end(),
-            KeyCode::Char(c) => app.input_char(c),
             KeyCode::Enter => {
                 let remote = app.input_buffer.trim().to_string();
                 if remote.is_empty() {
@@ -1118,6 +1170,7 @@ fn handle_checkout_remote_key(app: &mut App, code: KeyCode) {
                     Some(git::start_fetch_remote(app.repo_root.clone(), remote));
                 app.reset_loading_animation();
             }
+            _ if handle_input_key(app, code, modifiers) => {}
             _ => {}
         },
         CheckoutRemotePhase::EnterBranch => match code {
@@ -1127,28 +1180,28 @@ fn handle_checkout_remote_key(app: &mut App, code: KeyCode) {
                 app.input_cursor = app.checkout_remote_name.chars().count();
                 app.overlay_error = None;
             }
-            KeyCode::Backspace => app.input_backspace(),
-            KeyCode::Delete => app.input_delete(),
-            KeyCode::Left => app.input_left(),
-            KeyCode::Right => app.input_right(),
-            KeyCode::Home => app.input_home(),
-            KeyCode::End => app.input_end(),
             KeyCode::Tab => {
                 if let Some(ghost) = app.checkout_remote_ghost() {
                     app.input_str(&ghost);
                 }
             }
-            KeyCode::Char(c) => app.input_char(c),
             KeyCode::Enter => {
-                let branch = app.input_buffer.trim().to_string();
-                if branch.is_empty() {
+                let branch_input = app.input_buffer.trim();
+                if branch_input.is_empty() {
                     return;
                 }
-                if branch.contains('/') {
-                    app.overlay_error =
-                        Some("Enter just the branch name, not remote/branch.".to_string());
-                    return;
-                }
+                let branch = match git::normalize_checkout_remote_branch_input(
+                    branch_input,
+                    &app.checkout_remote_name,
+                    &app.checkout_remote_remotes,
+                    &app.checkout_remote_branches,
+                ) {
+                    Ok(branch) => branch,
+                    Err(err) => {
+                        app.overlay_error = Some(err.to_string());
+                        return;
+                    }
+                };
                 if app.worktrees.iter().any(|wt| wt.branch == branch) {
                     app.overlay_error =
                         Some(format!("'{branch}' is already checked out."));
@@ -1160,6 +1213,7 @@ fn handle_checkout_remote_key(app: &mut App, code: KeyCode) {
                     Some((app.checkout_remote_name.clone(), branch));
                 app.reset_loading_animation();
             }
+            _ if handle_input_key(app, code, modifiers) => {}
             _ => {}
         },
         CheckoutRemotePhase::FetchingRemote | CheckoutRemotePhase::CreatingWorktree => {}
@@ -1203,13 +1257,7 @@ fn poll_checkout_remote_fetch(app: &mut App) {
 }
 
 fn handle_paste(app: &mut App, text: &str) {
-    let is_clone = app.active_action == ActiveAction::CloneRepo && !app.clone_loading;
-    let is_checkout_remote = app.active_action == ActiveAction::CheckoutRemote
-        && matches!(
-            app.checkout_remote_phase,
-            CheckoutRemotePhase::SelectRemote | CheckoutRemotePhase::EnterBranch
-        );
-    if !is_clone && !is_checkout_remote {
+    if !text_input_overlay_active(app) {
         return;
     }
 
@@ -1219,4 +1267,89 @@ fn handle_paste(app: &mut App, text: &str) {
     }
 
     app.input_str(text);
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use super::{handle_paste, text_input_overlay_active};
+    use crate::{
+        app::App,
+        types::{ActiveAction, CheckoutRemotePhase},
+    };
+
+    fn test_app() -> App {
+        App::new(PathBuf::from("."))
+    }
+
+    #[test]
+    fn text_input_overlay_active_only_for_editable_overlays() {
+        let mut app = test_app();
+
+        assert!(!text_input_overlay_active(&app));
+
+        app.active_action = ActiveAction::NewBranch;
+        assert!(text_input_overlay_active(&app));
+        app.new_branch_loading = true;
+        assert!(!text_input_overlay_active(&app));
+
+        app = test_app();
+        app.active_action = ActiveAction::SyncPr;
+        assert!(text_input_overlay_active(&app));
+        app.sync_pr_loading = true;
+        assert!(!text_input_overlay_active(&app));
+
+        app = test_app();
+        app.active_action = ActiveAction::CloneRepo;
+        assert!(text_input_overlay_active(&app));
+        app.clone_loading = true;
+        assert!(!text_input_overlay_active(&app));
+
+        app = test_app();
+        app.active_action = ActiveAction::CheckoutRemote;
+        app.checkout_remote_phase = CheckoutRemotePhase::SelectRemote;
+        assert!(text_input_overlay_active(&app));
+        app.checkout_remote_phase = CheckoutRemotePhase::EnterBranch;
+        assert!(text_input_overlay_active(&app));
+        app.checkout_remote_phase = CheckoutRemotePhase::FetchingRemote;
+        assert!(!text_input_overlay_active(&app));
+    }
+
+    #[test]
+    fn handle_paste_inserts_into_all_text_input_overlays() {
+        let editable_states = [
+            (ActiveAction::NewBranch, CheckoutRemotePhase::SelectRemote),
+            (ActiveAction::SyncPr, CheckoutRemotePhase::SelectRemote),
+            (ActiveAction::CloneRepo, CheckoutRemotePhase::SelectRemote),
+            (ActiveAction::CheckoutRemote, CheckoutRemotePhase::SelectRemote),
+            (ActiveAction::CheckoutRemote, CheckoutRemotePhase::EnterBranch),
+        ];
+
+        for (action, phase) in editable_states {
+            let mut app = test_app();
+            app.active_action = action;
+            app.checkout_remote_phase = phase;
+
+            handle_paste(&mut app, "feature/test\n");
+
+            assert_eq!(app.input_buffer, "feature/test");
+            assert_eq!(app.input_cursor, "feature/test".chars().count());
+        }
+    }
+
+    #[test]
+    fn handle_paste_ignores_non_editable_states() {
+        let mut app = test_app();
+        app.active_action = ActiveAction::SyncTrees;
+
+        handle_paste(&mut app, "feature/test");
+        assert!(app.input_buffer.is_empty());
+
+        app.active_action = ActiveAction::CheckoutRemote;
+        app.checkout_remote_phase = CheckoutRemotePhase::CreatingWorktree;
+
+        handle_paste(&mut app, "feature/test");
+        assert!(app.input_buffer.is_empty());
+    }
 }

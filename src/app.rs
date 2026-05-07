@@ -179,7 +179,7 @@ impl App {
     /// in `checkout_remote_branches` starts with `input_buffer`.
     pub fn checkout_remote_ghost(&self) -> Option<String> {
         let input = &self.input_buffer;
-        if input.is_empty() {
+        if input.is_empty() || self.input_cursor != self.input_len() {
             return None;
         }
         self.checkout_remote_branches
@@ -226,15 +226,23 @@ impl App {
     }
 
     fn input_byte_index(&self) -> usize {
+        self.input_byte_index_for(self.input_cursor)
+    }
+
+    fn input_byte_index_for(&self, cursor: usize) -> usize {
         self.input_buffer
             .char_indices()
-            .nth(self.input_cursor)
+            .nth(cursor)
             .map(|(i, _)| i)
             .unwrap_or(self.input_buffer.len())
     }
 
     fn input_len(&self) -> usize {
         self.input_buffer.chars().count()
+    }
+
+    fn input_is_word_char(c: char) -> bool {
+        c.is_alphanumeric() || c == '_'
     }
 
     pub fn input_char(&mut self, c: char) {
@@ -272,12 +280,79 @@ impl App {
         self.input_cursor = (self.input_cursor + 1).min(self.input_len());
     }
 
+    pub fn input_left_word(&mut self) {
+        let chars: Vec<char> = self.input_buffer.chars().collect();
+        let mut cursor = self.input_cursor.min(chars.len());
+
+        while cursor > 0 && !Self::input_is_word_char(chars[cursor - 1]) {
+            cursor -= 1;
+        }
+        while cursor > 0 && Self::input_is_word_char(chars[cursor - 1]) {
+            cursor -= 1;
+        }
+
+        self.input_cursor = cursor;
+    }
+
+    pub fn input_right_word(&mut self) {
+        let chars: Vec<char> = self.input_buffer.chars().collect();
+        let mut cursor = self.input_cursor.min(chars.len());
+
+        if cursor < chars.len() && Self::input_is_word_char(chars[cursor]) {
+            while cursor < chars.len() && Self::input_is_word_char(chars[cursor]) {
+                cursor += 1;
+            }
+        }
+        while cursor < chars.len() && !Self::input_is_word_char(chars[cursor]) {
+            cursor += 1;
+        }
+
+        self.input_cursor = cursor;
+    }
+
+    pub fn input_delete_next_word(&mut self) {
+        let chars: Vec<char> = self.input_buffer.chars().collect();
+        let mut cursor = self.input_cursor.min(chars.len());
+
+        if cursor >= chars.len() {
+            return;
+        }
+
+        if Self::input_is_word_char(chars[cursor]) {
+            while cursor < chars.len() && Self::input_is_word_char(chars[cursor]) {
+                cursor += 1;
+            }
+            while cursor < chars.len() && !Self::input_is_word_char(chars[cursor]) {
+                cursor += 1;
+            }
+        } else {
+            while cursor < chars.len() && !Self::input_is_word_char(chars[cursor]) {
+                cursor += 1;
+            }
+            while cursor < chars.len() && Self::input_is_word_char(chars[cursor]) {
+                cursor += 1;
+            }
+        }
+
+        let start = self.input_byte_index();
+        let end = self.input_byte_index_for(cursor);
+        self.input_buffer.replace_range(start..end, "");
+    }
+
     pub fn input_home(&mut self) {
         self.input_cursor = 0;
     }
 
     pub fn input_end(&mut self) {
         self.input_cursor = self.input_len();
+    }
+
+    pub fn input_parts(&self) -> (String, String) {
+        let byte_pos = self.input_byte_index();
+        (
+            self.input_buffer[..byte_pos].to_string(),
+            self.input_buffer[byte_pos..].to_string(),
+        )
     }
 
     pub fn clear_input(&mut self) {
@@ -317,5 +392,59 @@ impl App {
             1 => ".. ",
             _ => "...",
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use super::App;
+
+    fn app_with_input(input: &str, cursor: usize) -> App {
+        let mut app = App::new(PathBuf::from("."));
+        app.input_buffer = input.to_string();
+        app.input_cursor = cursor;
+        app
+    }
+
+    #[test]
+    fn input_parts_split_at_cursor() {
+        let app = app_with_input("feature/branch", 7);
+
+        let (before, after) = app.input_parts();
+
+        assert_eq!(before, "feature");
+        assert_eq!(after, "/branch");
+    }
+
+    #[test]
+    fn word_navigation_skips_delimiters() {
+        let mut app = app_with_input("feature/foo-bar baz", 0);
+
+        app.input_right_word();
+        assert_eq!(app.input_cursor, 8);
+
+        app.input_right_word();
+        assert_eq!(app.input_cursor, 12);
+
+        app.input_left_word();
+        assert_eq!(app.input_cursor, 8);
+
+        app.input_left_word();
+        assert_eq!(app.input_cursor, 0);
+    }
+
+    #[test]
+    fn delete_next_word_removes_word_and_adjacent_delimiters() {
+        let mut app = app_with_input("feature/foo-bar baz", 0);
+
+        app.input_delete_next_word();
+        assert_eq!(app.input_buffer, "foo-bar baz");
+        assert_eq!(app.input_cursor, 0);
+
+        app.input_delete_next_word();
+        assert_eq!(app.input_buffer, "bar baz");
+        assert_eq!(app.input_cursor, 0);
     }
 }

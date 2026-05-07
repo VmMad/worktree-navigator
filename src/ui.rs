@@ -653,6 +653,25 @@ fn centered_rect(percent_x: u16, height: u16, r: Rect) -> Rect {
     }
 }
 
+fn input_line(label: &str, before: String, after: String, caret_color: Color) -> Line<'static> {
+    Line::from(vec![
+        Span::styled(label.to_string(), Style::default().fg(Color::Gray)),
+        Span::styled(
+            before,
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled("█", Style::default().fg(caret_color)),
+        Span::styled(
+            after,
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        ),
+    ])
+}
+
 fn draw_new_branch_overlay(f: &mut Frame, app: &App, area: Rect) {
     if app.new_branch_loading {
         let popup = centered_rect(60, 5, area);
@@ -736,17 +755,9 @@ fn draw_new_branch_overlay(f: &mut Frame, app: &App, area: Rect) {
         .split(inner);
 
     let mut row_idx = 0;
+    let (before, after) = app.input_parts();
     f.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::styled("Branch name: ", Style::default().fg(Color::Gray)),
-            Span::styled(
-                &app.input_buffer,
-                Style::default()
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled("█", Style::default().fg(Color::Yellow)),
-        ])),
+        Paragraph::new(input_line("Branch name: ", before, after, Color::Yellow)),
         rows[row_idx],
     );
     row_idx += 1;
@@ -866,17 +877,9 @@ fn draw_sync_pr_overlay(f: &mut Frame, app: &App, area: Rect) {
         .constraints(constraints)
         .split(inner);
 
+    let (before, after) = app.input_parts();
     f.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::styled("PR number: ", Style::default().fg(Color::Gray)),
-            Span::styled(
-                &app.input_buffer,
-                Style::default()
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled("█", Style::default().fg(Color::Magenta)),
-        ])),
+        Paragraph::new(input_line("PR number: ", before, after, Color::Magenta)),
         rows[0],
     );
     f.render_widget(
@@ -1169,25 +1172,9 @@ fn draw_clone_overlay(f: &mut Frame, app: &App, area: Rect) {
         .split(inner);
 
     if app.clone_step == 0 {
-        let before: String = app.input_buffer.chars().take(app.input_cursor).collect();
-        let after: String = app.input_buffer.chars().skip(app.input_cursor).collect();
+        let (before, after) = app.input_parts();
         f.render_widget(
-            Paragraph::new(Line::from(vec![
-                Span::styled("Repo:      ", Style::default().fg(Color::Gray)),
-                Span::styled(
-                    before,
-                    Style::default()
-                        .fg(Color::White)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled("█", Style::default().fg(Color::Green)),
-                Span::styled(
-                    after,
-                    Style::default()
-                        .fg(Color::White)
-                        .add_modifier(Modifier::BOLD),
-                ),
-            ])),
+            Paragraph::new(input_line("Repo:      ", before, after, Color::Green)),
             rows[0],
         );
         f.render_widget(
@@ -1205,8 +1192,7 @@ fn draw_clone_overlay(f: &mut Frame, app: &App, area: Rect) {
             rows[4],
         );
     } else {
-        let before: String = app.input_buffer.chars().take(app.input_cursor).collect();
-        let after: String = app.input_buffer.chars().skip(app.input_cursor).collect();
+        let (before, after) = app.input_parts();
         f.render_widget(
             Paragraph::new(Line::from(vec![
                 Span::styled("Repo:      ", Style::default().fg(Color::Gray)),
@@ -1215,22 +1201,7 @@ fn draw_clone_overlay(f: &mut Frame, app: &App, area: Rect) {
             rows[0],
         );
         f.render_widget(
-            Paragraph::new(Line::from(vec![
-                Span::styled("Dest:      ", Style::default().fg(Color::Gray)),
-                Span::styled(
-                    before,
-                    Style::default()
-                        .fg(Color::White)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled("█", Style::default().fg(Color::Green)),
-                Span::styled(
-                    after,
-                    Style::default()
-                        .fg(Color::White)
-                        .add_modifier(Modifier::BOLD),
-                ),
-            ])),
+            Paragraph::new(input_line("Dest:      ", before, after, Color::Green)),
             rows[2],
         );
         f.render_widget(
@@ -1357,25 +1328,9 @@ fn draw_checkout_remote_overlay(f: &mut Frame, app: &App, area: Rect) {
                 .split(inner);
 
             if app.checkout_remote_phase == CheckoutRemotePhase::SelectRemote {
-                let before: String = app.input_buffer.chars().take(app.input_cursor).collect();
-                let after: String = app.input_buffer.chars().skip(app.input_cursor).collect();
+                let (before, after) = app.input_parts();
                 f.render_widget(
-                    Paragraph::new(Line::from(vec![
-                        Span::styled("Remote:  ", Style::default().fg(Color::Gray)),
-                        Span::styled(
-                            before,
-                            Style::default()
-                                .fg(Color::White)
-                                .add_modifier(Modifier::BOLD),
-                        ),
-                        Span::styled("█", Style::default().fg(COLOR)),
-                        Span::styled(
-                            after,
-                            Style::default()
-                                .fg(Color::White)
-                                .add_modifier(Modifier::BOLD),
-                        ),
-                    ])),
+                    Paragraph::new(input_line("Remote:  ", before, after, COLOR)),
                     rows[0],
                 );
                 f.render_widget(
@@ -1396,8 +1351,7 @@ fn draw_checkout_remote_overlay(f: &mut Frame, app: &App, area: Rect) {
                     rows[3],
                 );
             } else {
-                let before: String = app.input_buffer.chars().take(app.input_cursor).collect();
-                let after: String = app.input_buffer.chars().skip(app.input_cursor).collect();
+                let (before, after) = app.input_parts();
                 let ghost = app.checkout_remote_ghost().unwrap_or_else(String::new);
                 f.render_widget(
                     Paragraph::new(Line::from(vec![
@@ -1410,22 +1364,7 @@ fn draw_checkout_remote_overlay(f: &mut Frame, app: &App, area: Rect) {
                     ])),
                     rows[0],
                 );
-                let mut branch_spans = vec![
-                    Span::styled("Branch:  ", Style::default().fg(Color::Gray)),
-                    Span::styled(
-                        before,
-                        Style::default()
-                            .fg(Color::White)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled("█", Style::default().fg(COLOR)),
-                    Span::styled(
-                        after,
-                        Style::default()
-                            .fg(Color::White)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                ];
+                let mut branch_spans = input_line("Branch:  ", before, after, COLOR).spans;
                 if !ghost.is_empty() {
                     branch_spans.push(Span::styled(ghost, Style::default().fg(Color::DarkGray)));
                 }
