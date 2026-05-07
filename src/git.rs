@@ -1137,6 +1137,40 @@ pub fn list_remote_branches(repo_root: &Path, remote: &str) -> Vec<String> {
         .collect()
 }
 
+pub fn normalize_checkout_remote_branch_input(
+    input: &str,
+    selected_remote: &str,
+    known_remotes: &[String],
+    available_branches: &[String],
+) -> Result<String> {
+    let branch = input.trim();
+    if branch.is_empty() {
+        anyhow::bail!("Enter a branch name.");
+    }
+
+    if available_branches.iter().any(|candidate| candidate == branch) {
+        return Ok(branch.to_string());
+    }
+
+    if let Some((remote, rest)) = branch.split_once('/') {
+        if rest.is_empty() {
+            anyhow::bail!("Enter a branch name after '{remote}/'.");
+        }
+
+        if remote == selected_remote {
+            return Ok(rest.to_string());
+        }
+
+        if known_remotes.iter().any(|candidate| candidate == remote) {
+            anyhow::bail!(
+                "Selected remote is '{selected_remote}'. Enter a branch name or '{selected_remote}/<branch>'."
+            );
+        }
+    }
+
+    Ok(branch.to_string())
+}
+
 pub fn checkout_remote_branch(repo_root: &Path, remote: &str, branch: &str) -> Result<PathBuf> {
     let git_cwd = resolve_git_cwd(repo_root);
 
@@ -1212,7 +1246,7 @@ pub fn checkout_remote_branch(repo_root: &Path, remote: &str, branch: &str) -> R
 mod tests {
     use super::{
         add_worktree, detect_worktree_workspace, list_secret_files, list_workspace_worktrees,
-        read_git_origin_from_config, resolve_git_cwd,
+        normalize_checkout_remote_branch_input, read_git_origin_from_config, resolve_git_cwd,
     };
     use std::fs;
     use std::path::{Path, PathBuf};
@@ -1339,6 +1373,87 @@ mod tests {
         assert_eq!(String::from_utf8_lossy(&head.stdout).trim(), branch);
 
         let _ = fs::remove_dir_all(workspace);
+    }
+
+    #[test]
+    fn normalize_checkout_remote_branch_input_keeps_slash_branch_names() {
+        let branch = normalize_checkout_remote_branch_input(
+            "feat/team/branch",
+            "origin",
+            &[String::from("origin"), String::from("upstream")],
+            &[String::from("feat/team/branch")],
+        )
+        .expect("slash branch names should be accepted");
+
+        assert_eq!(branch, "feat/team/branch");
+    }
+
+    #[test]
+    fn normalize_checkout_remote_branch_input_strips_selected_remote_prefix() {
+        let branch = normalize_checkout_remote_branch_input(
+            "origin/feat/team/branch",
+            "origin",
+            &[String::from("origin"), String::from("upstream")],
+            &[String::from("feat/team/branch")],
+        )
+        .expect("selected remote prefix should be stripped");
+
+        assert_eq!(branch, "feat/team/branch");
+    }
+
+    #[test]
+    fn normalize_checkout_remote_branch_input_prefers_exact_branch_match() {
+        let branch = normalize_checkout_remote_branch_input(
+            "origin/feat/team/branch",
+            "origin",
+            &[String::from("origin"), String::from("upstream")],
+            &[String::from("origin/feat/team/branch"), String::from("feat/team/branch")],
+        )
+        .expect("exact branch match should win over remote-prefix stripping");
+
+        assert_eq!(branch, "origin/feat/team/branch");
+    }
+
+    #[test]
+    fn normalize_checkout_remote_branch_input_rejects_other_known_remote_prefix() {
+        let err = normalize_checkout_remote_branch_input(
+            "upstream/feat/team/branch",
+            "origin",
+            &[String::from("origin"), String::from("upstream")],
+            &[String::from("feat/team/branch")],
+        )
+        .expect_err("other known remote prefix should be rejected");
+
+        assert_eq!(
+            err.to_string(),
+            "Selected remote is 'origin'. Enter a branch name or 'origin/<branch>'."
+        );
+    }
+
+    #[test]
+    fn normalize_checkout_remote_branch_input_rejects_empty_remote_qualified_input() {
+        let err = normalize_checkout_remote_branch_input(
+            "origin/",
+            "origin",
+            &[String::from("origin")],
+            &[String::from("main")],
+        )
+        .expect_err("remote-qualified input must include a branch name");
+
+        assert_eq!(err.to_string(), "Enter a branch name after 'origin/'.");
+    }
+
+    #[test]
+    fn normalize_checkout_remote_branch_input_allows_exact_match_for_other_remote_prefix() {
+        let branch = normalize_checkout_remote_branch_input(
+            "upstream/feat/team/branch",
+            "origin",
+            &[String::from("origin"), String::from("upstream")],
+            &[String::from("upstream/feat/team/branch")],
+        )
+        .expect("exact branch matches should be preserved");
+
+        assert_eq!(branch, "upstream/feat/team/branch");
     }
 
     #[test]

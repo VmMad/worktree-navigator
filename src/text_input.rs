@@ -1,4 +1,4 @@
-use crossterm::event::KeyCode;
+use crossterm::event::{KeyCode, KeyModifiers};
 
 use crate::{
     app::App,
@@ -34,7 +34,9 @@ pub fn wants_mouse_capture(app: &App) -> bool {
     app.active_action != ActiveAction::CloneRepo && !is_active(app)
 }
 
-pub fn handle_key(app: &mut App, code: KeyCode) -> TextInputKeyResult {
+pub fn handle_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) -> TextInputKeyResult {
+    let ctrl = modifiers.contains(KeyModifiers::CONTROL);
+
     match code {
         KeyCode::Esc => TextInputKeyResult::Cancel,
         KeyCode::Enter => TextInputKeyResult::Submit,
@@ -42,12 +44,24 @@ pub fn handle_key(app: &mut App, code: KeyCode) -> TextInputKeyResult {
             app.input_backspace();
             TextInputKeyResult::Updated
         }
+        KeyCode::Delete if ctrl => {
+            app.input_delete_next_word();
+            TextInputKeyResult::Updated
+        }
         KeyCode::Delete => {
             app.input_delete();
             TextInputKeyResult::Updated
         }
+        KeyCode::Left if ctrl => {
+            app.input_left_word();
+            TextInputKeyResult::Updated
+        }
         KeyCode::Left => {
             app.input_left();
+            TextInputKeyResult::Updated
+        }
+        KeyCode::Right if ctrl => {
+            app.input_right_word();
             TextInputKeyResult::Updated
         }
         KeyCode::Right => {
@@ -63,7 +77,9 @@ pub fn handle_key(app: &mut App, code: KeyCode) -> TextInputKeyResult {
             TextInputKeyResult::Updated
         }
         KeyCode::Tab => TextInputKeyResult::Complete,
-        KeyCode::Char(c) => {
+        KeyCode::Char(c)
+            if !modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+        {
             app.input_char(c);
             TextInputKeyResult::Updated
         }
