@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
-use std::io::Read;
 use std::collections::HashSet;
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -123,9 +123,7 @@ fn parse_worktree_porcelain(
                     .trim_start_matches("refs/heads/")
                     .to_string()
             })
-            .or_else(|| {
-                head_line.map(|l| l.trim_start_matches("HEAD ").to_string())
-            })
+            .or_else(|| head_line.map(|l| l.trim_start_matches("HEAD ").to_string()))
             .unwrap_or_else(|| "HEAD".to_string());
 
         let is_main = match default_branch {
@@ -162,7 +160,9 @@ pub fn add_worktree(
     let mut args = vec!["worktree", "add", &dest_str, "-b", branch_name];
     if let Some(base) = base_branch {
         args.push(base);
-        messages.push(format!("$ git worktree add {dest_str} -b {branch_name} {base}"));
+        messages.push(format!(
+            "$ git worktree add {dest_str} -b {branch_name} {base}"
+        ));
     } else {
         messages.push(format!("$ git worktree add {dest_str} -b {branch_name}"));
     }
@@ -212,16 +212,16 @@ pub fn checkout_pr_as_worktree(repo_root: &Path, pr_number: u32) -> Result<(Vec<
 pub fn start_checkout_pr_as_worktree(repo_root: PathBuf, pr_number: u32) -> Receiver<SyncPrEvent> {
     let (tx, rx) = mpsc::channel();
 
-    thread::spawn(move || {
-        match checkout_pr_as_worktree_impl(&repo_root, pr_number, Some(&tx)) {
+    thread::spawn(
+        move || match checkout_pr_as_worktree_impl(&repo_root, pr_number, Some(&tx)) {
             Ok((_, worktree_path)) => {
                 let _ = tx.send(SyncPrEvent::Finished(worktree_path));
             }
             Err(err) => {
                 let _ = tx.send(SyncPrEvent::Error(err.to_string()));
             }
-        }
-    });
+        },
+    );
 
     rx
 }
@@ -294,6 +294,21 @@ fn checkout_pr_as_worktree_impl(
         .output();
 
     let dest = worktree_path_for_name(&worktree_base_dir(repo_root), &branch_name);
+    let worktrees =
+        list_worktrees(repo_root).context("Failed to inspect existing worktrees before PR sync")?;
+    if let Some(existing) =
+        resolve_existing_pr_worktree(&worktrees, &branch_name, &dest, dest.exists())?
+    {
+        let existing_path = PathBuf::from(&existing.path);
+        push_sync_pr_progress(
+            tx,
+            &mut messages,
+            format!("✓ Reusing existing worktree at {}", existing.path),
+        );
+        sync_existing_pr_worktree(repo_root, pr_number, &existing, tx, &mut messages)?;
+        return Ok((messages, existing_path));
+    }
+
     let dest_str = dest.to_string_lossy().to_string();
     ensure_parent_dirs(&dest)?;
 
@@ -316,13 +331,190 @@ fn checkout_pr_as_worktree_impl(
             format!("✓ PR #{pr_number} checked out at {dest_str}"),
         );
     } else {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let msg = stderr.trim().to_string();
+        let msg = describe_worktree_add_failure(
+            &String::from_utf8_lossy(&output.stderr),
+            &branch_name,
+            &dest_str,
+        );
         push_sync_pr_progress(tx, &mut messages, format!("✗ {msg}"));
         anyhow::bail!("{msg}");
     }
 
     Ok((messages, dest))
+}
+
+fn resolve_existing_pr_worktree(
+    worktrees: &[Worktree],
+    branch_name: &str,
+    dest: &Path,
+    dest_exists: bool,
+) -> Result<Option<Worktree>> {
+    if let Some(existing) = worktrees.iter().find(|wt| wt.branch == branch_name) {
+        return Ok(Some(existing.clone()));
+    }
+
+    if let Some(existing) = worktrees.iter().find(|wt| Path::new(&wt.path) == dest) {
+        anyhow::bail!(
+            "Worktree path {} already exists, but it is checked out as '{}' instead of '{}'.",
+            dest.display(),
+            existing.branch,
+            branch_name
+        );
+    }
+
+    if dest_exists {
+        anyhow::bail!(
+            "Worktree path {} already exists, but it is not registered with git worktree.",
+            dest.display()
+        );
+    }
+
+    Ok(None)
+}
+
+fn sync_existing_pr_worktree(
+    repo_root: &Path,
+    pr_number: u32,
+    wt: &Worktree,
+    tx: Option<&Sender<SyncPrEvent>>,
+    messages: &mut Vec<String>,
+) -> Result<()> {
+    let git_cwd = resolve_git_cwd(repo_root);
+    push_sync_pr_progress(tx, messages, "$ git fetch --all --quiet".to_string());
+    let fetch = Command::new("git")
+        .args(["fetch", "--all", "--quiet"])
+        .current_dir(&git_cwd)
+        .output()
+        .context("Failed to run git fetch --all")?;
+
+    if !fetch.status.success() {
+        let err = command_failure_summary(&fetch, "Could not fetch remotes");
+        push_sync_pr_progress(tx, messages, format!("✗ {err}"));
+        anyhow::bail!("Could not sync PR #{pr_number}: {err}");
+    }
+
+    let remote_ref = format!("origin/{}", wt.branch);
+    push_sync_pr_progress(
+        tx,
+        messages,
+        format!("$ git rev-parse --verify {remote_ref}"),
+    );
+    let ref_exists = Command::new("git")
+        .args(["rev-parse", "--verify", &remote_ref])
+        .current_dir(&wt.path)
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+
+    if !ref_exists {
+        let err = format!("{remote_ref} was not found after fetch");
+        push_sync_pr_progress(tx, messages, format!("✗ {err}"));
+        anyhow::bail!("Could not sync PR #{pr_number}: {err}");
+    }
+
+    push_sync_pr_progress(tx, messages, format!("$ git merge --ff-only {remote_ref}"));
+    let merge = Command::new("git")
+        .args(["merge", "--ff-only", &remote_ref])
+        .current_dir(&wt.path)
+        .output()
+        .context("Failed to run git merge --ff-only")?;
+
+    if merge.status.success() {
+        let stdout = String::from_utf8_lossy(&merge.stdout);
+        if stdout.contains("Already up to date") {
+            push_sync_pr_progress(
+                tx,
+                messages,
+                format!("✓ Existing PR worktree is already up to date: {}", wt.path),
+            );
+        } else {
+            let range = stdout
+                .lines()
+                .find(|line| line.starts_with("Updating "))
+                .map(|line| line.trim_start_matches("Updating ").trim().to_string())
+                .unwrap_or_default();
+            let suffix = if range.is_empty() {
+                String::new()
+            } else {
+                format!(" ({range})")
+            };
+            push_sync_pr_progress(
+                tx,
+                messages,
+                format!("✓ Synced existing PR worktree at {}{}", wt.path, suffix),
+            );
+        }
+        return Ok(());
+    }
+
+    let err = describe_pr_sync_failure(&String::from_utf8_lossy(&merge.stderr), &wt.branch);
+    push_sync_pr_progress(tx, messages, format!("✗ {err}"));
+    anyhow::bail!("{err}");
+}
+
+fn command_failure_summary(output: &std::process::Output, fallback: &str) -> String {
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    if !stderr.is_empty() {
+        return stderr;
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if !stdout.is_empty() {
+        return stdout;
+    }
+
+    fallback.to_string()
+}
+
+fn describe_pr_sync_failure(stderr: &str, branch_name: &str) -> String {
+    let detail = stderr.trim();
+    let detail_lower = detail.to_lowercase();
+
+    if detail_lower.contains("not possible to fast-forward")
+        || detail_lower.contains("cannot fast-forward")
+    {
+        return format!(
+            "Could not sync existing PR worktree for '{branch_name}' because it cannot be fast-forwarded."
+        );
+    }
+
+    if detail_lower.contains("uncommitted changes")
+        || detail_lower.contains("local changes")
+        || detail_lower.contains("you have unstaged changes")
+    {
+        return format!(
+            "Could not sync existing PR worktree for '{branch_name}' because it has local changes."
+        );
+    }
+
+    if detail.is_empty() {
+        return format!("Could not sync existing PR worktree for '{branch_name}'.");
+    }
+
+    format!("Could not sync existing PR worktree for '{branch_name}': {detail}")
+}
+
+fn describe_worktree_add_failure(stderr: &str, branch_name: &str, dest_str: &str) -> String {
+    let detail = stderr.trim();
+    let detail_lower = detail.to_lowercase();
+
+    if detail_lower.contains("already exists") {
+        return format!(
+            "Worktree path {dest_str} already exists. Reuse that worktree or remove the path before trying again."
+        );
+    }
+
+    if detail_lower.contains("already checked out at") {
+        return format!(
+            "Branch '{branch_name}' is already checked out in another worktree. Reuse that worktree instead."
+        );
+    }
+
+    if detail.is_empty() {
+        return format!("Could not create a worktree for '{branch_name}'.");
+    }
+
+    detail.to_string()
 }
 
 fn push_sync_pr_progress(
@@ -939,7 +1131,9 @@ pub fn list_workspace_worktrees(workspace_dir: &Path) -> Result<Vec<Worktree>> {
             .output();
 
         let branch = match branch_output {
-            Ok(out) if out.status.success() => String::from_utf8_lossy(&out.stdout).trim().to_string(),
+            Ok(out) if out.status.success() => {
+                String::from_utf8_lossy(&out.stdout).trim().to_string()
+            }
             _ => {
                 let head_output = Command::new("git")
                     .args(["rev-parse", "HEAD"])
@@ -1148,7 +1342,10 @@ pub fn normalize_checkout_remote_branch_input(
         anyhow::bail!("Enter a branch name.");
     }
 
-    if available_branches.iter().any(|candidate| candidate == branch) {
+    if available_branches
+        .iter()
+        .any(|candidate| candidate == branch)
+    {
         return Ok(branch.to_string());
     }
 
@@ -1198,7 +1395,11 @@ pub fn checkout_remote_branch(repo_root: &Path, remote: &str, branch: &str) -> R
 
     let output = if local_exists {
         let upstream = Command::new("git")
-            .args(["rev-parse", "--abbrev-ref", &format!("{branch}@{{upstream}}")])
+            .args([
+                "rev-parse",
+                "--abbrev-ref",
+                &format!("{branch}@{{upstream}}"),
+            ])
             .current_dir(&git_cwd)
             .output()
             .ok()
@@ -1245,8 +1446,9 @@ pub fn checkout_remote_branch(repo_root: &Path, remote: &str, branch: &str) -> R
 #[cfg(test)]
 mod tests {
     use super::{
-        add_worktree, detect_worktree_workspace, list_secret_files, list_workspace_worktrees,
-        normalize_checkout_remote_branch_input, read_git_origin_from_config, resolve_git_cwd,
+        Worktree, add_worktree, describe_pr_sync_failure, detect_worktree_workspace,
+        list_secret_files, list_workspace_worktrees, normalize_checkout_remote_branch_input,
+        read_git_origin_from_config, resolve_existing_pr_worktree, resolve_git_cwd,
     };
     use std::fs;
     use std::path::{Path, PathBuf};
@@ -1337,7 +1539,8 @@ mod tests {
         fs::write(
             &config,
             "[remote \"origin\"]\n\turl = https://github.com/owner/repo\n",
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(
             read_git_origin_from_config(&config),
             Some("https://github.com/owner/repo".to_string())
@@ -1407,7 +1610,10 @@ mod tests {
             "origin/feat/team/branch",
             "origin",
             &[String::from("origin"), String::from("upstream")],
-            &[String::from("origin/feat/team/branch"), String::from("feat/team/branch")],
+            &[
+                String::from("origin/feat/team/branch"),
+                String::from("feat/team/branch"),
+            ],
         )
         .expect("exact branch match should win over remote-prefix stripping");
 
@@ -1472,16 +1678,19 @@ mod tests {
         fs::create_dir_all(&ignored_repo).expect("deep repo dir should be created");
         init_repo(&ignored_repo);
 
-        let worktrees = list_workspace_worktrees(&workspace).expect("workspace scan should succeed");
+        let worktrees =
+            list_workspace_worktrees(&workspace).expect("workspace scan should succeed");
         assert_eq!(worktrees.len(), 2);
         assert_eq!(worktrees[0].path, first_repo.to_string_lossy().to_string());
         assert_eq!(worktrees[0].branch, "main");
         assert_eq!(worktrees[1].path, second_repo.to_string_lossy().to_string());
         assert_eq!(worktrees[1].branch, "main");
         assert_eq!(resolve_git_cwd(&workspace), first_repo);
-        assert!(!worktrees
-            .iter()
-            .any(|wt| wt.path == ignored_repo.to_string_lossy().to_string()));
+        assert!(
+            !worktrees
+                .iter()
+                .any(|wt| wt.path == ignored_repo.to_string_lossy().to_string())
+        );
 
         let _ = fs::remove_dir_all(workspace);
     }
@@ -1532,5 +1741,81 @@ mod tests {
         .unwrap();
         assert!(detect_worktree_workspace(&dir));
         let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn resolve_existing_pr_worktree_reuses_matching_branch() {
+        let dest = PathBuf::from("/tmp/pr-123");
+        let worktrees = vec![Worktree {
+            path: "/tmp/existing-pr-123".to_string(),
+            branch: "feature/pr-123".to_string(),
+            is_main: false,
+            is_current: false,
+            has_secrets: false,
+        }];
+
+        let existing = resolve_existing_pr_worktree(&worktrees, "feature/pr-123", &dest, false)
+            .expect("existing PR worktree should resolve")
+            .expect("matching branch should be reused");
+
+        assert_eq!(existing.path, "/tmp/existing-pr-123");
+    }
+
+    #[test]
+    fn resolve_existing_pr_worktree_reports_path_branch_conflict() {
+        let dest = PathBuf::from("/tmp/pr-123");
+        let worktrees = vec![Worktree {
+            path: dest.to_string_lossy().to_string(),
+            branch: "main".to_string(),
+            is_main: true,
+            is_current: false,
+            has_secrets: false,
+        }];
+
+        let err = resolve_existing_pr_worktree(&worktrees, "feature/pr-123", &dest, true)
+            .expect_err("conflicting path should error");
+
+        assert_eq!(
+            err.to_string(),
+            "Worktree path /tmp/pr-123 already exists, but it is checked out as 'main' instead of 'feature/pr-123'."
+        );
+    }
+
+    #[test]
+    fn resolve_existing_pr_worktree_reports_unregistered_existing_path() {
+        let dest = PathBuf::from("/tmp/pr-123");
+        let err = resolve_existing_pr_worktree(&[], "feature/pr-123", &dest, true)
+            .expect_err("unregistered existing path should error");
+
+        assert_eq!(
+            err.to_string(),
+            "Worktree path /tmp/pr-123 already exists, but it is not registered with git worktree."
+        );
+    }
+
+    #[test]
+    fn describe_pr_sync_failure_maps_dirty_tree_error() {
+        let err = describe_pr_sync_failure(
+            "error: Your local changes to the following files would be overwritten by merge",
+            "feature/pr-123",
+        );
+
+        assert_eq!(
+            err,
+            "Could not sync existing PR worktree for 'feature/pr-123' because it has local changes."
+        );
+    }
+
+    #[test]
+    fn describe_pr_sync_failure_maps_fast_forward_error() {
+        let err = describe_pr_sync_failure(
+            "fatal: Not possible to fast-forward, aborting.",
+            "feature/pr-123",
+        );
+
+        assert_eq!(
+            err,
+            "Could not sync existing PR worktree for 'feature/pr-123' because it cannot be fast-forwarded."
+        );
     }
 }
