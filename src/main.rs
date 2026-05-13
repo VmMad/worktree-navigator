@@ -227,7 +227,7 @@ fn main() -> Result<()> {
         // Execute pending delete after the loading frame has been rendered.
         if let Some(paths) = app.delete_pending.take() {
             let root = app.repo_root.clone();
-            match git::remove_worktrees(&root, &paths) {
+            match git::remove_worktrees(&root, &paths, app.is_workspace) {
                 Ok(_) => {
                     app.delete_loading = false;
                     app.active_action = ActiveAction::None;
