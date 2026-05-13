@@ -1025,7 +1025,7 @@ fn draw_sync_pr_overlay(f: &mut Frame, app: &App, area: Rect) {
         f.render_widget(
             Paragraph::new(Span::styled(
                 format!(
-                    "⟳  Fetching PR and creating worktree{}",
+                    "⟳  Fetching PR and preparing worktree{}",
                     app.loading_animation_dots()
                 ),
                 Style::default()
