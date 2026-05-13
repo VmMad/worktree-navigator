@@ -1,7 +1,9 @@
 use std::path::PathBuf;
 use std::sync::mpsc::Receiver;
 
-use crate::types::{ActiveAction, CheckoutRemotePhase, CloneEvent, CopySecretsPhase, SyncResult, Worktree};
+use crate::types::{
+    ActiveAction, CheckoutRemotePhase, CloneEvent, CopySecretsPhase, SyncResult, Worktree,
+};
 
 #[derive(Debug, Clone, Copy)]
 pub struct CommandSpec {
@@ -15,6 +17,11 @@ pub const COMMANDS: &[CommandSpec] = &[
         label: "New Branch",
         shortcut: 'b',
         action: ActiveAction::NewBranch,
+    },
+    CommandSpec {
+        label: "Rename Worktree",
+        shortcut: 'm',
+        action: ActiveAction::Rename,
     },
     CommandSpec {
         label: "Sync with PR",
@@ -63,6 +70,9 @@ pub struct App {
 
     pub new_branch_loading: bool,
     pub new_branch_pending: Option<String>,
+    pub rename_loading: bool,
+    pub rename_target_idx: Option<usize>,
+    pub rename_pending: Option<(Worktree, String)>,
 
     pub delete_loading: bool,
     pub delete_pending: Option<String>,
@@ -130,6 +140,9 @@ impl App {
             sync_results: vec![],
             new_branch_loading: false,
             new_branch_pending: None,
+            rename_loading: false,
+            rename_target_idx: None,
+            rename_pending: None,
             delete_loading: false,
             delete_pending: None,
             copy_secrets_loading: false,
@@ -208,6 +221,14 @@ impl App {
             .iter()
             .filter(|wt| !wt.is_main && !wt.is_current)
             .collect()
+    }
+
+    pub fn current_worktree_idx(&self) -> Option<usize> {
+        self.worktrees.iter().position(|wt| wt.is_current)
+    }
+
+    pub fn selected_worktree_idx(&self) -> Option<usize> {
+        (self.selected_index >= COMMANDS.len()).then_some(self.selected_index - COMMANDS.len())
     }
 
     pub fn next_copy_target_idx(&self, from: usize) -> Option<usize> {

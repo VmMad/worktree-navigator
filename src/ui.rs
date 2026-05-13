@@ -30,6 +30,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
 
     match app.active_action {
         ActiveAction::NewBranch => draw_new_branch_overlay(f, app, area),
+        ActiveAction::Rename => draw_rename_overlay(f, app, area),
         ActiveAction::SyncPr => draw_sync_pr_overlay(f, app, area),
         ActiveAction::SyncTrees if show_sync_overlay => draw_sync_overlay(f, app, area),
         ActiveAction::Delete if show_delete_overlay => draw_delete_overlay(f, app, area),
@@ -90,7 +91,7 @@ fn draw_panel(f: &mut Frame, app: &mut App, area: Rect) {
     let block = Block::default()
         .title(format!(" ⎇  Worktree Navigator — {repo_name} "))
         .title_alignment(Alignment::Center)
-            .title_bottom(
+        .title_bottom(
             Line::from(Span::styled(
                 format!(" v{} ", version::current_version()),
                 Style::default().fg(Color::DarkGray),
@@ -526,9 +527,9 @@ fn draw_help(f: &mut Frame, app: &App, area: Rect) {
             Span::styled("  nav    ", Style::default().fg(Color::DarkGray)),
             Span::styled("Enter/click", Style::default().fg(Color::DarkGray)),
             Span::styled("  open    ", Style::default().fg(Color::DarkGray)),
-            Span::styled("n  p  d  s  c", Style::default().fg(Color::DarkGray)),
+            Span::styled("b  m  p  d  s  c  r", Style::default().fg(Color::DarkGray)),
             Span::styled(
-                "  branch/PR/delete/sync/copy    ",
+                "  branch/rename/PR/delete/sync/copy/remote    ",
                 Style::default().fg(Color::DarkGray),
             ),
             Span::styled("q", Style::default().fg(Color::DarkGray)),
@@ -795,6 +796,121 @@ fn draw_new_branch_overlay(f: &mut Frame, app: &App, area: Rect) {
     }
 }
 
+fn draw_rename_overlay(f: &mut Frame, app: &App, area: Rect) {
+    if app.rename_loading {
+        let popup = centered_rect(60, 5, area);
+        f.render_widget(Clear, popup);
+        let block = Block::default()
+            .title(" Rename Worktree ")
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Blue));
+        let inner = block.inner(popup).inner(Margin {
+            horizontal: 1,
+            vertical: 1,
+        });
+        f.render_widget(block, popup);
+        let branch = app.input_buffer.trim();
+        f.render_widget(
+            Paragraph::new(vec![
+                Line::from(Span::styled(
+                    format!(
+                        "⟳  Renaming branch to {}{}",
+                        branch,
+                        app.loading_animation_dots()
+                    ),
+                    Style::default()
+                        .fg(Color::Blue)
+                        .add_modifier(Modifier::BOLD),
+                )),
+                Line::from(Span::styled(
+                    "   Updating branch and worktree path.",
+                    Style::default().fg(Color::DarkGray),
+                )),
+            ]),
+            inner,
+        );
+        return;
+    }
+
+    let target = app.rename_target_idx.and_then(|idx| app.worktrees.get(idx));
+    let has_err = app.overlay_error.is_some();
+    let mut height = 9;
+    if has_err {
+        height += 2;
+    }
+
+    let popup = centered_rect(60, height, area);
+    f.render_widget(Clear, popup);
+
+    let block = Block::default()
+        .title(" Rename Worktree ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Blue));
+
+    let inner = block.inner(popup).inner(Margin {
+        horizontal: 1,
+        vertical: 1,
+    });
+    f.render_widget(block, popup);
+
+    let mut constraints = vec![
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+    ];
+    if has_err {
+        constraints.push(Constraint::Length(1));
+        constraints.push(Constraint::Min(1));
+    }
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints(constraints)
+        .split(inner);
+
+    let (before, after) = app.input_parts();
+    f.render_widget(
+        Paragraph::new(input_line("New branch: ", before, after, Color::Blue)),
+        rows[0],
+    );
+
+    if let Some(target) = target {
+        f.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled("Current: ", Style::default().fg(Color::Gray)),
+                Span::styled(&target.branch, Style::default().fg(Color::Cyan)),
+            ])),
+            rows[1],
+        );
+        f.render_widget(
+            Paragraph::new(Span::styled(
+                target.path.clone(),
+                Style::default().fg(Color::DarkGray),
+            )),
+            rows[2],
+        );
+    }
+
+    f.render_widget(
+        Paragraph::new(Span::styled(
+            "Enter to rename  Esc to cancel",
+            Style::default().fg(Color::DarkGray),
+        )),
+        rows[3],
+    );
+
+    if let Some(err) = &app.overlay_error {
+        f.render_widget(
+            Paragraph::new(Span::styled(
+                format!("✗ {err}"),
+                Style::default().fg(Color::Red),
+            ))
+            .wrap(Wrap { trim: false }),
+            rows[5],
+        );
+    }
+}
+
 fn draw_sync_pr_overlay(f: &mut Frame, app: &App, area: Rect) {
     if app.sync_pr_loading {
         let popup = centered_rect(50, 7, area);
@@ -869,7 +985,7 @@ fn draw_sync_pr_overlay(f: &mut Frame, app: &App, area: Rect) {
     ];
     if has_err {
         constraints.push(Constraint::Length(1)); // spacer
-        constraints.push(Constraint::Min(1));    // error (wraps)
+        constraints.push(Constraint::Min(1)); // error (wraps)
     }
 
     let rows = Layout::default()
@@ -1336,10 +1452,7 @@ fn draw_checkout_remote_overlay(f: &mut Frame, app: &App, area: Rect) {
                 f.render_widget(
                     Paragraph::new(Line::from(vec![
                         Span::styled("Branch:  ", Style::default().fg(Color::Gray)),
-                        Span::styled(
-                            "(enter remote first)",
-                            Style::default().fg(Color::DarkGray),
-                        ),
+                        Span::styled("(enter remote first)", Style::default().fg(Color::DarkGray)),
                     ])),
                     rows[1],
                 );
@@ -1368,10 +1481,7 @@ fn draw_checkout_remote_overlay(f: &mut Frame, app: &App, area: Rect) {
                 if !ghost.is_empty() {
                     branch_spans.push(Span::styled(ghost, Style::default().fg(Color::DarkGray)));
                 }
-                f.render_widget(
-                    Paragraph::new(Line::from(branch_spans)),
-                    rows[1],
-                );
+                f.render_widget(Paragraph::new(Line::from(branch_spans)), rows[1]);
                 let hint = if app.checkout_remote_ghost().is_some() {
                     "Tab to complete  Enter to checkout  Esc to go back"
                 } else {

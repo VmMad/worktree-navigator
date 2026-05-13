@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
-use std::io::Read;
 use std::collections::HashSet;
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -17,11 +17,87 @@ fn worktree_path_for_name(base_dir: &Path, name: &str) -> PathBuf {
     base_dir.join(name.replace('/', "-"))
 }
 
+fn desired_worktree_path(repo_root: &Path, name: &str) -> PathBuf {
+    worktree_path_for_name(&worktree_base_dir(repo_root), name)
+}
+
 fn ensure_parent_dirs(path: &Path) -> Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
             .with_context(|| format!("Failed to create parent directory {}", parent.display()))?;
     }
+    Ok(())
+}
+
+fn git_branch_exists(repo_root: &Path, branch: &str) -> bool {
+    Command::new("git")
+        .args(["rev-parse", "--verify", &format!("refs/heads/{branch}")])
+        .current_dir(repo_root)
+        .output()
+        .map(|out| out.status.success())
+        .unwrap_or(false)
+}
+
+fn rename_branch_in_worktree(
+    worktree_path: &Path,
+    old_branch: &str,
+    new_branch: &str,
+) -> Result<()> {
+    let output = Command::new("git")
+        .args(["branch", "-m", old_branch, new_branch])
+        .current_dir(worktree_path)
+        .output()
+        .context("Failed to run git branch -m")?;
+
+    if output.status.success() {
+        Ok(())
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        anyhow::bail!(
+            "{}",
+            if stderr.is_empty() {
+                "git branch -m failed".to_string()
+            } else {
+                stderr
+            }
+        );
+    }
+}
+
+fn move_linked_worktree(repo_root: &Path, old_path: &Path, new_path: &Path) -> Result<()> {
+    ensure_parent_dirs(new_path)?;
+    let old_path_str = old_path.to_string_lossy().to_string();
+    let new_path_str = new_path.to_string_lossy().to_string();
+    let output = Command::new("git")
+        .args(["worktree", "move", &old_path_str, &new_path_str])
+        .current_dir(repo_root)
+        .output()
+        .context("Failed to run git worktree move")?;
+
+    if output.status.success() {
+        Ok(())
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        anyhow::bail!(
+            "{}",
+            if stderr.is_empty() {
+                "git worktree move failed".to_string()
+            } else {
+                stderr
+            }
+        );
+    }
+}
+
+fn move_workspace_repo(old_path: &Path, new_path: &Path) -> Result<()> {
+    ensure_parent_dirs(new_path)?;
+    fs::rename(old_path, new_path).with_context(|| {
+        format!(
+            "Failed to move worktree from {} to {}",
+            old_path.display(),
+            new_path.display()
+        )
+    })?;
     Ok(())
 }
 
@@ -123,9 +199,7 @@ fn parse_worktree_porcelain(
                     .trim_start_matches("refs/heads/")
                     .to_string()
             })
-            .or_else(|| {
-                head_line.map(|l| l.trim_start_matches("HEAD ").to_string())
-            })
+            .or_else(|| head_line.map(|l| l.trim_start_matches("HEAD ").to_string()))
             .unwrap_or_else(|| "HEAD".to_string());
 
         let is_main = match default_branch {
@@ -154,7 +228,7 @@ pub fn add_worktree(
 ) -> Result<(Vec<String>, PathBuf)> {
     let mut messages = Vec::new();
 
-    let dest = worktree_path_for_name(&worktree_base_dir(repo_root), branch_name);
+    let dest = desired_worktree_path(repo_root, branch_name);
     ensure_parent_dirs(&dest)?;
     let dest_str = dest.to_string_lossy().to_string();
     let git_cwd = resolve_git_cwd(repo_root);
@@ -162,7 +236,9 @@ pub fn add_worktree(
     let mut args = vec!["worktree", "add", &dest_str, "-b", branch_name];
     if let Some(base) = base_branch {
         args.push(base);
-        messages.push(format!("$ git worktree add {dest_str} -b {branch_name} {base}"));
+        messages.push(format!(
+            "$ git worktree add {dest_str} -b {branch_name} {base}"
+        ));
     } else {
         messages.push(format!("$ git worktree add {dest_str} -b {branch_name}"));
     }
@@ -204,6 +280,69 @@ pub fn remove_worktree(repo_root: &Path, worktree_path: &str) -> Result<Vec<Stri
     Ok(messages)
 }
 
+pub fn rename_worktree(
+    repo_root: &Path,
+    worktree: &Worktree,
+    new_branch: &str,
+    is_workspace: bool,
+) -> Result<PathBuf> {
+    let new_branch = new_branch.trim();
+    if new_branch.is_empty() {
+        anyhow::bail!("Enter a branch name.");
+    }
+    if new_branch == worktree.branch {
+        anyhow::bail!("Branch name is unchanged.");
+    }
+    if worktree.is_main {
+        anyhow::bail!("The default worktree can't be renamed.");
+    }
+
+    let repo_cwd = resolve_git_cwd(repo_root);
+    let old_path = PathBuf::from(&worktree.path);
+    let branch_check_cwd = if is_workspace {
+        old_path.as_path()
+    } else {
+        repo_cwd.as_path()
+    };
+    if git_branch_exists(branch_check_cwd, new_branch) {
+        anyhow::bail!("Branch '{new_branch}' already exists.");
+    }
+
+    let new_path = desired_worktree_path(repo_root, new_branch);
+    if new_path != old_path && new_path.exists() {
+        anyhow::bail!("Destination already exists: {}", new_path.display());
+    }
+
+    rename_branch_in_worktree(&old_path, &worktree.branch, new_branch)?;
+
+    let move_result = if new_path == old_path {
+        Ok(())
+    } else if is_workspace {
+        move_workspace_repo(&old_path, &new_path)
+    } else {
+        move_linked_worktree(&repo_cwd, &old_path, &new_path)
+    };
+
+    if let Err(move_err) = move_result {
+        let rollback_path = if new_path.exists() {
+            &new_path
+        } else {
+            &old_path
+        };
+        let rollback_err = rename_branch_in_worktree(rollback_path, new_branch, &worktree.branch)
+            .err()
+            .map(|err| err.to_string());
+        if let Some(rollback_err) = rollback_err {
+            anyhow::bail!(
+                "Renamed branch but failed to move worktree: {move_err}. Rollback also failed: {rollback_err}"
+            );
+        }
+        anyhow::bail!("Renamed branch but failed to move worktree: {move_err}");
+    }
+
+    Ok(new_path)
+}
+
 #[allow(dead_code)]
 pub fn checkout_pr_as_worktree(repo_root: &Path, pr_number: u32) -> Result<(Vec<String>, PathBuf)> {
     checkout_pr_as_worktree_impl(repo_root, pr_number, None)
@@ -212,16 +351,16 @@ pub fn checkout_pr_as_worktree(repo_root: &Path, pr_number: u32) -> Result<(Vec<
 pub fn start_checkout_pr_as_worktree(repo_root: PathBuf, pr_number: u32) -> Receiver<SyncPrEvent> {
     let (tx, rx) = mpsc::channel();
 
-    thread::spawn(move || {
-        match checkout_pr_as_worktree_impl(&repo_root, pr_number, Some(&tx)) {
+    thread::spawn(
+        move || match checkout_pr_as_worktree_impl(&repo_root, pr_number, Some(&tx)) {
             Ok((_, worktree_path)) => {
                 let _ = tx.send(SyncPrEvent::Finished(worktree_path));
             }
             Err(err) => {
                 let _ = tx.send(SyncPrEvent::Error(err.to_string()));
             }
-        }
-    });
+        },
+    );
 
     rx
 }
@@ -293,7 +432,7 @@ fn checkout_pr_as_worktree_impl(
         .current_dir(&git_cwd)
         .output();
 
-    let dest = worktree_path_for_name(&worktree_base_dir(repo_root), &branch_name);
+    let dest = desired_worktree_path(repo_root, &branch_name);
     let dest_str = dest.to_string_lossy().to_string();
     ensure_parent_dirs(&dest)?;
 
@@ -939,7 +1078,9 @@ pub fn list_workspace_worktrees(workspace_dir: &Path) -> Result<Vec<Worktree>> {
             .output();
 
         let branch = match branch_output {
-            Ok(out) if out.status.success() => String::from_utf8_lossy(&out.stdout).trim().to_string(),
+            Ok(out) if out.status.success() => {
+                String::from_utf8_lossy(&out.stdout).trim().to_string()
+            }
             _ => {
                 let head_output = Command::new("git")
                     .args(["rev-parse", "HEAD"])
@@ -1148,7 +1289,10 @@ pub fn normalize_checkout_remote_branch_input(
         anyhow::bail!("Enter a branch name.");
     }
 
-    if available_branches.iter().any(|candidate| candidate == branch) {
+    if available_branches
+        .iter()
+        .any(|candidate| candidate == branch)
+    {
         return Ok(branch.to_string());
     }
 
@@ -1185,7 +1329,7 @@ pub fn checkout_remote_branch(repo_root: &Path, remote: &str, branch: &str) -> R
         anyhow::bail!("{remote}/{branch} not found after fetch");
     }
 
-    let dest = worktree_path_for_name(&worktree_base_dir(repo_root), branch);
+    let dest = desired_worktree_path(repo_root, branch);
     ensure_parent_dirs(&dest)?;
     let dest_str = dest.to_string_lossy().to_string();
 
@@ -1198,7 +1342,11 @@ pub fn checkout_remote_branch(repo_root: &Path, remote: &str, branch: &str) -> R
 
     let output = if local_exists {
         let upstream = Command::new("git")
-            .args(["rev-parse", "--abbrev-ref", &format!("{branch}@{{upstream}}")])
+            .args([
+                "rev-parse",
+                "--abbrev-ref",
+                &format!("{branch}@{{upstream}}"),
+            ])
             .current_dir(&git_cwd)
             .output()
             .ok()
@@ -1246,8 +1394,10 @@ pub fn checkout_remote_branch(repo_root: &Path, remote: &str, branch: &str) -> R
 mod tests {
     use super::{
         add_worktree, detect_worktree_workspace, list_secret_files, list_workspace_worktrees,
-        normalize_checkout_remote_branch_input, read_git_origin_from_config, resolve_git_cwd,
+        normalize_checkout_remote_branch_input, read_git_origin_from_config, rename_worktree,
+        resolve_git_cwd,
     };
+    use crate::types::Worktree;
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::process::Command;
@@ -1337,7 +1487,8 @@ mod tests {
         fs::write(
             &config,
             "[remote \"origin\"]\n\turl = https://github.com/owner/repo\n",
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(
             read_git_origin_from_config(&config),
             Some("https://github.com/owner/repo".to_string())
@@ -1376,6 +1527,63 @@ mod tests {
     }
 
     #[test]
+    fn rename_worktree_renames_branch_and_frees_old_path() {
+        let workspace = make_temp_dir("rename-worktree");
+        let repo = workspace.join("repo");
+        fs::create_dir_all(&repo).expect("repo dir should be created");
+        init_repo(&repo);
+
+        let old_branch = "feat/team/branch";
+        let new_branch = "feat/team/renamed";
+        let (_messages, old_path) =
+            add_worktree(&repo, old_branch, None).expect("old worktree should be created");
+
+        let worktree = Worktree {
+            path: old_path.to_string_lossy().to_string(),
+            branch: old_branch.to_string(),
+            is_main: false,
+            is_current: false,
+            has_secrets: false,
+        };
+
+        let new_path =
+            rename_worktree(&repo, &worktree, new_branch, false).expect("rename should succeed");
+
+        assert_eq!(new_path, workspace.join("feat-team-renamed"));
+        assert!(new_path.exists());
+        assert!(!old_path.exists());
+
+        let old_branch_exists = Command::new("git")
+            .args(["rev-parse", "--verify", &format!("refs/heads/{old_branch}")])
+            .current_dir(&repo)
+            .output()
+            .expect("git should inspect old branch");
+        assert!(!old_branch_exists.status.success());
+
+        let new_branch_exists = Command::new("git")
+            .args(["rev-parse", "--verify", &format!("refs/heads/{new_branch}")])
+            .current_dir(&repo)
+            .output()
+            .expect("git should inspect new branch");
+        assert!(new_branch_exists.status.success());
+
+        git(&repo, &["branch", old_branch, "main"]);
+        let recreated_path = workspace.join("feat-team-branch");
+        git(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                recreated_path.to_string_lossy().as_ref(),
+                old_branch,
+            ],
+        );
+        assert!(recreated_path.exists());
+
+        let _ = fs::remove_dir_all(workspace);
+    }
+
+    #[test]
     fn normalize_checkout_remote_branch_input_keeps_slash_branch_names() {
         let branch = normalize_checkout_remote_branch_input(
             "feat/team/branch",
@@ -1407,7 +1615,10 @@ mod tests {
             "origin/feat/team/branch",
             "origin",
             &[String::from("origin"), String::from("upstream")],
-            &[String::from("origin/feat/team/branch"), String::from("feat/team/branch")],
+            &[
+                String::from("origin/feat/team/branch"),
+                String::from("feat/team/branch"),
+            ],
         )
         .expect("exact branch match should win over remote-prefix stripping");
 
@@ -1472,16 +1683,19 @@ mod tests {
         fs::create_dir_all(&ignored_repo).expect("deep repo dir should be created");
         init_repo(&ignored_repo);
 
-        let worktrees = list_workspace_worktrees(&workspace).expect("workspace scan should succeed");
+        let worktrees =
+            list_workspace_worktrees(&workspace).expect("workspace scan should succeed");
         assert_eq!(worktrees.len(), 2);
         assert_eq!(worktrees[0].path, first_repo.to_string_lossy().to_string());
         assert_eq!(worktrees[0].branch, "main");
         assert_eq!(worktrees[1].path, second_repo.to_string_lossy().to_string());
         assert_eq!(worktrees[1].branch, "main");
         assert_eq!(resolve_git_cwd(&workspace), first_repo);
-        assert!(!worktrees
-            .iter()
-            .any(|wt| wt.path == ignored_repo.to_string_lossy().to_string()));
+        assert!(
+            !worktrees
+                .iter()
+                .any(|wt| wt.path == ignored_repo.to_string_lossy().to_string())
+        );
 
         let _ = fs::remove_dir_all(workspace);
     }
