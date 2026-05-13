@@ -38,10 +38,25 @@ wt --update
 
 ## Usage
 
-Run inside a repo or inside a worktree:
+Open the interactive UI inside a repo or inside a worktree:
 
 ```bash
 wt
+```
+
+Fast CLI commands:
+
+```bash
+wt pr 123
+wt pr #123
+
+wt b feature/login
+wt b feature/login --from-default
+wt b feature/login --base release/1
+
+wt d
+wt d feature/login
+wt d feature/login --yes
 ```
 
 Mark existing worktree repo:
@@ -53,11 +68,28 @@ wt --mark-tree
 Main commands:
 
 - `New Branch [b]` create a new branch worktree and jump into it
+- `Rename Worktree [m]` rename the selected non-default branch and move its worktree folder to match
 - `Sync with PR [p]` enter a PR number (`#123` or `123`) and create/sync its worktree
 - `Delete Worktree [d]` inline select in the worktree list, then confirm with `Enter` or `y` (`n`/`Esc` cancels)
 - `Sync Worktree [s]` inline select a worktree to fast-forward from `origin/<branch>`
 - `Copy Secrets [c]` copy secret files into the selected worktree
 - `Checkout Remote [r]` fetch a remote branch and create a worktree for it
+
+CLI commands:
+
+- `wt pr <number>` or `wt checkout-pr <number>` fetch the PR head branch, create/select its worktree, and print the destination path
+- `wt b <branch>` or `wt branch <branch>` create a new branch worktree and print the destination path
+- `wt b <branch> --from-default` branch from the repo default branch instead of the current branch
+- `wt b <branch> --from-current` force the current-branch base explicitly
+- `wt b <branch> --base <branch>` branch from an explicit base branch
+- `wt d [branch]` or `wt delete [branch]` delete a worktree by branch, or the current worktree when no branch is passed
+- `wt d ...` requires typing the branch name to confirm unless `--yes` is passed
+
+Notes:
+
+- `wt b <branch>` defaults to branching from the current branch when run inside a worktree
+- if the current directory is not itself a git worktree, `wt b <branch>` falls back to the repo default branch
+- when `wt d` deletes the current worktree, the shell wrapper moves you back to the repo root
 
 Navigation:
 

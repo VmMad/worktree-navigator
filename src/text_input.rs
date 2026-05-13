@@ -17,6 +17,7 @@ pub enum TextInputKeyResult {
 pub fn is_active(app: &App) -> bool {
     match app.active_action {
         ActiveAction::NewBranch => !app.new_branch_loading,
+        ActiveAction::Rename => !app.rename_loading,
         ActiveAction::SyncPr => !app.sync_pr_loading,
         ActiveAction::CloneRepo => !app.clone_loading,
         ActiveAction::CheckoutRemote => {
@@ -77,9 +78,7 @@ pub fn handle_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) -> Text
             TextInputKeyResult::Updated
         }
         KeyCode::Tab => TextInputKeyResult::Complete,
-        KeyCode::Char(c)
-            if !modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
-        {
+        KeyCode::Char(c) if !modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) => {
             app.input_char(c);
             TextInputKeyResult::Updated
         }
