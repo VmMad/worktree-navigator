@@ -1,7 +1,10 @@
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::sync::mpsc::Receiver;
 
-use crate::types::{ActiveAction, CheckoutRemotePhase, CloneEvent, CopySecretsPhase, SyncResult, Worktree};
+use crate::types::{
+    ActiveAction, CheckoutRemotePhase, CloneEvent, CopySecretsPhase, SyncResult, Worktree,
+};
 
 #[derive(Debug, Clone, Copy)]
 pub struct CommandSpec {
@@ -63,9 +66,12 @@ pub struct App {
 
     pub new_branch_loading: bool,
     pub new_branch_pending: Option<String>,
+    pub new_branch_use_existing: bool,
+    pub new_branch_confirm_existing: Option<String>,
+    pub new_branch_confirm_yes: bool,
 
     pub delete_loading: bool,
-    pub delete_pending: Option<String>,
+    pub delete_pending: Option<Vec<String>>,
 
     pub copy_secrets_loading: bool,
     pub copy_secrets_pending: bool,
@@ -86,6 +92,11 @@ pub struct App {
     pub new_branch_base: Option<String>,
     pub overlay_index: usize,
     pub delete_confirming: bool,
+    pub delete_warn_current: bool,
+    pub delete_confirm_targets: Vec<usize>,
+    pub delete_confirm_yes: bool,
+    pub delete_redirect_path: Option<String>,
+    pub delete_checked: BTreeSet<usize>,
     pub overlay_error: Option<String>,
     pub copy_secrets_phase: CopySecretsPhase,
     pub copy_secrets_source_idx: Option<usize>,
@@ -130,6 +141,9 @@ impl App {
             sync_results: vec![],
             new_branch_loading: false,
             new_branch_pending: None,
+            new_branch_use_existing: false,
+            new_branch_confirm_existing: None,
+            new_branch_confirm_yes: false,
             delete_loading: false,
             delete_pending: None,
             copy_secrets_loading: false,
@@ -148,6 +162,11 @@ impl App {
             new_branch_base: None,
             overlay_index: 0,
             delete_confirming: false,
+            delete_warn_current: false,
+            delete_confirm_targets: vec![],
+            delete_confirm_yes: false,
+            delete_redirect_path: None,
+            delete_checked: BTreeSet::new(),
             overlay_error: None,
             copy_secrets_phase: CopySecretsPhase::SelectSource,
             copy_secrets_source_idx: None,
@@ -203,11 +222,42 @@ impl App {
         COMMANDS.get(idx).map(|command| command.action)
     }
 
-    pub fn deletable_worktrees(&self) -> Vec<&Worktree> {
+    pub fn is_deletable_worktree_idx(&self, idx: usize) -> bool {
+        self.worktrees
+            .get(idx)
+            .map(|wt| !wt.is_main)
+            .unwrap_or(false)
+    }
+
+    pub fn first_deletable_worktree_idx(&self) -> Option<usize> {
         self.worktrees
             .iter()
-            .filter(|wt| !wt.is_main && !wt.is_current)
-            .collect()
+            .enumerate()
+            .find_map(|(idx, wt)| (!wt.is_main).then_some(idx))
+    }
+
+    pub fn previous_deletable_worktree_idx(&self, from: usize) -> Option<usize> {
+        self.worktrees
+            .iter()
+            .enumerate()
+            .take(from)
+            .rev()
+            .find_map(|(idx, wt)| (!wt.is_main).then_some(idx))
+    }
+
+    pub fn next_deletable_worktree_idx(&self, from: usize) -> Option<usize> {
+        self.worktrees
+            .iter()
+            .enumerate()
+            .skip(from.saturating_add(1))
+            .find_map(|(idx, wt)| (!wt.is_main).then_some(idx))
+    }
+
+    pub fn default_worktree_idx(&self) -> Option<usize> {
+        self.worktrees
+            .iter()
+            .enumerate()
+            .find_map(|(idx, wt)| wt.is_main.then_some(idx))
     }
 
     pub fn next_copy_target_idx(&self, from: usize) -> Option<usize> {

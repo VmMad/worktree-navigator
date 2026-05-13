@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
-use std::io::Read;
 use std::collections::HashSet;
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -123,9 +123,7 @@ fn parse_worktree_porcelain(
                     .trim_start_matches("refs/heads/")
                     .to_string()
             })
-            .or_else(|| {
-                head_line.map(|l| l.trim_start_matches("HEAD ").to_string())
-            })
+            .or_else(|| head_line.map(|l| l.trim_start_matches("HEAD ").to_string()))
             .unwrap_or_else(|| "HEAD".to_string());
 
         let is_main = match default_branch {
@@ -162,7 +160,9 @@ pub fn add_worktree(
     let mut args = vec!["worktree", "add", &dest_str, "-b", branch_name];
     if let Some(base) = base_branch {
         args.push(base);
-        messages.push(format!("$ git worktree add {dest_str} -b {branch_name} {base}"));
+        messages.push(format!(
+            "$ git worktree add {dest_str} -b {branch_name} {base}"
+        ));
     } else {
         messages.push(format!("$ git worktree add {dest_str} -b {branch_name}"));
     }
@@ -177,10 +177,59 @@ pub fn add_worktree(
         messages.push(format!("✓ Created worktree at {dest_str}"));
     } else {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        messages.push(format!("✗ {}", stderr.trim()));
+        let err = stderr.trim().to_string();
+        messages.push(format!("✗ {err}"));
+        anyhow::bail!("{err}");
     }
 
     Ok((messages, dest))
+}
+
+pub fn add_worktree_from_existing(
+    repo_root: &Path,
+    branch_name: &str,
+) -> Result<(Vec<String>, PathBuf)> {
+    let mut messages = Vec::new();
+
+    let dest = worktree_path_for_name(&worktree_base_dir(repo_root), branch_name);
+    ensure_parent_dirs(&dest)?;
+    let dest_str = dest.to_string_lossy().to_string();
+    let git_cwd = resolve_git_cwd(repo_root);
+
+    messages.push(format!("$ git worktree add {dest_str} {branch_name}"));
+
+    let output = Command::new("git")
+        .args(["worktree", "add", &dest_str, branch_name])
+        .current_dir(&git_cwd)
+        .output()
+        .context("Failed to run git worktree add")?;
+
+    if output.status.success() {
+        messages.push(format!("✓ Created worktree at {dest_str}"));
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let err = stderr.trim().to_string();
+        messages.push(format!("✗ {err}"));
+        anyhow::bail!("{err}");
+    }
+
+    Ok((messages, dest))
+}
+
+pub fn branch_exists(repo_root: &Path, branch_name: &str) -> Result<bool> {
+    let git_cwd = resolve_git_cwd(repo_root);
+    let output = Command::new("git")
+        .args([
+            "show-ref",
+            "--verify",
+            "--quiet",
+            &format!("refs/heads/{branch_name}"),
+        ])
+        .current_dir(&git_cwd)
+        .output()
+        .context("Failed to check local branch existence")?;
+
+    Ok(output.status.success())
 }
 
 pub fn remove_worktree(repo_root: &Path, worktree_path: &str) -> Result<Vec<String>> {
@@ -204,6 +253,16 @@ pub fn remove_worktree(repo_root: &Path, worktree_path: &str) -> Result<Vec<Stri
     Ok(messages)
 }
 
+pub fn remove_worktrees(repo_root: &Path, worktree_paths: &[String]) -> Result<Vec<String>> {
+    let mut messages = Vec::new();
+
+    for worktree_path in worktree_paths {
+        messages.extend(remove_worktree(repo_root, worktree_path)?);
+    }
+
+    Ok(messages)
+}
+
 #[allow(dead_code)]
 pub fn checkout_pr_as_worktree(repo_root: &Path, pr_number: u32) -> Result<(Vec<String>, PathBuf)> {
     checkout_pr_as_worktree_impl(repo_root, pr_number, None)
@@ -212,16 +271,16 @@ pub fn checkout_pr_as_worktree(repo_root: &Path, pr_number: u32) -> Result<(Vec<
 pub fn start_checkout_pr_as_worktree(repo_root: PathBuf, pr_number: u32) -> Receiver<SyncPrEvent> {
     let (tx, rx) = mpsc::channel();
 
-    thread::spawn(move || {
-        match checkout_pr_as_worktree_impl(&repo_root, pr_number, Some(&tx)) {
+    thread::spawn(
+        move || match checkout_pr_as_worktree_impl(&repo_root, pr_number, Some(&tx)) {
             Ok((_, worktree_path)) => {
                 let _ = tx.send(SyncPrEvent::Finished(worktree_path));
             }
             Err(err) => {
                 let _ = tx.send(SyncPrEvent::Error(err.to_string()));
             }
-        }
-    });
+        },
+    );
 
     rx
 }
@@ -939,7 +998,9 @@ pub fn list_workspace_worktrees(workspace_dir: &Path) -> Result<Vec<Worktree>> {
             .output();
 
         let branch = match branch_output {
-            Ok(out) if out.status.success() => String::from_utf8_lossy(&out.stdout).trim().to_string(),
+            Ok(out) if out.status.success() => {
+                String::from_utf8_lossy(&out.stdout).trim().to_string()
+            }
             _ => {
                 let head_output = Command::new("git")
                     .args(["rev-parse", "HEAD"])
@@ -1148,7 +1209,10 @@ pub fn normalize_checkout_remote_branch_input(
         anyhow::bail!("Enter a branch name.");
     }
 
-    if available_branches.iter().any(|candidate| candidate == branch) {
+    if available_branches
+        .iter()
+        .any(|candidate| candidate == branch)
+    {
         return Ok(branch.to_string());
     }
 
@@ -1198,7 +1262,11 @@ pub fn checkout_remote_branch(repo_root: &Path, remote: &str, branch: &str) -> R
 
     let output = if local_exists {
         let upstream = Command::new("git")
-            .args(["rev-parse", "--abbrev-ref", &format!("{branch}@{{upstream}}")])
+            .args([
+                "rev-parse",
+                "--abbrev-ref",
+                &format!("{branch}@{{upstream}}"),
+            ])
             .current_dir(&git_cwd)
             .output()
             .ok()
@@ -1245,8 +1313,9 @@ pub fn checkout_remote_branch(repo_root: &Path, remote: &str, branch: &str) -> R
 #[cfg(test)]
 mod tests {
     use super::{
-        add_worktree, detect_worktree_workspace, list_secret_files, list_workspace_worktrees,
-        normalize_checkout_remote_branch_input, read_git_origin_from_config, resolve_git_cwd,
+        add_worktree, add_worktree_from_existing, branch_exists, detect_worktree_workspace,
+        list_secret_files, list_workspace_worktrees, normalize_checkout_remote_branch_input,
+        read_git_origin_from_config, resolve_git_cwd,
     };
     use std::fs;
     use std::path::{Path, PathBuf};
@@ -1337,7 +1406,8 @@ mod tests {
         fs::write(
             &config,
             "[remote \"origin\"]\n\turl = https://github.com/owner/repo\n",
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(
             read_git_origin_from_config(&config),
             Some("https://github.com/owner/repo".to_string())
@@ -1376,6 +1446,63 @@ mod tests {
     }
 
     #[test]
+    fn add_worktree_from_existing_uses_existing_branch() {
+        let workspace = make_temp_dir("flat-existing-worktree-add");
+        let repo = workspace.join("repo");
+        fs::create_dir_all(&repo).expect("repo dir should be created");
+        init_repo(&repo);
+
+        let branch = "feat/team/existing";
+        let expected = workspace.join("feat-team-existing");
+
+        let create_branch = Command::new("git")
+            .args(["branch", branch])
+            .current_dir(&repo)
+            .output()
+            .expect("git should create the branch ref");
+        assert!(create_branch.status.success());
+
+        let (_messages, dest) = add_worktree_from_existing(&repo, branch)
+            .expect("existing branch worktree should be created");
+
+        assert_eq!(dest, expected);
+        assert!(dest.exists());
+
+        let head = Command::new("git")
+            .args(["symbolic-ref", "--short", "HEAD"])
+            .current_dir(&dest)
+            .output()
+            .expect("git should inspect existing branch worktree");
+        assert!(head.status.success());
+        assert_eq!(String::from_utf8_lossy(&head.stdout).trim(), branch);
+
+        let _ = fs::remove_dir_all(workspace);
+    }
+
+    #[test]
+    fn branch_exists_detects_local_branch_refs() {
+        let workspace = make_temp_dir("branch-exists");
+        let repo = workspace.join("repo");
+        fs::create_dir_all(&repo).expect("repo dir should be created");
+        init_repo(&repo);
+
+        let branch = "feat/existing";
+        let create_branch = Command::new("git")
+            .args(["branch", branch])
+            .current_dir(&repo)
+            .output()
+            .expect("git should create the branch ref");
+        assert!(create_branch.status.success());
+
+        assert!(branch_exists(&repo, branch).expect("branch lookup should succeed"));
+        assert!(
+            !branch_exists(&repo, "feat/missing").expect("missing branch lookup should succeed")
+        );
+
+        let _ = fs::remove_dir_all(workspace);
+    }
+
+    #[test]
     fn normalize_checkout_remote_branch_input_keeps_slash_branch_names() {
         let branch = normalize_checkout_remote_branch_input(
             "feat/team/branch",
@@ -1407,7 +1534,10 @@ mod tests {
             "origin/feat/team/branch",
             "origin",
             &[String::from("origin"), String::from("upstream")],
-            &[String::from("origin/feat/team/branch"), String::from("feat/team/branch")],
+            &[
+                String::from("origin/feat/team/branch"),
+                String::from("feat/team/branch"),
+            ],
         )
         .expect("exact branch match should win over remote-prefix stripping");
 
@@ -1472,16 +1602,19 @@ mod tests {
         fs::create_dir_all(&ignored_repo).expect("deep repo dir should be created");
         init_repo(&ignored_repo);
 
-        let worktrees = list_workspace_worktrees(&workspace).expect("workspace scan should succeed");
+        let worktrees =
+            list_workspace_worktrees(&workspace).expect("workspace scan should succeed");
         assert_eq!(worktrees.len(), 2);
         assert_eq!(worktrees[0].path, first_repo.to_string_lossy().to_string());
         assert_eq!(worktrees[0].branch, "main");
         assert_eq!(worktrees[1].path, second_repo.to_string_lossy().to_string());
         assert_eq!(worktrees[1].branch, "main");
         assert_eq!(resolve_git_cwd(&workspace), first_repo);
-        assert!(!worktrees
-            .iter()
-            .any(|wt| wt.path == ignored_repo.to_string_lossy().to_string()));
+        assert!(
+            !worktrees
+                .iter()
+                .any(|wt| wt.path == ignored_repo.to_string_lossy().to_string())
+        );
 
         let _ = fs::remove_dir_all(workspace);
     }
