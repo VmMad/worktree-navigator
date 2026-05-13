@@ -20,6 +20,11 @@ pub const COMMANDS: &[CommandSpec] = &[
         action: ActiveAction::NewBranch,
     },
     CommandSpec {
+        label: "Rename Worktree",
+        shortcut: 'm',
+        action: ActiveAction::Rename,
+    },
+    CommandSpec {
         label: "Sync with PR",
         shortcut: 'p',
         action: ActiveAction::SyncPr,
@@ -69,6 +74,9 @@ pub struct App {
     pub new_branch_use_existing: bool,
     pub new_branch_confirm_existing: Option<String>,
     pub new_branch_confirm_yes: bool,
+    pub rename_loading: bool,
+    pub rename_target_idx: Option<usize>,
+    pub rename_pending: Option<(Worktree, String)>,
 
     pub delete_loading: bool,
     pub delete_pending: Option<Vec<String>>,
@@ -144,6 +152,9 @@ impl App {
             new_branch_use_existing: false,
             new_branch_confirm_existing: None,
             new_branch_confirm_yes: false,
+            rename_loading: false,
+            rename_target_idx: None,
+            rename_pending: None,
             delete_loading: false,
             delete_pending: None,
             copy_secrets_loading: false,
@@ -258,6 +269,14 @@ impl App {
             .iter()
             .enumerate()
             .find_map(|(idx, wt)| wt.is_main.then_some(idx))
+    }
+
+    pub fn current_worktree_idx(&self) -> Option<usize> {
+        self.worktrees.iter().position(|wt| wt.is_current)
+    }
+
+    pub fn selected_worktree_idx(&self) -> Option<usize> {
+        (self.selected_index >= COMMANDS.len()).then_some(self.selected_index - COMMANDS.len())
     }
 
     pub fn next_copy_target_idx(&self, from: usize) -> Option<usize> {

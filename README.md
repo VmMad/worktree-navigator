@@ -53,6 +53,7 @@ wt --mark-tree
 Main commands:
 
 - `New Branch [b]` create a new branch worktree and jump into it
+- `Rename Worktree [m]` rename the selected non-default branch and move its worktree folder to match
 - `Sync with PR [p]` enter a PR number (`#123` or `123`) and create/sync its worktree
 - `Delete Worktree [d]` inline select in the worktree list, then confirm with `Enter` or `y` (`n`/`Esc` cancels)
 - `Sync Worktree [s]` inline select a worktree to fast-forward from `origin/<branch>`
