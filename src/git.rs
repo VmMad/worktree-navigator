@@ -109,13 +109,18 @@ pub fn list_worktrees(repo_root: &Path) -> Result<Vec<Worktree>> {
         .context("Failed to run git worktree list")?;
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let cwd = std::env::var("WT_CWD")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| repo_root.to_path_buf());
+    let cwd = effective_cwd(repo_root);
     let cwd = cwd.canonicalize().unwrap_or(cwd);
     let default_branch = get_default_branch(repo_root);
 
     parse_worktree_porcelain(&stdout, &cwd, default_branch.as_deref())
+}
+
+fn effective_cwd(fallback: &Path) -> PathBuf {
+    std::env::var("WT_CWD")
+        .map(PathBuf::from)
+        .or_else(|_| std::env::current_dir())
+        .unwrap_or_else(|_| fallback.to_path_buf())
 }
 
 fn get_default_branch(git_repo: &Path) -> Option<String> {
@@ -165,6 +170,41 @@ fn get_default_branch(git_repo: &Path) -> Option<String> {
         }
     }
     None
+}
+
+pub fn default_branch(repo_root: &Path) -> Result<String> {
+    get_default_branch(repo_root)
+        .filter(|branch| !branch.trim().is_empty())
+        .ok_or_else(|| {
+            anyhow::anyhow!("Could not determine the default branch for this repository.")
+        })
+}
+
+pub fn current_branch(dir: &Path) -> Result<String> {
+    let output = Command::new("git")
+        .args(["symbolic-ref", "--short", "HEAD"])
+        .current_dir(dir)
+        .output()
+        .context("Failed to run git symbolic-ref")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        anyhow::bail!(
+            "{}",
+            if stderr.is_empty() {
+                "Could not determine the current branch."
+            } else {
+                stderr.as_str()
+            }
+        );
+    }
+
+    let branch = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if branch.is_empty() {
+        anyhow::bail!("Could not determine the current branch.");
+    }
+
+    Ok(branch)
 }
 
 fn parse_worktree_porcelain(
@@ -252,8 +292,9 @@ pub fn add_worktree(
     if output.status.success() {
         messages.push(format!("✓ Created worktree at {dest_str}"));
     } else {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        messages.push(format!("✗ {}", stderr.trim()));
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        messages.push(format!("✗ {stderr}"));
+        anyhow::bail!("{stderr}");
     }
 
     Ok((messages, dest))
@@ -273,8 +314,9 @@ pub fn remove_worktree(repo_root: &Path, worktree_path: &str) -> Result<Vec<Stri
     if output.status.success() {
         messages.push(format!("✓ Removed worktree at {worktree_path}"));
     } else {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        messages.push(format!("✗ {}", stderr.trim()));
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        messages.push(format!("✗ {stderr}"));
+        anyhow::bail!("{stderr}");
     }
 
     Ok(messages)
@@ -1060,9 +1102,7 @@ pub fn detect_worktree_workspace(dir: &Path) -> bool {
 
 /// Recursively scan `workspace_dir` up to 3 directory levels and return nested git repos as worktrees.
 pub fn list_workspace_worktrees(workspace_dir: &Path) -> Result<Vec<Worktree>> {
-    let cwd = std::env::var("WT_CWD")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| workspace_dir.to_path_buf());
+    let cwd = effective_cwd(workspace_dir);
     let cwd = cwd.canonicalize().unwrap_or(cwd);
 
     let repos = collect_workspace_git_repos(workspace_dir)?;
@@ -1393,9 +1433,9 @@ pub fn checkout_remote_branch(repo_root: &Path, remote: &str, branch: &str) -> R
 #[cfg(test)]
 mod tests {
     use super::{
-        add_worktree, detect_worktree_workspace, list_secret_files, list_workspace_worktrees,
-        normalize_checkout_remote_branch_input, read_git_origin_from_config, rename_worktree,
-        resolve_git_cwd,
+        add_worktree, current_branch, default_branch, detect_worktree_workspace, list_secret_files,
+        list_workspace_worktrees, normalize_checkout_remote_branch_input,
+        read_git_origin_from_config, rename_worktree, resolve_git_cwd,
     };
     use crate::types::Worktree;
     use std::fs;
@@ -1522,6 +1562,62 @@ mod tests {
             .expect("git should inspect flat worktree");
         assert!(head.status.success());
         assert_eq!(String::from_utf8_lossy(&head.stdout).trim(), branch);
+
+        let _ = fs::remove_dir_all(workspace);
+    }
+
+    #[test]
+    fn add_worktree_can_branch_from_explicit_base() {
+        let workspace = make_temp_dir("explicit-base-add");
+        let repo = workspace.join("repo");
+        fs::create_dir_all(&repo).expect("repo dir should be created");
+        init_repo(&repo);
+
+        git(&repo, &["checkout", "-b", "feature/base"]);
+        fs::write(repo.join("base.txt"), "from-base\n").expect("base file should be written");
+        git(&repo, &["add", "base.txt"]);
+        git(&repo, &["commit", "-m", "base"]);
+        git(&repo, &["checkout", "main"]);
+
+        let (_messages, dest) = add_worktree(&repo, "feature/child", Some("feature/base"))
+            .expect("worktree from explicit base should be created");
+
+        assert!(dest.join("base.txt").exists());
+        assert_eq!(
+            current_branch(&dest).expect("worktree branch should resolve"),
+            "feature/child"
+        );
+
+        let _ = fs::remove_dir_all(workspace);
+    }
+
+    #[test]
+    fn resolves_current_and_default_branch() {
+        let workspace = make_temp_dir("branch-resolution");
+        let repo = workspace.join("repo");
+        fs::create_dir_all(&repo).expect("repo dir should be created");
+        init_repo(&repo);
+        git(
+            &repo,
+            &["remote", "add", "origin", "git@github.com:owner/repo.git"],
+        );
+        git(
+            &repo,
+            &[
+                "symbolic-ref",
+                "refs/remotes/origin/HEAD",
+                "refs/remotes/origin/main",
+            ],
+        );
+
+        assert_eq!(
+            current_branch(&repo).expect("current branch should resolve"),
+            "main"
+        );
+        assert_eq!(
+            default_branch(&repo).expect("default branch should resolve"),
+            "main"
+        );
 
         let _ = fs::remove_dir_all(workspace);
     }

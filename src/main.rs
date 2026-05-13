@@ -1,4 +1,5 @@
 mod app;
+mod cli;
 mod git;
 mod text_input;
 mod types;
@@ -6,12 +7,12 @@ mod ui;
 mod update;
 mod version;
 
-use std::io::stderr;
-use std::path::PathBuf;
+use std::io::{Write, stderr};
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::TryRecvError;
 use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use crossterm::{
     event::{
         self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
@@ -23,38 +24,51 @@ use crossterm::{
 use ratatui::{Terminal, backend::CrosstermBackend};
 
 use app::App;
+use cli::{BranchBase, ParsedArgs};
 use text_input::TextInputKeyResult;
-use types::{ActiveAction, CheckoutRemotePhase, CloneEvent, CopySecretsPhase, SyncPrEvent};
+use types::{
+    ActiveAction, CheckoutRemotePhase, CloneEvent, CopySecretsPhase, SyncPrEvent, Worktree,
+};
 
 fn main() -> Result<()> {
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    let args = cli::parse_args(std::env::args().skip(1))?;
+    let cwd = resolve_cwd();
 
-    if args.iter().any(|a| a == "--version" || a == "-V") {
-        println!("wt v{}", version::current_version());
-        return Ok(());
+    match args {
+        ParsedArgs::Tui { mark_tree } => run_tui(cwd, mark_tree),
+        ParsedArgs::Version => {
+            println!("wt v{}", version::current_version());
+            Ok(())
+        }
+        ParsedArgs::Update => update::run_manual_update(),
+        ParsedArgs::Help => {
+            cli::print_help();
+            Ok(())
+        }
+        command => run_cli_command(&cwd, command),
     }
+}
 
-    if args.iter().any(|a| a == "--update") {
-        update::run_manual_update()?;
-        return Ok(());
-    }
+#[derive(Debug, Clone)]
+struct RepoContext {
+    cwd: PathBuf,
+    repo_root: PathBuf,
+    is_workspace: bool,
+    no_repo: bool,
+}
 
-    let cwd = std::env::var("WT_CWD")
+fn resolve_cwd() -> PathBuf {
+    std::env::var("WT_CWD")
         .map(PathBuf::from)
-        .unwrap_or_else(|_| std::env::current_dir().expect("no cwd"));
+        .or_else(|_| std::env::current_dir())
+        .expect("no cwd")
+}
 
-    let mark_tree = args.iter().any(|a| a == "--mark-tree");
-    let mut update_notice_rx = (!mark_tree).then(update::start_background_update_check);
-    let mut update_notice = None;
-
-    if mark_tree {
-        git::create_workspace_marker(&cwd)?;
-    }
-
-    let workspace_root_opt = git::find_workspace_root(&cwd).or_else(|| {
-        if git::detect_worktree_workspace(&cwd) {
-            let _ = git::create_workspace_marker(&cwd);
-            Some(cwd.clone())
+fn resolve_repo_context(cwd: &Path) -> RepoContext {
+    let workspace_root_opt = git::find_workspace_root(cwd).or_else(|| {
+        if git::detect_worktree_workspace(cwd) {
+            let _ = git::create_workspace_marker(cwd);
+            Some(cwd.to_path_buf())
         } else {
             None
         }
@@ -62,13 +76,41 @@ fn main() -> Result<()> {
     let repo_root_opt = if workspace_root_opt.is_some() {
         None
     } else {
-        git::find_repo_root(&cwd)
+        git::find_repo_root(cwd)
     };
 
     let no_repo = repo_root_opt.is_none() && workspace_root_opt.is_none();
     let repo_root = repo_root_opt
         .or_else(|| workspace_root_opt.clone())
-        .unwrap_or_else(|| cwd.clone());
+        .unwrap_or_else(|| cwd.to_path_buf());
+
+    RepoContext {
+        cwd: cwd.to_path_buf(),
+        repo_root,
+        is_workspace: workspace_root_opt.is_some(),
+        no_repo,
+    }
+}
+
+fn list_context_worktrees(context: &RepoContext) -> Result<Vec<Worktree>> {
+    if context.is_workspace {
+        git::list_workspace_worktrees(&context.repo_root)
+    } else {
+        git::list_worktrees(&context.repo_root)
+    }
+}
+
+fn run_tui(cwd: PathBuf, mark_tree: bool) -> Result<()> {
+    let mut update_notice_rx = (!mark_tree).then(update::start_background_update_check);
+    let mut update_notice = None;
+
+    if mark_tree {
+        git::create_workspace_marker(&cwd)?;
+    }
+
+    let context = resolve_repo_context(&cwd);
+    let no_repo = context.no_repo;
+    let repo_root = context.repo_root.clone();
 
     enable_raw_mode()?;
     let mut stderr = stderr();
@@ -88,7 +130,7 @@ fn main() -> Result<()> {
         app.no_repo = true;
         app.worktrees_loading = false;
         app.active_action = ActiveAction::CloneRepo;
-    } else if workspace_root_opt.is_some() {
+    } else if context.is_workspace {
         app.is_workspace = true;
         match git::list_workspace_worktrees(&repo_root) {
             Ok(wts) => {
@@ -328,6 +370,105 @@ fn main() -> Result<()> {
 
     if let Some(ref path) = app.exit_path {
         println!("{path}");
+    }
+
+    Ok(())
+}
+
+fn run_cli_command(cwd: &Path, command: ParsedArgs) -> Result<()> {
+    let context = resolve_repo_context(cwd);
+    if context.no_repo {
+        anyhow::bail!(
+            "No git repository found here. Run `wt` with no args to start the clone flow."
+        );
+    }
+
+    match command {
+        ParsedArgs::CheckoutPr { pr_number } => {
+            let (_, dest) = git::checkout_pr_as_worktree(&context.repo_root, pr_number)?;
+            println!("{}", dest.display());
+        }
+        ParsedArgs::Branch { branch_name, base } => {
+            let base_branch = resolve_cli_branch_base(&context, &base)?;
+            let (_, dest) =
+                git::add_worktree(&context.repo_root, &branch_name, Some(&base_branch))?;
+            println!("{}", dest.display());
+        }
+        ParsedArgs::Delete { branch_name, yes } => {
+            let worktree = resolve_delete_target(&context, branch_name.as_deref())?;
+            confirm_delete(&worktree, yes)?;
+            git::remove_worktree(&context.repo_root, &worktree.path)?;
+            eprintln!(
+                "Removed worktree for branch '{}' at {}",
+                worktree.branch, worktree.path
+            );
+            if worktree.is_current {
+                println!("{}", context.repo_root.display());
+            }
+        }
+        ParsedArgs::Tui { .. } | ParsedArgs::Version | ParsedArgs::Update | ParsedArgs::Help => {
+            unreachable!("handled before CLI execution")
+        }
+    }
+
+    Ok(())
+}
+
+fn resolve_cli_branch_base(context: &RepoContext, base: &BranchBase) -> Result<String> {
+    match base {
+        BranchBase::Auto => git::current_branch(&context.cwd)
+            .or_else(|_| git::default_branch(&context.repo_root)),
+        BranchBase::Current => git::current_branch(&context.cwd).with_context(|| {
+            "Could not resolve the current branch from this directory. Run inside a worktree or use `--from-default` / `--base`."
+        }),
+        BranchBase::Default => git::default_branch(&context.repo_root),
+        BranchBase::Explicit(branch) => Ok(branch.clone()),
+    }
+}
+
+fn resolve_delete_target(context: &RepoContext, branch_name: Option<&str>) -> Result<Worktree> {
+    let worktrees = list_context_worktrees(context)?;
+    let target = if let Some(branch_name) = branch_name {
+        worktrees
+            .into_iter()
+            .find(|worktree| worktree.branch == branch_name)
+            .ok_or_else(|| anyhow::anyhow!("No worktree found for branch '{branch_name}'."))?
+    } else {
+        worktrees.into_iter().find(|worktree| worktree.is_current).ok_or_else(|| {
+            anyhow::anyhow!(
+                "Could not determine the current worktree from this directory. Pass a branch name explicitly."
+            )
+        })?
+    };
+
+    if target.is_main {
+        anyhow::bail!(
+            "Refusing to delete the default worktree '{}'.",
+            target.branch
+        );
+    }
+
+    Ok(target)
+}
+
+fn confirm_delete(worktree: &Worktree, yes: bool) -> Result<()> {
+    if yes {
+        return Ok(());
+    }
+
+    let mut stderr = stderr();
+    writeln!(
+        stderr,
+        "About to delete branch '{}' at {}",
+        worktree.branch, worktree.path
+    )?;
+    write!(stderr, "Type the branch name to confirm: ")?;
+    stderr.flush()?;
+
+    let mut confirmation = String::new();
+    std::io::stdin().read_line(&mut confirmation)?;
+    if confirmation.trim() != worktree.branch {
+        anyhow::bail!("Delete cancelled.");
     }
 
     Ok(())
