@@ -22,8 +22,8 @@ pub fn draw(f: &mut Frame, app: &mut App) {
 
     let show_sync_overlay = app.active_action == ActiveAction::SyncTrees
         && (app.sync_loading || !app.sync_results.is_empty());
-    let show_delete_overlay =
-        app.active_action == ActiveAction::Delete && (app.delete_confirming || app.delete_loading);
+    let show_delete_overlay = app.active_action == ActiveAction::Delete
+        && (app.delete_confirming || app.delete_warn_current || app.delete_loading);
     let show_copy_overlay = app.active_action == ActiveAction::CopySecrets
         && (app.copy_secrets_phase == CopySecretsPhase::ConfirmOverwrite
             || app.copy_secrets_loading);
@@ -44,22 +44,20 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     let show_error_bar = app.active_action == ActiveAction::None
         || (app.active_action == ActiveAction::CopySecrets
             && app.copy_secrets_phase != CopySecretsPhase::ConfirmOverwrite);
-    if show_error_bar {
-        if let Some(err) = &app.overlay_error {
-            let err_area = Rect {
-                x: area.x + 2,
-                y: area.y + area.height.saturating_sub(2),
-                width: area.width.saturating_sub(4),
-                height: 1,
-            };
-            f.render_widget(
-                Paragraph::new(Span::styled(
-                    format!(" ✗ {err} "),
-                    Style::default().fg(Color::White).bg(Color::Red),
-                )),
-                err_area,
-            );
-        }
+    if show_error_bar && let Some(err) = &app.overlay_error {
+        let err_area = Rect {
+            x: area.x + 2,
+            y: area.y + area.height.saturating_sub(2),
+            width: area.width.saturating_sub(4),
+            height: 1,
+        };
+        f.render_widget(
+            Paragraph::new(Span::styled(
+                format!(" ✗ {err} "),
+                Style::default().fg(Color::White).bg(Color::Red),
+            )),
+            err_area,
+        );
     }
 }
 
@@ -75,8 +73,10 @@ fn draw_panel(f: &mut Frame, app: &mut App, area: Rect) {
     let sync_select = app.active_action == ActiveAction::SyncTrees
         && !app.sync_loading
         && app.sync_results.is_empty();
-    let delete_select =
-        app.active_action == ActiveAction::Delete && !app.delete_confirming && !app.delete_loading;
+    let delete_select = app.active_action == ActiveAction::Delete
+        && !app.delete_confirming
+        && !app.delete_warn_current
+        && !app.delete_loading;
     let copy_select = app.active_action == ActiveAction::CopySecrets
         && app.copy_secrets_phase != CopySecretsPhase::ConfirmOverwrite
         && !app.copy_secrets_loading;
@@ -123,8 +123,10 @@ fn draw_commands(f: &mut Frame, app: &mut App, area: Rect) {
     let sync_select = app.active_action == ActiveAction::SyncTrees
         && !app.sync_loading
         && app.sync_results.is_empty();
-    let delete_select =
-        app.active_action == ActiveAction::Delete && !app.delete_confirming && !app.delete_loading;
+    let delete_select = app.active_action == ActiveAction::Delete
+        && !app.delete_confirming
+        && !app.delete_warn_current
+        && !app.delete_loading;
     let copy_select = app.active_action == ActiveAction::CopySecrets
         && app.copy_secrets_phase != CopySecretsPhase::ConfirmOverwrite
         && !app.copy_secrets_loading;
@@ -168,12 +170,10 @@ fn draw_commands(f: &mut Frame, app: &mut App, area: Rect) {
         let style = if inline_select {
             if focused_cmd {
                 // Active inline-select indicator: underline the focused command.
-                let color = if sync_select {
-                    Color::Green
-                } else if copy_select {
-                    Color::Green
-                } else {
+                let color = if delete_select {
                     Color::Red
+                } else {
+                    Color::Green
                 };
                 Style::default()
                     .fg(color)
@@ -297,18 +297,11 @@ fn draw_worktrees(f: &mut Frame, app: &mut App, area: Rect) {
     let cmd_len = COMMANDS.len();
 
     let selected_delete_wt_idx = if delete_select {
-        let deletable_indices: Vec<usize> = app
-            .worktrees
-            .iter()
-            .enumerate()
-            .filter_map(|(i, wt)| (!wt.is_main && !wt.is_current).then_some(i))
-            .collect();
-        deletable_indices
-            .get(
-                app.overlay_index
-                    .min(deletable_indices.len().saturating_sub(1)),
-            )
-            .copied()
+        if app.is_deletable_worktree_idx(app.overlay_index) {
+            Some(app.overlay_index)
+        } else {
+            app.first_deletable_worktree_idx()
+        }
     } else {
         None
     };
@@ -379,7 +372,7 @@ fn draw_worktrees(f: &mut Frame, app: &mut App, area: Rect) {
         let can_hover =
             app.active_action == ActiveAction::None || sync_select || delete_select || copy_select;
         let hovered = can_hover && !selected && app.hovered_row == Some(row);
-        let deletable = !wt.is_main && !wt.is_current;
+        let deletable = !wt.is_main;
         let copy_disabled = app.copy_secrets_phase == CopySecretsPhase::SelectTarget
             && app.copy_secrets_source_idx == Some(i);
 
@@ -394,11 +387,7 @@ fn draw_worktrees(f: &mut Frame, app: &mut App, area: Rect) {
             Style::default()
                 .fg(selected_color)
                 .add_modifier(Modifier::BOLD)
-        } else if copy_disabled {
-            Style::default()
-                .fg(Color::DarkGray)
-                .add_modifier(Modifier::DIM)
-        } else if delete_select && !deletable {
+        } else if copy_disabled || (delete_select && !deletable) {
             Style::default()
                 .fg(Color::DarkGray)
                 .add_modifier(Modifier::DIM)
@@ -425,10 +414,20 @@ fn draw_worktrees(f: &mut Frame, app: &mut App, area: Rect) {
             Span::styled(
                 if copy_select {
                     if wt.has_secrets { "● " } else { "○ " }
+                } else if delete_select && deletable {
+                    if app.delete_checked.contains(&i) {
+                        "● "
+                    } else {
+                        "○ "
+                    }
                 } else {
                     ""
                 },
-                Style::default().fg(Color::Green),
+                Style::default().fg(if delete_select {
+                    Color::Red
+                } else {
+                    Color::Green
+                }),
             ),
             Span::styled(wt.branch.clone(), base_style),
         ];
@@ -459,8 +458,10 @@ fn draw_help(f: &mut Frame, app: &App, area: Rect) {
     let sync_select = app.active_action == ActiveAction::SyncTrees
         && !app.sync_loading
         && app.sync_results.is_empty();
-    let delete_select =
-        app.active_action == ActiveAction::Delete && !app.delete_confirming && !app.delete_loading;
+    let delete_select = app.active_action == ActiveAction::Delete
+        && !app.delete_confirming
+        && !app.delete_warn_current
+        && !app.delete_loading;
     let copy_select = app.active_action == ActiveAction::CopySecrets
         && app.copy_secrets_phase != CopySecretsPhase::ConfirmOverwrite
         && !app.copy_secrets_loading;
@@ -478,16 +479,20 @@ fn draw_help(f: &mut Frame, app: &App, area: Rect) {
             Span::styled("  cancel", Style::default().fg(Color::DarkGray)),
         ])
     } else if delete_select {
-        let has_deletable = app.worktrees.iter().any(|wt| !wt.is_main && !wt.is_current);
+        let has_deletable = app.worktrees.iter().any(|wt| !wt.is_main);
         if has_deletable {
             Line::from(vec![
-                Span::styled("↑↓/jk/click", Style::default().fg(Color::Red)),
+                Span::styled("●/○", Style::default().fg(Color::Red)),
                 Span::styled(
-                    "  select worktree to delete    ",
+                    "  selected/unselected    ",
                     Style::default().fg(Color::DarkGray),
                 ),
-                Span::styled("Enter/click", Style::default().fg(Color::Red)),
-                Span::styled("  confirm    ", Style::default().fg(Color::DarkGray)),
+                Span::styled("↑↓/jk/click", Style::default().fg(Color::Red)),
+                Span::styled("  move cursor    ", Style::default().fg(Color::DarkGray)),
+                Span::styled("Space/click", Style::default().fg(Color::Red)),
+                Span::styled("  toggle    ", Style::default().fg(Color::DarkGray)),
+                Span::styled("Enter", Style::default().fg(Color::Red)),
+                Span::styled("  delete/confirm    ", Style::default().fg(Color::DarkGray)),
                 Span::styled("Esc", Style::default().fg(Color::DarkGray)),
                 Span::styled("  cancel", Style::default().fg(Color::DarkGray)),
             ])
@@ -605,10 +610,12 @@ fn draw_copy_secrets_overlay(f: &mut Frame, app: &App, area: Rect) {
     let no_style = if app.copy_secrets_confirm_yes {
         Style::default().fg(Color::DarkGray)
     } else {
-        Style::default()
-            .fg(Color::Black)
-            .bg(Color::Red)
-            .add_modifier(Modifier::BOLD)
+        Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
+    };
+    let no_label = if app.copy_secrets_confirm_yes {
+        "  No  "
+    } else {
+        "[ No ]"
     };
 
     f.render_widget(
@@ -631,7 +638,7 @@ fn draw_copy_secrets_overlay(f: &mut Frame, app: &App, area: Rect) {
             Line::from(vec![
                 Span::styled("  Yes  ", yes_style),
                 Span::styled("   ", Style::default()),
-                Span::styled("  No  ", no_style),
+                Span::styled(no_label, no_style),
             ]),
             Line::from(Span::styled(
                 "Left/Right or click, Enter to confirm, Esc to cancel",
@@ -690,14 +697,23 @@ fn draw_new_branch_overlay(f: &mut Frame, app: &App, area: Rect) {
             .new_branch_pending
             .as_deref()
             .unwrap_or(app.input_buffer.trim());
+        let loading_label = if app.new_branch_use_existing {
+            format!(
+                "⟳  Creating worktree from {}{}",
+                branch,
+                app.loading_animation_dots()
+            )
+        } else {
+            format!(
+                "⟳  Creating branch {}{}",
+                branch,
+                app.loading_animation_dots()
+            )
+        };
         f.render_widget(
             Paragraph::new(vec![
                 Line::from(Span::styled(
-                    format!(
-                        "⟳  Creating branch {}{}",
-                        branch,
-                        app.loading_animation_dots()
-                    ),
+                    loading_label,
                     Style::default()
                         .fg(Color::Yellow)
                         .add_modifier(Modifier::BOLD),
@@ -706,6 +722,80 @@ fn draw_new_branch_overlay(f: &mut Frame, app: &App, area: Rect) {
                     "   This may take a moment.",
                     Style::default().fg(Color::DarkGray),
                 )),
+            ]),
+            inner,
+        );
+        return;
+    }
+
+    if let Some(branch) = &app.new_branch_confirm_existing {
+        let popup = centered_rect(48, 10, area);
+        f.render_widget(Clear, popup);
+
+        let block = Block::default()
+            .title(" Existing Branch ")
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Yellow));
+
+        let inner = block.inner(popup).inner(Margin {
+            horizontal: 1,
+            vertical: 1,
+        });
+        f.render_widget(block, popup);
+
+        let yes_style = if app.new_branch_confirm_yes {
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Yellow)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::White)
+        };
+        let no_style = if app.new_branch_confirm_yes {
+            Style::default().fg(Color::White)
+        } else {
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Red)
+                .add_modifier(Modifier::BOLD)
+        };
+        let no_label = if app.new_branch_confirm_yes {
+            "  No  "
+        } else {
+            "[ No ]"
+        };
+
+        f.render_widget(
+            Paragraph::new(vec![
+                Line::from(Span::styled(
+                    "Branch already exists",
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                )),
+                Line::from(Span::styled(
+                    "Create a new worktree from it instead?",
+                    Style::default().fg(Color::DarkGray),
+                )),
+                Line::from(vec![]),
+                Line::from(Span::styled(
+                    branch.clone(),
+                    Style::default()
+                        .fg(Color::White)
+                        .add_modifier(Modifier::BOLD),
+                )),
+                Line::from(vec![]),
+                Line::from(vec![
+                    Span::styled("  Yes  ", yes_style),
+                    Span::styled("   ", Style::default()),
+                    Span::styled(no_label, no_style),
+                ])
+                .alignment(Alignment::Center),
+                Line::from(Span::styled(
+                    "Use arrows, Enter, or Esc",
+                    Style::default().fg(Color::DarkGray),
+                ))
+                .alignment(Alignment::Center),
             ]),
             inner,
         );
@@ -1149,9 +1239,19 @@ fn draw_delete_overlay(f: &mut Frame, app: &App, area: Rect) {
         let branch = app
             .delete_pending
             .as_deref()
-            .and_then(|path| app.worktrees.iter().find(|wt| wt.path == path))
-            .map(|wt| wt.branch.as_str())
-            .unwrap_or("worktree");
+            .and_then(|paths| {
+                if paths.len() == 1 {
+                    paths
+                        .first()
+                        .and_then(|path| app.worktrees.iter().find(|wt| wt.path == path.as_str()))
+                        .map(|wt| wt.branch.clone())
+                } else if paths.is_empty() {
+                    None
+                } else {
+                    Some(format!("{} worktrees", paths.len()))
+                }
+            })
+            .unwrap_or_else(|| "worktree".to_string());
         f.render_widget(
             Paragraph::new(vec![
                 Line::from(Span::styled(
@@ -1168,13 +1268,29 @@ fn draw_delete_overlay(f: &mut Frame, app: &App, area: Rect) {
         return;
     }
 
-    let deletable = app.deletable_worktrees();
-    if let Some(wt) = deletable.get(app.overlay_index) {
-        let popup = centered_rect(60, 8, area);
+    if !app.delete_confirm_targets.is_empty() {
+        let popup = centered_rect(
+            48,
+            if app.delete_warn_current {
+                12
+            } else if app.delete_confirm_targets.len() > 1 {
+                13
+            } else {
+                11
+            },
+            area,
+        );
         f.render_widget(Clear, popup);
 
+        let block_title = if app.delete_warn_current {
+            " Delete Current Worktree "
+        } else if app.delete_confirm_targets.len() > 1 {
+            " Delete Worktrees "
+        } else {
+            " Delete Worktree "
+        };
         let block = Block::default()
-            .title(" Delete Worktree ")
+            .title(block_title)
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Color::Red));
 
@@ -1183,28 +1299,147 @@ fn draw_delete_overlay(f: &mut Frame, app: &App, area: Rect) {
             vertical: 1,
         });
         f.render_widget(block, popup);
-        f.render_widget(
-            Paragraph::new(vec![
-                Line::from(Span::styled(
-                    "Delete worktree for branch:",
-                    Style::default().fg(Color::Yellow),
-                )),
-                Line::from(Span::styled(
-                    wt.branch.clone(),
-                    Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
-                )),
-                Line::from(Span::styled(
-                    wt.path.clone(),
+
+        let branches: Vec<String> = app
+            .delete_confirm_targets
+            .iter()
+            .copied()
+            .filter_map(|idx| app.worktrees.get(idx).map(|wt| wt.branch.clone()))
+            .collect();
+        let paths: Vec<String> = app
+            .delete_confirm_targets
+            .iter()
+            .copied()
+            .filter_map(|idx| app.worktrees.get(idx).map(|wt| wt.path.clone()))
+            .collect();
+        let current_branch = app.delete_confirm_targets.iter().copied().find_map(|idx| {
+            app.worktrees
+                .get(idx)
+                .and_then(|wt| wt.is_current.then_some(wt.branch.clone()))
+        });
+        let fallback_branch = app
+            .default_worktree_idx()
+            .and_then(|idx| app.worktrees.get(idx).map(|wt| wt.branch.clone()));
+
+        let headline = if app.delete_warn_current {
+            "Current worktree selected".to_string()
+        } else if branches.len() == 1 {
+            "Delete this worktree?".to_string()
+        } else {
+            format!("Delete {} worktrees?", branches.len())
+        };
+        let detail = if app.delete_warn_current {
+            current_branch.unwrap_or_else(|| "current worktree".to_string())
+        } else if branches.len() == 1 {
+            branches.first().cloned().unwrap_or_default()
+        } else {
+            String::new()
+        };
+        let supporting_line = if app.delete_warn_current {
+            match fallback_branch {
+                Some(branch) => format!("wt will switch to {branch} after deletion"),
+                None => "wt will switch to the default worktree after deletion".to_string(),
+            }
+        } else if paths.len() == 1 {
+            paths.first().cloned().unwrap_or_default()
+        } else {
+            format!("Selected: {}", paths.len())
+        };
+        let warning_line = if app.delete_warn_current {
+            "The current worktree is selected. Uncommitted changes might be lost."
+        } else {
+            "This cannot be undone."
+        };
+
+        let yes_style = if app.delete_confirm_yes {
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Red)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::White)
+        };
+        let no_style = if app.delete_confirm_yes {
+            Style::default().fg(Color::White)
+        } else {
+            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
+        };
+        let no_label = if app.delete_confirm_yes {
+            "  No  "
+        } else {
+            "[ No ]"
+        };
+
+        let mut lines = vec![
+            Line::from(Span::styled(
+                headline,
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            )),
+            Line::from(Span::styled(
+                warning_line,
+                Style::default().fg(Color::DarkGray),
+            )),
+            Line::from(vec![]),
+        ];
+
+        if app.delete_warn_current {
+            lines.push(Line::from(Span::styled(
+                detail,
+                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            )));
+            lines.push(Line::from(Span::styled(
+                supporting_line,
+                Style::default().fg(Color::DarkGray),
+            )));
+        } else if branches.len() == 1 {
+            lines.push(Line::from(Span::styled(
+                detail,
+                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            )));
+            lines.push(Line::from(Span::styled(
+                supporting_line,
+                Style::default().fg(Color::DarkGray),
+            )));
+        } else {
+            for branch in branches.iter().take(3) {
+                lines.push(Line::from(vec![
+                    Span::styled("• ", Style::default().fg(Color::Red)),
+                    Span::styled(
+                        branch.clone(),
+                        Style::default()
+                            .fg(Color::White)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                ]));
+            }
+            if branches.len() > 3 {
+                lines.push(Line::from(Span::styled(
+                    format!("... and {} more", branches.len() - 3),
                     Style::default().fg(Color::DarkGray),
-                )),
-                Line::from(vec![]),
-                Line::from(Span::styled(
-                    "Confirm? [Enter/y to delete, n/Esc to cancel]",
-                    Style::default().fg(Color::Yellow),
-                )),
-            ]),
-            inner,
+                )));
+            }
+        }
+
+        lines.push(Line::from(vec![]));
+        lines.push(
+            Line::from(vec![
+                Span::styled("  Yes  ", yes_style),
+                Span::styled("   ", Style::default()),
+                Span::styled(no_label, no_style),
+            ])
+            .alignment(Alignment::Center),
         );
+        lines.push(
+            Line::from(Span::styled(
+                "Use arrows, Enter, or Esc",
+                Style::default().fg(Color::DarkGray),
+            ))
+            .alignment(Alignment::Center),
+        );
+
+        f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
     }
 }
 
