@@ -170,10 +170,17 @@ fn main() -> Result<()> {
         // Execute pending new branch after the loading frame has been rendered.
         if let Some(branch) = app.new_branch_pending.take() {
             let root = app.repo_root.clone();
-            let base = app.new_branch_base.as_deref();
-            match git::add_worktree(&root, &branch, base) {
+            let result = if app.new_branch_use_existing {
+                git::add_worktree_from_existing(&root, &branch)
+            } else {
+                let base = app.new_branch_base.as_deref();
+                git::add_worktree(&root, &branch, base)
+            };
+            match result {
                 Ok((_, dest)) => {
                     app.new_branch_loading = false;
+                    app.new_branch_use_existing = false;
+                    app.new_branch_confirm_existing = None;
                     app.active_action = ActiveAction::None;
                     app.clear_input();
                     refresh_worktrees(&mut app);
@@ -182,6 +189,7 @@ fn main() -> Result<()> {
                 }
                 Err(e) => {
                     app.new_branch_loading = false;
+                    app.new_branch_use_existing = false;
                     app.overlay_error = Some(format!("Failed to create branch: {e}"));
                 }
             }
@@ -217,18 +225,30 @@ fn main() -> Result<()> {
         }
 
         // Execute pending delete after the loading frame has been rendered.
-        if let Some(path) = app.delete_pending.take() {
+        if let Some(paths) = app.delete_pending.take() {
             let root = app.repo_root.clone();
-            match git::remove_worktree(&root, &path, app.is_workspace) {
+            match git::remove_worktrees(&root, &paths, app.is_workspace) {
                 Ok(_) => {
                     app.delete_loading = false;
                     app.active_action = ActiveAction::None;
+                    app.delete_warn_current = false;
+                    app.delete_confirm_targets.clear();
                     app.overlay_error = None;
-                    refresh_worktrees(&mut app);
+                    app.delete_checked.clear();
+                    if let Some(path) = app.delete_redirect_path.take() {
+                        app.exit_path = Some(path);
+                        app.should_quit = true;
+                    } else {
+                        refresh_worktrees(&mut app);
+                    }
                 }
                 Err(e) => {
                     app.delete_loading = false;
                     app.active_action = ActiveAction::None;
+                    app.delete_warn_current = false;
+                    app.delete_confirm_targets.clear();
+                    app.delete_redirect_path = None;
+                    app.delete_checked.clear();
                     app.overlay_error = Some(format!("Failed to delete worktree: {e}"));
                 }
             }
@@ -356,6 +376,22 @@ fn handle_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
 
 fn handle_mouse(app: &mut App, kind: MouseEventKind, column: u16, row: u16) {
     if matches!(kind, MouseEventKind::Down(MouseButton::Left))
+        && app.active_action == ActiveAction::NewBranch
+        && app.new_branch_confirm_existing.is_some()
+    {
+        handle_new_branch_confirm_click(app, column, row);
+        return;
+    }
+
+    if matches!(kind, MouseEventKind::Down(MouseButton::Left))
+        && app.active_action == ActiveAction::Delete
+        && (app.delete_confirming || app.delete_warn_current)
+    {
+        handle_delete_confirm_click(app, column, row);
+        return;
+    }
+
+    if matches!(kind, MouseEventKind::Down(MouseButton::Left))
         && app.active_action == ActiveAction::CopySecrets
         && app.copy_secrets_phase == CopySecretsPhase::ConfirmOverwrite
     {
@@ -366,8 +402,10 @@ fn handle_mouse(app: &mut App, kind: MouseEventKind, column: u16, row: u16) {
     let sync_select = app.active_action == ActiveAction::SyncTrees
         && !app.sync_loading
         && app.sync_results.is_empty();
-    let delete_select =
-        app.active_action == ActiveAction::Delete && !app.delete_confirming && !app.delete_loading;
+    let delete_select = app.active_action == ActiveAction::Delete
+        && !app.delete_confirming
+        && !app.delete_warn_current
+        && !app.delete_loading;
     let copy_select = app.active_action == ActiveAction::CopySecrets
         && app.copy_secrets_phase != CopySecretsPhase::ConfirmOverwrite
         && !app.copy_secrets_loading;
@@ -400,17 +438,11 @@ fn handle_mouse(app: &mut App, kind: MouseEventKind, column: u16, row: u16) {
                         app.sync_pending = true;
                     }
                 } else if delete_select {
-                    // Only deletable worktree rows trigger delete confirmation.
                     if idx >= app::COMMANDS.len() {
                         let wt_idx = idx - app::COMMANDS.len();
-                        if app
-                            .worktrees
-                            .get(wt_idx)
-                            .map(|wt| !wt.is_main && !wt.is_current)
-                            .unwrap_or(false)
-                        {
-                            app.overlay_index = delete_overlay_index_for_worktree(app, wt_idx);
-                            app.delete_confirming = true;
+                        if app.is_deletable_worktree_idx(wt_idx) {
+                            app.overlay_index = wt_idx;
+                            toggle_delete_selection(app, wt_idx);
                         }
                     }
                 } else if copy_select {
@@ -430,7 +462,10 @@ fn handle_mouse(app: &mut App, kind: MouseEventKind, column: u16, row: u16) {
                 let next = copy_selection_idx(app).saturating_sub(1);
                 set_copy_selection_idx(app, next);
             } else if delete_select {
-                app.overlay_index = app.overlay_index.saturating_sub(1);
+                let current = delete_cursor_idx(app);
+                app.overlay_index = app
+                    .previous_deletable_worktree_idx(current)
+                    .unwrap_or(current);
             } else if app.selected_index == 0 {
                 app.selected_index = app.total_items().saturating_sub(1);
             } else {
@@ -446,8 +481,8 @@ fn handle_mouse(app: &mut App, kind: MouseEventKind, column: u16, row: u16) {
                 let next = (copy_selection_idx(app) + 1).min(max);
                 set_copy_selection_idx(app, next);
             } else if delete_select {
-                let max = app.deletable_worktrees().len().saturating_sub(1);
-                app.overlay_index = (app.overlay_index + 1).min(max);
+                let current = delete_cursor_idx(app);
+                app.overlay_index = app.next_deletable_worktree_idx(current).unwrap_or(current);
             } else {
                 let max = app.total_items().saturating_sub(1);
                 if app.selected_index >= max {
@@ -514,7 +549,14 @@ fn activate(app: &mut App) {
 fn open_action(app: &mut App, action: ActiveAction) {
     app.overlay_index = 0;
     app.clear_input();
+    app.new_branch_use_existing = false;
+    app.new_branch_confirm_existing = None;
+    app.new_branch_confirm_yes = false;
     app.delete_confirming = false;
+    app.delete_warn_current = false;
+    app.delete_confirm_targets.clear();
+    app.delete_confirm_yes = false;
+    app.delete_redirect_path = None;
     app.overlay_error = None;
     app.new_branch_base = None;
     app.rename_loading = false;
@@ -577,7 +619,8 @@ fn open_action(app: &mut App, action: ActiveAction) {
     }
 
     if action == ActiveAction::Delete {
-        app.overlay_index = 0;
+        app.delete_checked.clear();
+        app.overlay_index = initial_delete_cursor_idx(app).unwrap_or(0);
     }
 
     if action == ActiveAction::CopySecrets {
@@ -682,6 +725,31 @@ fn handle_new_branch_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) 
     if app.new_branch_loading {
         return;
     }
+
+    if app.new_branch_confirm_existing.is_some() {
+        match code {
+            KeyCode::Left | KeyCode::Up | KeyCode::Char('h') | KeyCode::Char('k') => {
+                app.new_branch_confirm_yes = true;
+            }
+            KeyCode::Right | KeyCode::Down | KeyCode::Char('j') | KeyCode::Char('l') => {
+                app.new_branch_confirm_yes = false;
+            }
+            KeyCode::Char('y') | KeyCode::Char('Y') => {
+                app.new_branch_confirm_yes = true;
+                finish_new_branch_existing_confirmation(app, true);
+            }
+            KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                app.new_branch_confirm_yes = false;
+                finish_new_branch_existing_confirmation(app, false);
+            }
+            KeyCode::Enter => {
+                finish_new_branch_existing_confirmation(app, app.new_branch_confirm_yes)
+            }
+            _ => {}
+        }
+        return;
+    }
+
     match text_input::handle_key(app, code, modifiers) {
         TextInputKeyResult::Cancel => {
             app.active_action = ActiveAction::None;
@@ -692,6 +760,19 @@ fn handle_new_branch_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) 
             let branch = app.input_buffer.trim().to_string();
             if branch.is_empty() {
                 return;
+            }
+            match git::branch_exists(&app.repo_root, &branch) {
+                Ok(true) => {
+                    app.overlay_error = None;
+                    app.new_branch_confirm_existing = Some(branch);
+                    app.new_branch_confirm_yes = false;
+                    return;
+                }
+                Ok(false) => {}
+                Err(e) => {
+                    app.overlay_error = Some(format!("Failed to inspect branch: {e}"));
+                    return;
+                }
             }
             app.overlay_error = None;
             app.new_branch_loading = true;
@@ -853,17 +934,13 @@ fn poll_sync_updates(app: &mut App) {
     let mut disconnected = false;
 
     if let Some(receiver) = app.sync_receiver.as_ref() {
-        loop {
-            match receiver.try_recv() {
-                Ok(result) => {
-                    completed = Some(result);
-                    break;
-                }
-                Err(TryRecvError::Empty) => break,
-                Err(TryRecvError::Disconnected) => {
-                    disconnected = true;
-                    break;
-                }
+        match receiver.try_recv() {
+            Ok(result) => {
+                completed = Some(result);
+            }
+            Err(TryRecvError::Empty) => {}
+            Err(TryRecvError::Disconnected) => {
+                disconnected = true;
             }
         }
     }
@@ -885,24 +962,46 @@ fn handle_delete_key(app: &mut App, code: KeyCode) {
     if app.delete_loading {
         return;
     }
-    let deletable_len = app.deletable_worktrees().len();
+
+    if app.delete_warn_current {
+        match code {
+            KeyCode::Left | KeyCode::Up | KeyCode::Char('h') | KeyCode::Char('k') => {
+                app.delete_confirm_yes = true;
+            }
+            KeyCode::Right | KeyCode::Down | KeyCode::Char('j') | KeyCode::Char('l') => {
+                app.delete_confirm_yes = false;
+            }
+            KeyCode::Char('y') | KeyCode::Char('Y') => {
+                app.delete_confirm_yes = true;
+                finish_delete_current_warning(app, true);
+            }
+            KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                app.delete_confirm_yes = false;
+                finish_delete_current_warning(app, false);
+            }
+            KeyCode::Enter => finish_delete_current_warning(app, app.delete_confirm_yes),
+            _ => {}
+        }
+        return;
+    }
 
     if app.delete_confirming {
         match code {
-            KeyCode::Enter | KeyCode::Char('y') | KeyCode::Char('Y') => {
-                let path = app
-                    .deletable_worktrees()
-                    .get(app.overlay_index)
-                    .map(|wt| wt.path.clone());
-                app.delete_confirming = false;
-                if let Some(path) = path {
-                    app.delete_loading = true;
-                    app.delete_pending = Some(path);
-                }
+            KeyCode::Left | KeyCode::Up | KeyCode::Char('h') | KeyCode::Char('k') => {
+                app.delete_confirm_yes = true;
+            }
+            KeyCode::Right | KeyCode::Down | KeyCode::Char('j') | KeyCode::Char('l') => {
+                app.delete_confirm_yes = false;
+            }
+            KeyCode::Char('y') | KeyCode::Char('Y') => {
+                app.delete_confirm_yes = true;
+                finish_delete_confirmation(app, true);
             }
             KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
-                app.delete_confirming = false;
+                app.delete_confirm_yes = false;
+                finish_delete_confirmation(app, false);
             }
+            KeyCode::Enter => finish_delete_confirmation(app, app.delete_confirm_yes),
             _ => {}
         }
         return;
@@ -911,13 +1010,21 @@ fn handle_delete_key(app: &mut App, code: KeyCode) {
     match code {
         KeyCode::Esc => {
             app.active_action = ActiveAction::None;
+            app.delete_checked.clear();
             app.overlay_error = None;
         }
-        KeyCode::Up | KeyCode::Char('k') => app.overlay_index = app.overlay_index.saturating_sub(1),
-        KeyCode::Down | KeyCode::Char('j') => {
-            app.overlay_index = (app.overlay_index + 1).min(deletable_len.saturating_sub(1));
+        KeyCode::Up | KeyCode::Char('k') => {
+            let current = delete_cursor_idx(app);
+            app.overlay_index = app
+                .previous_deletable_worktree_idx(current)
+                .unwrap_or(current);
         }
-        KeyCode::Enter if deletable_len > 0 => app.delete_confirming = true,
+        KeyCode::Down | KeyCode::Char('j') => {
+            let current = delete_cursor_idx(app);
+            app.overlay_index = app.next_deletable_worktree_idx(current).unwrap_or(current);
+        }
+        KeyCode::Char(' ') => toggle_delete_selection(app, delete_cursor_idx(app)),
+        KeyCode::Enter => submit_delete_selection(app),
         _ => {}
     }
 }
@@ -1076,17 +1183,192 @@ fn handle_copy_secrets_confirm_click(app: &mut App, column: u16, row: u16) {
     }
 }
 
-fn delete_overlay_index_for_worktree(app: &App, worktree_idx: usize) -> usize {
-    let mut deletable_idx = 0;
-    for (i, wt) in app.worktrees.iter().enumerate() {
-        if !wt.is_main && !wt.is_current {
-            if i == worktree_idx {
-                return deletable_idx;
-            }
-            deletable_idx += 1;
+fn initial_delete_cursor_idx(app: &App) -> Option<usize> {
+    if app.selected_index >= app::COMMANDS.len() {
+        let wt_idx = app.selected_index - app::COMMANDS.len();
+        if app.is_deletable_worktree_idx(wt_idx) {
+            return Some(wt_idx);
         }
     }
-    0
+
+    app.first_deletable_worktree_idx()
+}
+
+fn delete_cursor_idx(app: &App) -> usize {
+    let fallback = app.first_deletable_worktree_idx().unwrap_or(0);
+    if app.is_deletable_worktree_idx(app.overlay_index) {
+        app.overlay_index
+    } else {
+        fallback
+    }
+}
+
+fn toggle_delete_selection(app: &mut App, wt_idx: usize) {
+    if !app.is_deletable_worktree_idx(wt_idx) {
+        return;
+    }
+
+    app.overlay_index = wt_idx;
+    if !app.delete_checked.insert(wt_idx) {
+        app.delete_checked.remove(&wt_idx);
+    }
+}
+
+fn submit_delete_selection(app: &mut App) {
+    let mut selected_indices: Vec<usize> = app.delete_checked.iter().copied().collect();
+    selected_indices.retain(|idx| app.is_deletable_worktree_idx(*idx));
+
+    let targets = if selected_indices.is_empty() {
+        if app.first_deletable_worktree_idx().is_some() {
+            vec![delete_cursor_idx(app)]
+        } else {
+            vec![]
+        }
+    } else {
+        selected_indices
+    };
+
+    if !targets.is_empty() {
+        app.overlay_index = targets[0];
+        app.delete_confirm_targets = targets;
+        app.delete_confirm_yes = false;
+        app.delete_confirming = true;
+    }
+}
+
+fn finish_delete_confirmation(app: &mut App, confirmed: bool) {
+    if !confirmed {
+        app.delete_confirming = false;
+        app.delete_confirm_targets.clear();
+        return;
+    }
+
+    if delete_targets_include_current(app) {
+        app.delete_confirming = false;
+        app.delete_warn_current = true;
+        app.delete_confirm_yes = false;
+        return;
+    }
+
+    start_delete_pending(app);
+}
+
+fn finish_delete_current_warning(app: &mut App, confirmed: bool) {
+    if !confirmed {
+        app.delete_warn_current = false;
+        app.delete_confirm_targets.clear();
+        return;
+    }
+
+    start_delete_pending(app);
+}
+
+fn start_delete_pending(app: &mut App) {
+    let includes_current = delete_targets_include_current(app);
+    let paths: Vec<String> = app
+        .delete_confirm_targets
+        .iter()
+        .copied()
+        .filter(|idx| app.is_deletable_worktree_idx(*idx))
+        .filter_map(|idx| app.worktrees.get(idx).map(|wt| wt.path.clone()))
+        .collect();
+
+    app.delete_confirming = false;
+    app.delete_warn_current = false;
+    app.delete_confirm_targets.clear();
+
+    if includes_current {
+        app.delete_redirect_path = app
+            .default_worktree_idx()
+            .and_then(|idx| app.worktrees.get(idx).map(|wt| wt.path.clone()));
+
+        if app.delete_redirect_path.is_none() {
+            app.overlay_error = Some("No default worktree available to fall back to".to_string());
+            return;
+        }
+    } else {
+        app.delete_redirect_path = None;
+    }
+
+    if !paths.is_empty() {
+        app.delete_loading = true;
+        app.delete_pending = Some(paths);
+    }
+}
+
+fn delete_targets_include_current(app: &App) -> bool {
+    app.delete_confirm_targets.iter().copied().any(|idx| {
+        app.worktrees
+            .get(idx)
+            .map(|wt| wt.is_current)
+            .unwrap_or(false)
+    })
+}
+
+fn handle_delete_confirm_click(app: &mut App, column: u16, row: u16) {
+    let popup_width = 60_u16;
+    let popup_height = if app.delete_warn_current {
+        11_u16
+    } else {
+        10_u16
+    };
+    let popup_x = app.frame_width.saturating_sub(popup_width) / 2;
+    let popup_y = app.frame_height.saturating_sub(popup_height) / 2;
+    let relative_x = column.saturating_sub(popup_x);
+    let relative_y = row.saturating_sub(popup_y);
+
+    if (5..=6).contains(&relative_y) {
+        if relative_x <= popup_width / 2 {
+            app.delete_confirm_yes = true;
+            if app.delete_warn_current {
+                finish_delete_current_warning(app, true);
+            } else {
+                finish_delete_confirmation(app, true);
+            }
+        } else {
+            app.delete_confirm_yes = false;
+            if app.delete_warn_current {
+                finish_delete_current_warning(app, false);
+            } else {
+                finish_delete_confirmation(app, false);
+            }
+        }
+    }
+}
+
+fn finish_new_branch_existing_confirmation(app: &mut App, confirmed: bool) {
+    let branch = app.new_branch_confirm_existing.take();
+
+    if !confirmed {
+        app.new_branch_use_existing = false;
+        return;
+    }
+
+    if let Some(branch) = branch {
+        app.new_branch_use_existing = true;
+        app.new_branch_loading = true;
+        app.new_branch_pending = Some(branch);
+        app.overlay_error = None;
+    }
+}
+
+fn handle_new_branch_confirm_click(app: &mut App, column: u16, row: u16) {
+    let popup_width = 48_u16;
+    let popup_height = 10_u16;
+    let popup_x = app.frame_width.saturating_sub(popup_width) / 2;
+    let popup_y = app.frame_height.saturating_sub(popup_height) / 2;
+    let relative_x = column.saturating_sub(popup_x);
+    let relative_y = row.saturating_sub(popup_y);
+
+    if (5..=6).contains(&relative_y) {
+        if relative_x <= popup_width / 2 {
+            app.new_branch_confirm_yes = true;
+            finish_new_branch_existing_confirmation(app, true);
+        } else {
+            app.new_branch_confirm_yes = false;
+            finish_new_branch_existing_confirmation(app, false);
+        }
+    }
 }
 
 fn handle_clone_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
