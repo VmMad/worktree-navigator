@@ -259,22 +259,33 @@ pub fn add_worktree(
     Ok((messages, dest))
 }
 
-pub fn remove_worktree(repo_root: &Path, worktree_path: &str) -> Result<Vec<String>> {
+pub fn remove_worktree(
+    repo_root: &Path,
+    worktree_path: &str,
+    is_workspace: bool,
+) -> Result<Vec<String>> {
     let mut messages = Vec::new();
-    let git_cwd = resolve_git_cwd(repo_root);
-    messages.push(format!("$ git worktree remove --force {worktree_path}"));
-
-    let output = Command::new("git")
-        .args(["worktree", "remove", "--force", worktree_path])
-        .current_dir(&git_cwd)
-        .output()
-        .context("Failed to run git worktree remove")?;
-
-    if output.status.success() {
-        messages.push(format!("✓ Removed worktree at {worktree_path}"));
+    if is_workspace {
+        messages.push(format!("$ rm -rf {worktree_path}"));
+        fs::remove_dir_all(worktree_path)
+            .with_context(|| format!("Failed to remove workspace repo {worktree_path}"))?;
+        messages.push(format!("✓ Removed workspace repo at {worktree_path}"));
     } else {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        messages.push(format!("✗ {}", stderr.trim()));
+        let git_cwd = resolve_git_cwd(repo_root);
+        messages.push(format!("$ git worktree remove --force {worktree_path}"));
+
+        let output = Command::new("git")
+            .args(["worktree", "remove", "--force", worktree_path])
+            .current_dir(&git_cwd)
+            .output()
+            .context("Failed to run git worktree remove")?;
+
+        if output.status.success() {
+            messages.push(format!("✓ Removed worktree at {worktree_path}"));
+        } else {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            messages.push(format!("✗ {}", stderr.trim()));
+        }
     }
 
     Ok(messages)
@@ -1394,8 +1405,8 @@ pub fn checkout_remote_branch(repo_root: &Path, remote: &str, branch: &str) -> R
 mod tests {
     use super::{
         add_worktree, detect_worktree_workspace, list_secret_files, list_workspace_worktrees,
-        normalize_checkout_remote_branch_input, read_git_origin_from_config, rename_worktree,
-        resolve_git_cwd,
+        normalize_checkout_remote_branch_input, read_git_origin_from_config, remove_worktree,
+        rename_worktree, resolve_git_cwd,
     };
     use crate::types::Worktree;
     use std::fs;
@@ -1579,6 +1590,23 @@ mod tests {
             ],
         );
         assert!(recreated_path.exists());
+
+        let _ = fs::remove_dir_all(workspace);
+    }
+
+    #[test]
+    fn remove_worktree_deletes_workspace_repo_directly() {
+        let workspace = make_temp_dir("workspace-delete");
+        fs::write(workspace.join(".wt-workspace"), "").expect("workspace marker should be written");
+
+        let repo = workspace.join("feat-team-branch");
+        fs::create_dir_all(&repo).expect("repo dir should be created");
+        init_repo(&repo);
+
+        remove_worktree(&workspace, repo.to_string_lossy().as_ref(), true)
+            .expect("workspace repo should be removed");
+
+        assert!(!repo.exists());
 
         let _ = fs::remove_dir_all(workspace);
     }
