@@ -139,6 +139,7 @@ fn main() -> Result<()> {
             || app.sync_pr_loading
             || app.clone_loading
             || app.new_branch_loading
+            || app.rename_loading
             || app.delete_loading
             || app.copy_secrets_loading
             || app.checkout_remote_is_loading()
@@ -182,6 +183,35 @@ fn main() -> Result<()> {
                 Err(e) => {
                     app.new_branch_loading = false;
                     app.overlay_error = Some(format!("Failed to create branch: {e}"));
+                }
+            }
+        }
+
+        if let Some((worktree, branch)) = app.rename_pending.take() {
+            match git::rename_worktree(&app.repo_root, &worktree, &branch, app.is_workspace) {
+                Ok(new_path) => {
+                    let renamed_current = worktree.is_current;
+                    let new_path_str = new_path.to_string_lossy().into_owned();
+                    app.rename_loading = false;
+                    app.rename_target_idx = None;
+                    app.active_action = ActiveAction::None;
+                    app.clear_input();
+                    refresh_worktrees(&mut app);
+                    if let Some(idx) = app
+                        .worktrees
+                        .iter()
+                        .position(|wt| wt.path == new_path_str.as_str())
+                    {
+                        app.selected_index = app::COMMANDS.len() + idx;
+                    }
+                    if renamed_current {
+                        app.exit_path = Some(new_path.to_string_lossy().into_owned());
+                        app.should_quit = true;
+                    }
+                }
+                Err(e) => {
+                    app.rename_loading = false;
+                    app.overlay_error = Some(format!("Failed to rename worktree: {e}"));
                 }
             }
         }
@@ -313,6 +343,7 @@ fn handle_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
 
     match app.active_action {
         ActiveAction::NewBranch => handle_new_branch_key(app, code, modifiers),
+        ActiveAction::Rename => handle_rename_key(app, code, modifiers),
         ActiveAction::SyncPr => handle_sync_pr_key(app, code, modifiers),
         ActiveAction::SyncTrees => handle_sync_trees_key(app, code),
         ActiveAction::Delete => handle_delete_key(app, code),
@@ -486,6 +517,9 @@ fn open_action(app: &mut App, action: ActiveAction) {
     app.delete_confirming = false;
     app.overlay_error = None;
     app.new_branch_base = None;
+    app.rename_loading = false;
+    app.rename_target_idx = None;
+    app.rename_pending = None;
 
     if action == ActiveAction::NewBranch {
         let idx = app.selected_index;
@@ -495,6 +529,34 @@ fn open_action(app: &mut App, action: ActiveAction) {
                 app.new_branch_base = Some(wt.branch.clone());
             }
         }
+    }
+
+    if action == ActiveAction::Rename {
+        let target_idx = app
+            .selected_worktree_idx()
+            .or_else(|| app.current_worktree_idx());
+        let Some(target_idx) = target_idx else {
+            app.overlay_error = Some("No worktree available to rename.".to_string());
+            app.active_action = ActiveAction::None;
+            return;
+        };
+        let Some(target) = app.worktrees.get(target_idx) else {
+            app.overlay_error = Some("No worktree available to rename.".to_string());
+            app.active_action = ActiveAction::None;
+            return;
+        };
+        if target.is_main {
+            app.overlay_error = Some("The default worktree can't be renamed.".to_string());
+            app.active_action = ActiveAction::None;
+            return;
+        }
+
+        app.rename_loading = false;
+        app.rename_target_idx = Some(target_idx);
+        app.rename_pending = None;
+        app.input_buffer = target.branch.clone();
+        app.input_cursor = app.input_buffer.chars().count();
+        app.reset_loading_animation();
     }
 
     if action == ActiveAction::SyncTrees {
@@ -635,7 +697,56 @@ fn handle_new_branch_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) 
             app.new_branch_loading = true;
             app.new_branch_pending = Some(branch);
         }
-        TextInputKeyResult::Updated | TextInputKeyResult::Ignored | TextInputKeyResult::Complete => {}
+        TextInputKeyResult::Updated
+        | TextInputKeyResult::Ignored
+        | TextInputKeyResult::Complete => {}
+    }
+}
+
+fn handle_rename_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
+    if app.rename_loading {
+        return;
+    }
+
+    match text_input::handle_key(app, code, modifiers) {
+        TextInputKeyResult::Cancel => {
+            app.active_action = ActiveAction::None;
+            app.rename_target_idx = None;
+            app.rename_pending = None;
+            app.overlay_error = None;
+            app.clear_input();
+        }
+        TextInputKeyResult::Submit => {
+            let branch = app.input_buffer.trim().to_string();
+            let Some(target_idx) = app.rename_target_idx else {
+                app.overlay_error = Some("No worktree selected for rename.".to_string());
+                return;
+            };
+            let Some(worktree) = app.worktrees.get(target_idx).cloned() else {
+                app.overlay_error = Some("No worktree selected for rename.".to_string());
+                return;
+            };
+            if branch.is_empty() {
+                return;
+            }
+            if app
+                .worktrees
+                .iter()
+                .enumerate()
+                .any(|(idx, wt)| idx != target_idx && wt.branch == branch)
+            {
+                app.overlay_error = Some(format!("'{branch}' is already checked out."));
+                return;
+            }
+
+            app.overlay_error = None;
+            app.reset_loading_animation();
+            app.rename_loading = true;
+            app.rename_pending = Some((worktree, branch));
+        }
+        TextInputKeyResult::Updated
+        | TextInputKeyResult::Ignored
+        | TextInputKeyResult::Complete => {}
     }
 }
 
@@ -674,7 +785,9 @@ fn handle_sync_pr_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
                 pr_number,
             ));
         }
-        TextInputKeyResult::Updated | TextInputKeyResult::Ignored | TextInputKeyResult::Complete => {}
+        TextInputKeyResult::Updated
+        | TextInputKeyResult::Ignored
+        | TextInputKeyResult::Complete => {}
     }
 }
 
@@ -1020,7 +1133,9 @@ fn handle_clone_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
                 ));
             }
         }
-        TextInputKeyResult::Updated | TextInputKeyResult::Ignored | TextInputKeyResult::Complete => {}
+        TextInputKeyResult::Updated
+        | TextInputKeyResult::Ignored
+        | TextInputKeyResult::Complete => {}
     }
 }
 
@@ -1141,8 +1256,7 @@ fn handle_checkout_remote_key(app: &mut App, code: KeyCode, modifiers: KeyModifi
                 }
                 app.overlay_error = None;
                 app.checkout_remote_phase = CheckoutRemotePhase::CreatingWorktree;
-                app.checkout_remote_pending =
-                    Some((app.checkout_remote_name.clone(), branch));
+                app.checkout_remote_pending = Some((app.checkout_remote_name.clone(), branch));
                 app.reset_loading_animation();
             }
             TextInputKeyResult::Updated | TextInputKeyResult::Ignored => {}
@@ -1161,9 +1275,7 @@ fn poll_checkout_remote_fetch(app: &mut App) {
         .as_ref()
         .and_then(|rx| match rx.try_recv() {
             Ok(r) => Some(r),
-            Err(TryRecvError::Disconnected) => {
-                Some(Err("Fetch ended unexpectedly.".to_string()))
-            }
+            Err(TryRecvError::Disconnected) => Some(Err("Fetch ended unexpectedly.".to_string())),
             Err(TryRecvError::Empty) => None,
         });
 
@@ -1218,6 +1330,12 @@ mod tests {
         assert!(!text_input::is_active(&app));
 
         app = test_app();
+        app.active_action = ActiveAction::Rename;
+        assert!(text_input::is_active(&app));
+        app.rename_loading = true;
+        assert!(!text_input::is_active(&app));
+
+        app = test_app();
         app.active_action = ActiveAction::SyncPr;
         assert!(text_input::is_active(&app));
         app.sync_pr_loading = true;
@@ -1243,10 +1361,17 @@ mod tests {
     fn handle_paste_inserts_into_all_text_input_overlays() {
         let editable_states = [
             (ActiveAction::NewBranch, CheckoutRemotePhase::SelectRemote),
+            (ActiveAction::Rename, CheckoutRemotePhase::SelectRemote),
             (ActiveAction::SyncPr, CheckoutRemotePhase::SelectRemote),
             (ActiveAction::CloneRepo, CheckoutRemotePhase::SelectRemote),
-            (ActiveAction::CheckoutRemote, CheckoutRemotePhase::SelectRemote),
-            (ActiveAction::CheckoutRemote, CheckoutRemotePhase::EnterBranch),
+            (
+                ActiveAction::CheckoutRemote,
+                CheckoutRemotePhase::SelectRemote,
+            ),
+            (
+                ActiveAction::CheckoutRemote,
+                CheckoutRemotePhase::EnterBranch,
+            ),
         ];
 
         for (action, phase) in editable_states {

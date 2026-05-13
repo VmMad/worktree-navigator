@@ -13,6 +13,7 @@ pub struct Worktree {
 pub enum ActiveAction {
     None,
     NewBranch,
+    Rename,
     SyncPr,
     SyncTrees,
     Delete,
