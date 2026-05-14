@@ -163,8 +163,8 @@ fn background_update_notice() -> Result<Option<UpdateNotice>> {
     let current = normalize_version(current);
 
     let now = now_unix_seconds();
-    if let Some(cache) = read_update_cache()
-        .filter(|cache| update_cache_is_fresh(cache.last_checked_unix, now))
+    if let Some(cache) =
+        read_update_cache().filter(|cache| update_cache_is_fresh(cache.last_checked_unix, now))
     {
         return Ok(cached_update_notice(&cache, &current));
     }
@@ -456,7 +456,10 @@ mod tests {
 
     #[test]
     fn cache_is_fresh_for_less_than_24_hours() {
-        assert!(update_cache_is_fresh(1_000, 1_000 + UPDATE_CACHE_TTL_SECS - 1));
+        assert!(update_cache_is_fresh(
+            1_000,
+            1_000 + UPDATE_CACHE_TTL_SECS - 1
+        ));
         assert!(!update_cache_is_fresh(1_000, 1_000 + UPDATE_CACHE_TTL_SECS));
     }
 

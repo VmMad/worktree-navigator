@@ -29,6 +29,26 @@ fn ensure_parent_dirs(path: &Path) -> Result<()> {
     Ok(())
 }
 
+fn fetch_remote_tracking_branch(
+    git_cwd: &Path,
+    remote: &str,
+    branch: &str,
+    quiet: bool,
+) -> Result<std::process::Output> {
+    let remote_refspec = format!("refs/heads/{branch}:refs/remotes/{remote}/{branch}");
+    let mut args = vec!["fetch", remote];
+    if quiet {
+        args.push("--quiet");
+    }
+    args.push(&remote_refspec);
+
+    Command::new("git")
+        .args(&args)
+        .current_dir(git_cwd)
+        .output()
+        .with_context(|| format!("Failed to run git fetch {remote} {remote_refspec}"))
+}
+
 fn git_branch_exists(repo_root: &Path, branch: &str) -> bool {
     Command::new("git")
         .args(["rev-parse", "--verify", &format!("refs/heads/{branch}")])
@@ -523,12 +543,9 @@ fn checkout_pr_as_worktree_impl(
     push_sync_pr_progress(
         tx,
         &mut messages,
-        format!("$ git fetch origin {branch_name}:{branch_name}"),
+        format!("$ git fetch origin refs/heads/{branch_name}:refs/remotes/origin/{branch_name}"),
     );
-    let fetch = Command::new("git")
-        .args(["fetch", "origin", &format!("{branch_name}:{branch_name}")])
-        .current_dir(&git_cwd)
-        .output();
+    let fetch = fetch_remote_tracking_branch(&git_cwd, "origin", &branch_name, false);
 
     match fetch {
         Ok(out) if !out.status.success() => {
@@ -566,17 +583,39 @@ fn checkout_pr_as_worktree_impl(
     let dest_str = dest.to_string_lossy().to_string();
     ensure_parent_dirs(&dest)?;
 
+    let local_branch_exists = git_branch_exists(&git_cwd, &branch_name);
+
     push_sync_pr_progress(
         tx,
         &mut messages,
-        format!("$ git worktree add {dest_str} {branch_name}"),
+        if local_branch_exists {
+            format!("$ git worktree add {dest_str} {branch_name}")
+        } else {
+            format!("$ git worktree add --track -b {branch_name} {dest_str} origin/{branch_name}")
+        },
     );
 
-    let output = Command::new("git")
-        .args(["worktree", "add", &dest_str, &branch_name])
-        .current_dir(&git_cwd)
-        .output()
-        .context("Failed to run git worktree add")?;
+    let output = if local_branch_exists {
+        Command::new("git")
+            .args(["worktree", "add", &dest_str, &branch_name])
+            .current_dir(&git_cwd)
+            .output()
+            .context("Failed to run git worktree add")?
+    } else {
+        Command::new("git")
+            .args([
+                "worktree",
+                "add",
+                "--track",
+                "-b",
+                &branch_name,
+                &dest_str,
+                &format!("origin/{branch_name}"),
+            ])
+            .current_dir(&git_cwd)
+            .output()
+            .context("Failed to run git worktree add")?
+    };
 
     if output.status.success() {
         push_sync_pr_progress(
@@ -584,6 +623,17 @@ fn checkout_pr_as_worktree_impl(
             &mut messages,
             format!("✓ PR #{pr_number} checked out at {dest_str}"),
         );
+
+        if local_branch_exists {
+            let new_worktree = Worktree {
+                path: dest_str.clone(),
+                branch: branch_name.clone(),
+                is_main: false,
+                is_current: false,
+                has_secrets: worktree_has_secrets(&dest),
+            };
+            sync_existing_pr_worktree(repo_root, pr_number, &new_worktree, tx, &mut messages)?;
+        }
     } else {
         let msg = describe_worktree_add_failure(
             &String::from_utf8_lossy(&output.stderr),
@@ -617,6 +667,32 @@ fn resolve_existing_pr_worktree(
     }
 
     if dest_exists {
+        if is_git_repo(dest) {
+            let existing_branch = current_branch(dest).with_context(|| {
+                format!(
+                    "Worktree path {} already exists, but its current branch could not be determined.",
+                    dest.display()
+                )
+            })?;
+
+            if existing_branch == branch_name {
+                return Ok(Some(Worktree {
+                    path: dest.to_string_lossy().to_string(),
+                    branch: existing_branch,
+                    is_main: false,
+                    is_current: false,
+                    has_secrets: worktree_has_secrets(dest),
+                }));
+            }
+
+            anyhow::bail!(
+                "Worktree path {} already exists, but it is checked out as '{}' instead of '{}'.",
+                dest.display(),
+                existing_branch,
+                branch_name
+            );
+        }
+
         anyhow::bail!(
             "Worktree path {} already exists, but it is not registered with git worktree.",
             dest.display()
@@ -634,12 +710,15 @@ fn sync_existing_pr_worktree(
     messages: &mut Vec<String>,
 ) -> Result<()> {
     let git_cwd = resolve_git_cwd(repo_root);
-    push_sync_pr_progress(tx, messages, "$ git fetch --all --quiet".to_string());
-    let fetch = Command::new("git")
-        .args(["fetch", "--all", "--quiet"])
-        .current_dir(&git_cwd)
-        .output()
-        .context("Failed to run git fetch --all")?;
+    push_sync_pr_progress(
+        tx,
+        messages,
+        format!(
+            "$ git fetch origin --quiet refs/heads/{}:refs/remotes/origin/{}",
+            wt.branch, wt.branch
+        ),
+    );
+    let fetch = fetch_remote_tracking_branch(&git_cwd, "origin", &wt.branch, true)?;
 
     if !fetch.status.success() {
         let err = command_failure_summary(&fetch, "Could not fetch remotes");
@@ -782,15 +861,12 @@ fn push_sync_pr_progress(
     }
 }
 
-/// Fetch from all remotes then fast-forward a single worktree to origin/<branch>.
+/// Fetch the tracked branch ref from origin, then fast-forward a single worktree to origin/<branch>.
 /// Returns (fetch_succeeded, SyncResult).
 pub fn sync_one_worktree(repo_root: &Path, wt: &Worktree) -> (bool, SyncResult) {
     let git_cwd = resolve_git_cwd(repo_root);
-    let fetch_ok = Command::new("git")
-        .args(["fetch", "--all", "--quiet"])
-        .current_dir(&git_cwd)
-        .status()
-        .map(|s| s.success())
+    let fetch_ok = fetch_remote_tracking_branch(&git_cwd, "origin", &wt.branch, true)
+        .map(|out| out.status.success())
         .unwrap_or(false);
 
     let remote_ref = format!("origin/{}", wt.branch);
@@ -2233,6 +2309,24 @@ mod tests {
             err.to_string(),
             "Worktree path /tmp/pr-123 already exists, but it is not registered with git worktree."
         );
+    }
+
+    #[test]
+    fn resolve_existing_pr_worktree_reuses_existing_git_checkout_at_dest() {
+        let workspace = make_temp_dir("existing-pr-checkout");
+        let dest = workspace.join("pr-123");
+        fs::create_dir_all(&dest).expect("checkout dir should be created");
+        init_repo(&dest);
+        git(&dest, &["checkout", "-b", "feature/pr-123"]);
+
+        let existing = resolve_existing_pr_worktree(&[], "feature/pr-123", &dest, true)
+            .expect("existing checkout should resolve")
+            .expect("matching checkout should be reused");
+
+        assert_eq!(existing.path, dest.to_string_lossy());
+        assert_eq!(existing.branch, "feature/pr-123");
+
+        let _ = fs::remove_dir_all(workspace);
     }
 
     #[test]
