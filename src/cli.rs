@@ -11,6 +11,9 @@ pub enum ParsedArgs {
     CheckoutPr {
         pr_number: u32,
     },
+    Checkout {
+        branch_name: String,
+    },
     Branch {
         branch_name: String,
         base: BranchBase,
@@ -51,6 +54,7 @@ where
     let command = args.remove(0);
     match command.as_str() {
         "pr" | "checkout-pr" => parse_pr(args),
+        "co" | "checkout" => parse_checkout(args),
         "b" | "branch" => parse_branch(args),
         "d" | "delete" => parse_delete(args),
         "--help" | "-h" | "help" => Ok(ParsedArgs::Help),
@@ -77,6 +81,21 @@ fn parse_pr(args: Vec<String>) -> Result<ParsedArgs> {
     }
 
     Ok(ParsedArgs::CheckoutPr { pr_number })
+}
+
+fn parse_checkout(args: Vec<String>) -> Result<ParsedArgs> {
+    if args.len() != 1 {
+        bail!("Usage: wt co <branch>");
+    }
+
+    let branch_name = args[0].trim();
+    if branch_name.is_empty() {
+        bail!("Branch name cannot be empty.");
+    }
+
+    Ok(ParsedArgs::Checkout {
+        branch_name: branch_name.to_string(),
+    })
 }
 
 fn parse_branch(args: Vec<String>) -> Result<ParsedArgs> {
@@ -158,33 +177,49 @@ fn ensure_auto_base(base: &BranchBase, flag: &str) -> Result<()> {
     Ok(())
 }
 
-pub fn print_help() {
-    println!(
-        "\
+pub fn help_text() -> &'static str {
+   "\
 wt opens the interactive worktree UI by default.
 
 Usage:
-  wt
-  wt pr <number>
-  wt b <branch> [--from-default|--from-current|--base <branch>]
-  wt d [branch] [--yes]
+ wt
+ wt <command> [args]
 
-Aliases:
-  wt checkout-pr <number>
-  wt branch <branch> [...]
-  wt delete [branch] [--yes]
+Available commands:
+ help                           Show this help output
+ pr <number>                    Checkout a pull request worktree
+ checkout-pr <number>           Alias for `pr`
+ co <branch>                    Jump to an existing worktree
+ checkout <branch>              Alias for `co`
+ b <branch> [base options]      Create a branch worktree
+ branch <branch> [base options] Alias for `b`
+ d [branch] [--yes]             Delete a worktree
+ delete [branch] [--yes]        Alias for `d`
 
-Existing flags:
-  wt --mark-tree
-  wt --update
-  wt --version
+Branch base options:
+ --from-default, -d             Branch from the repo default branch
+ --from-current                 Branch from the current branch
+ --base <branch>                Branch from an explicit base branch
+
+Global flags:
+ --help, -h                     Show this help output
+ --mark-tree                    Mark the current directory as a workspace root
+ --update                       Update wt to the latest release
+ --version, -V                  Show the current wt version
 "
-    );
+}
+
+pub fn print_help() {
+    if std::env::var_os("WT_CWD").is_some() {
+        eprintln!("{}", help_text());
+    } else {
+        println!("{}", help_text());
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{BranchBase, ParsedArgs, parse_args};
+    use super::{BranchBase, ParsedArgs, help_text, parse_args};
 
     fn parse(input: &[&str]) -> ParsedArgs {
         parse_args(input.iter().map(|value| value.to_string())).expect("args should parse")
@@ -212,6 +247,22 @@ mod tests {
         assert_eq!(
             parse(&["checkout-pr", "#42"]),
             ParsedArgs::CheckoutPr { pr_number: 42 }
+        );
+    }
+
+    #[test]
+    fn parses_checkout_aliases() {
+        assert_eq!(
+            parse(&["co", "feat/test"]),
+            ParsedArgs::Checkout {
+                branch_name: "feat/test".to_string(),
+            }
+        );
+        assert_eq!(
+            parse(&["checkout", "release/1"]),
+            ParsedArgs::Checkout {
+                branch_name: "release/1".to_string(),
+            }
         );
     }
 
@@ -288,5 +339,30 @@ mod tests {
             err.to_string(),
             "Conflicting base options; cannot combine `--base` with another base selector."
         );
+    }
+
+    #[test]
+    fn help_lists_all_commands() {
+        let help = help_text();
+        for command in [
+            "help",
+            "pr <number>",
+            "checkout-pr <number>",
+            "co <branch>",
+            "checkout <branch>",
+            "b <branch> [base options]",
+            "branch <branch> [base options]",
+            "d [branch] [--yes]",
+            "delete [branch] [--yes]",
+            "--mark-tree",
+            "--update",
+            "--version, -V",
+            "--help, -h",
+        ] {
+            assert!(
+                help.contains(command),
+                "expected help output to include `{command}`"
+            );
+        }
     }
 }

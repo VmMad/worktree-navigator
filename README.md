@@ -50,6 +50,8 @@ Fast CLI commands:
 wt pr 123
 wt pr #123
 
+wt co feature/login
+
 wt b feature/login
 wt b feature/login --from-default
 wt b feature/login --base release/1
@@ -78,6 +80,7 @@ Main commands:
 CLI commands:
 
 - `wt pr <number>` or `wt checkout-pr <number>` fetch the PR head branch, create/select its worktree, and print the destination path
+- `wt co <branch>` or `wt checkout <branch>` jump to an existing worktree by branch and print its path
 - `wt b <branch>` or `wt branch <branch>` create a new branch worktree and print the destination path
 - `wt b <branch> --from-default` branch from the repo default branch instead of the current branch
 - `wt b <branch> --from-current` force the current-branch base explicitly
@@ -105,3 +108,11 @@ Navigation:
 - `git`
 - `gh` for PR sync
 - `zsh` or `bash` if you want the `wt` shell wrapper
+
+## Testing
+
+Run the CLI end-to-end suite with:
+
+```bash
+cargo test --test cli_e2e
+```
