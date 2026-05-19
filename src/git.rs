@@ -193,7 +193,8 @@ fn get_default_branch(git_repo: &Path) -> Option<String> {
 }
 
 pub fn default_branch(repo_root: &Path) -> Result<String> {
-    get_default_branch(repo_root)
+    let git_cwd = resolve_git_cwd(repo_root);
+    get_default_branch(&git_cwd)
         .filter(|branch| !branch.trim().is_empty())
         .ok_or_else(|| {
             anyhow::anyhow!("Could not determine the default branch for this repository.")
@@ -1993,6 +1994,34 @@ mod tests {
         );
         assert_eq!(
             default_branch(&repo).expect("default branch should resolve"),
+            "main"
+        );
+
+        let _ = fs::remove_dir_all(workspace);
+    }
+
+    #[test]
+    fn resolves_default_branch_from_workspace_root() {
+        let workspace = make_temp_dir("workspace-default-branch");
+        let repo = workspace.join("repo");
+        fs::create_dir_all(&repo).expect("repo dir should be created");
+        init_repo(&repo);
+        git(
+            &repo,
+            &["remote", "add", "origin", "git@github.com:owner/repo.git"],
+        );
+        git(
+            &repo,
+            &[
+                "symbolic-ref",
+                "refs/remotes/origin/HEAD",
+                "refs/remotes/origin/main",
+            ],
+        );
+        fs::write(workspace.join(".wt-workspace"), "").expect("workspace marker should exist");
+
+        assert_eq!(
+            default_branch(&workspace).expect("default branch should resolve from workspace"),
             "main"
         );
 

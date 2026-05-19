@@ -37,7 +37,11 @@ fn main() -> Result<()> {
     match args {
         ParsedArgs::Tui { mark_tree } => run_tui(cwd, mark_tree),
         ParsedArgs::Version => {
-            println!("wt v{}", version::current_version());
+            if std::env::var_os("WT_CWD").is_some() {
+                eprintln!("wt v{}", version::current_version());
+            } else {
+                println!("wt v{}", version::current_version());
+            }
             Ok(())
         }
         ParsedArgs::Update => update::run_manual_update(),
@@ -408,6 +412,10 @@ fn run_cli_command(cwd: &Path, command: ParsedArgs) -> Result<()> {
             let (_, dest) = git::checkout_pr_as_worktree(&context.repo_root, pr_number)?;
             println!("{}", dest.display());
         }
+        ParsedArgs::Checkout { branch_name } => {
+            let worktree = resolve_worktree_by_branch(&context, &branch_name)?;
+            println!("{}", worktree.path);
+        }
         ParsedArgs::Branch { branch_name, base } => {
             let base_branch = resolve_cli_branch_base(&context, &base)?;
             let (_, dest) =
@@ -426,7 +434,10 @@ fn run_cli_command(cwd: &Path, command: ParsedArgs) -> Result<()> {
                 println!("{}", context.repo_root.display());
             }
         }
-        ParsedArgs::Tui { .. } | ParsedArgs::Version | ParsedArgs::Update | ParsedArgs::Help => {
+        ParsedArgs::Tui { .. }
+        | ParsedArgs::Version
+        | ParsedArgs::Update
+        | ParsedArgs::Help => {
             unreachable!("handled before CLI execution")
         }
     }
@@ -446,13 +457,21 @@ fn resolve_cli_branch_base(context: &RepoContext, base: &BranchBase) -> Result<S
     }
 }
 
+fn resolve_worktree_by_branch(context: &RepoContext, branch_name: &str) -> Result<Worktree> {
+    resolve_worktree_by_branch_in(list_context_worktrees(context)?, branch_name)
+}
+
+fn resolve_worktree_by_branch_in(worktrees: Vec<Worktree>, branch_name: &str) -> Result<Worktree> {
+    worktrees
+        .into_iter()
+        .find(|worktree| worktree.branch == branch_name)
+        .ok_or_else(|| anyhow::anyhow!("No worktree found for branch '{branch_name}'."))
+}
+
 fn resolve_delete_target(context: &RepoContext, branch_name: Option<&str>) -> Result<Worktree> {
     let worktrees = list_context_worktrees(context)?;
     let target = if let Some(branch_name) = branch_name {
-        worktrees
-            .into_iter()
-            .find(|worktree| worktree.branch == branch_name)
-            .ok_or_else(|| anyhow::anyhow!("No worktree found for branch '{branch_name}'."))?
+        resolve_worktree_by_branch_in(worktrees, branch_name)?
     } else {
         worktrees.into_iter().find(|worktree| worktree.is_current).ok_or_else(|| {
             anyhow::anyhow!(
@@ -1730,11 +1749,11 @@ fn handle_paste(app: &mut App, text: &str) {
 mod tests {
     use std::path::PathBuf;
 
-    use super::handle_paste;
+    use super::{handle_paste, resolve_worktree_by_branch_in};
     use crate::{
         app::App,
         text_input,
-        types::{ActiveAction, CheckoutRemotePhase},
+        types::{ActiveAction, CheckoutRemotePhase, Worktree},
     };
 
     fn test_app() -> App {
@@ -1822,5 +1841,39 @@ mod tests {
 
         handle_paste(&mut app, "feature/test");
         assert!(app.input_buffer.is_empty());
+    }
+
+    #[test]
+    fn resolve_worktree_by_branch_matches_existing_branch() {
+        let worktree = resolve_worktree_by_branch_in(
+            vec![
+                Worktree {
+                    path: "/repo/main".to_string(),
+                    branch: "main".to_string(),
+                    is_main: true,
+                    is_current: false,
+                    has_secrets: false,
+                },
+                Worktree {
+                    path: "/repo/feature-test".to_string(),
+                    branch: "feature/test".to_string(),
+                    is_main: false,
+                    is_current: true,
+                    has_secrets: false,
+                },
+            ],
+            "feature/test",
+        )
+        .expect("branch should resolve");
+
+        assert_eq!(worktree.path, "/repo/feature-test");
+    }
+
+    #[test]
+    fn resolve_worktree_by_branch_errors_for_missing_branch() {
+        let err = resolve_worktree_by_branch_in(Vec::new(), "feature/test")
+            .expect_err("missing branch should fail");
+
+        assert_eq!(err.to_string(), "No worktree found for branch 'feature/test'.");
     }
 }
