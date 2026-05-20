@@ -413,7 +413,7 @@ fn run_cli_command(cwd: &Path, command: ParsedArgs) -> Result<()> {
             println!("{}", dest.display());
         }
         ParsedArgs::Checkout { branch_name } => {
-            let worktree = resolve_worktree_by_branch(&context, &branch_name)?;
+            let worktree = resolve_checkout_target(&context, branch_name.as_deref())?;
             println!("{}", worktree.path);
         }
         ParsedArgs::Branch { branch_name, base } => {
@@ -457,8 +457,12 @@ fn resolve_cli_branch_base(context: &RepoContext, base: &BranchBase) -> Result<S
     }
 }
 
-fn resolve_worktree_by_branch(context: &RepoContext, branch_name: &str) -> Result<Worktree> {
-    resolve_worktree_by_branch_in(list_context_worktrees(context)?, branch_name)
+fn resolve_checkout_target(context: &RepoContext, branch_name: Option<&str>) -> Result<Worktree> {
+    let worktrees = list_context_worktrees(context)?;
+    match branch_name {
+        Some(branch_name) => resolve_worktree_by_branch_in(worktrees, branch_name),
+        None => resolve_default_worktree_in(worktrees),
+    }
 }
 
 fn resolve_worktree_by_branch_in(worktrees: Vec<Worktree>, branch_name: &str) -> Result<Worktree> {
@@ -466,6 +470,13 @@ fn resolve_worktree_by_branch_in(worktrees: Vec<Worktree>, branch_name: &str) ->
         .into_iter()
         .find(|worktree| worktree.branch == branch_name)
         .ok_or_else(|| anyhow::anyhow!("No worktree found for branch '{branch_name}'."))
+}
+
+fn resolve_default_worktree_in(worktrees: Vec<Worktree>) -> Result<Worktree> {
+    worktrees
+        .into_iter()
+        .find(|worktree| worktree.is_main)
+        .ok_or_else(|| anyhow::anyhow!("No default-branch worktree found."))
 }
 
 fn resolve_delete_target(context: &RepoContext, branch_name: Option<&str>) -> Result<Worktree> {

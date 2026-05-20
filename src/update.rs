@@ -1,6 +1,6 @@
-use std::fs;
+use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::mpsc::{self, Receiver};
 use std::thread;
@@ -16,6 +16,18 @@ const UPDATE_CACHE_FILE: &str = "update-check.json";
 const UPDATE_CACHE_TTL_SECS: u64 = 24 * 60 * 60;
 const INSTALL_STATE_FILE: &str = "install-state.json";
 const BINARY_NAME_PREFIX: &str = "worktree-navigator-";
+const SHELL_WRAPPER_MARKER: &str = "# worktree-navigator wt()";
+const SHELL_WRAPPER_BODY: &str = "\
+# worktree-navigator wt()\n\
+wt() {\n\
+  local target\n\
+  target=$(WT_CWD=\"$PWD\" command wt \"$@\")\n\
+  local exit_code=$?\n\
+  if [[ -n \"$target\" && -d \"$target\" ]]; then\n\
+    cd \"$target\"\n\
+  fi\n\
+  return $exit_code\n\
+}\n";
 
 #[derive(Debug, Serialize, Deserialize)]
 struct UpdateCache {
@@ -36,6 +48,19 @@ struct LatestRelease {
     version: String,
     asset_name: Option<String>,
     from_cache: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct SupportedShell {
+    name: &'static str,
+    rc_file_name: &'static str,
+}
+
+#[derive(Debug)]
+struct ShellRefresh {
+    shell: SupportedShell,
+    rc_path: PathBuf,
+    wrote_wrapper: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -136,6 +161,24 @@ fn run_update_internal(asset_name_hint: Option<&str>, latest_hint: Option<&str>)
         )?;
     } else {
         writeln!(stderr, "Updated wt at {}", target.to_string_lossy())?;
+    }
+
+    if let Some(refresh) = refresh_shell_wrapper()? {
+        if refresh.wrote_wrapper {
+            writeln!(
+                stderr,
+                "Added wt() to {} for {}",
+                refresh.rc_path.to_string_lossy(),
+                refresh.shell.name
+            )?;
+        } else {
+            writeln!(
+                stderr,
+                "wt() already present in {}",
+                refresh.rc_path.to_string_lossy()
+            )?;
+        }
+        writeln!(stderr, "Restart your console to reload the wt shell wrapper.")?;
     }
 
     Ok(())
@@ -257,6 +300,80 @@ fn latest_release_command(timeout_secs: Option<u64>) -> Command {
 
 fn preferred_asset_name() -> Option<String> {
     read_install_state().and_then(|s| s.preferred_asset_name)
+}
+
+fn refresh_shell_wrapper() -> Result<Option<ShellRefresh>> {
+    let Some(shell) = detected_shell() else {
+        return Ok(None);
+    };
+
+    let home = std::env::var("HOME").context("HOME is not set")?;
+    let rc_path = PathBuf::from(home).join(shell.rc_file_name);
+    let wrote_wrapper = ensure_shell_wrapper(&rc_path)?;
+
+    Ok(Some(ShellRefresh {
+        shell,
+        rc_path,
+        wrote_wrapper,
+    }))
+}
+
+fn detected_shell() -> Option<SupportedShell> {
+    let shell = std::env::var("SHELL").ok()?;
+    let shell_name = Path::new(&shell).file_name()?.to_str()?;
+    match shell_name {
+        "zsh" => Some(SupportedShell {
+            name: "zsh",
+            rc_file_name: ".zshrc",
+        }),
+        "bash" => Some(SupportedShell {
+            name: "bash",
+            rc_file_name: ".bashrc",
+        }),
+        _ => None,
+    }
+}
+
+fn ensure_shell_wrapper(rc_path: &Path) -> Result<bool> {
+    let existing = match fs::read_to_string(rc_path) {
+        Ok(content) => content,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => String::new(),
+        Err(err) => {
+            return Err(err).with_context(|| {
+                format!("Failed to read shell config at {}", rc_path.to_string_lossy())
+            });
+        }
+    };
+
+    if existing.contains(SHELL_WRAPPER_MARKER) {
+        return Ok(false);
+    }
+
+    if let Some(parent) = rc_path.parent() {
+        fs::create_dir_all(parent).with_context(|| {
+            format!(
+                "Failed to create shell config directory for {}",
+                rc_path.to_string_lossy()
+            )
+        })?;
+    }
+
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(rc_path)
+        .with_context(|| format!("Failed to open shell config at {}", rc_path.to_string_lossy()))?;
+
+    if !existing.is_empty() {
+        if !existing.ends_with('\n') {
+            file.write_all(b"\n")?;
+        }
+        file.write_all(b"\n")?;
+    }
+    file.write_all(SHELL_WRAPPER_BODY.as_bytes())
+        .with_context(|| format!("Failed to update shell config at {}", rc_path.to_string_lossy()))?;
+
+    Ok(true)
 }
 
 fn normalize_version(raw: &str) -> String {
@@ -486,5 +603,23 @@ mod tests {
             ..older_cache
         };
         assert!(cached_update_notice(&no_asset_cache, current).is_none());
+    }
+
+    #[test]
+    fn ensure_shell_wrapper_appends_wrapper_once() {
+        let temp_dir = std::env::temp_dir().join(format!("wt-shell-wrapper-{}", now_unix_seconds()));
+        fs::create_dir_all(&temp_dir).expect("temp dir should exist");
+        let rc_path = temp_dir.join(".zshrc");
+
+        assert!(ensure_shell_wrapper(&rc_path).expect("first install should succeed"));
+        let first = fs::read_to_string(&rc_path).expect("shell config should exist");
+        assert!(first.contains(SHELL_WRAPPER_MARKER));
+        assert!(first.contains("target=$(WT_CWD=\"$PWD\" command wt \"$@\")"));
+
+        assert!(!ensure_shell_wrapper(&rc_path).expect("second install should be a no-op"));
+        let second = fs::read_to_string(&rc_path).expect("shell config should still exist");
+        assert_eq!(first, second);
+
+        let _ = fs::remove_dir_all(temp_dir);
     }
 }
