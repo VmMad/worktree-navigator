@@ -12,12 +12,21 @@ use crate::{
     version,
 };
 
+const MIN_TERMINAL_WIDTH: u16 = 24;
+const MIN_TERMINAL_HEIGHT: u16 = 8;
+
 pub fn draw(f: &mut Frame, app: &mut App) {
     app.item_rows.clear();
 
     let area = f.area();
     app.frame_width = area.width;
     app.frame_height = area.height;
+
+    if area.width < MIN_TERMINAL_WIDTH || area.height < MIN_TERMINAL_HEIGHT {
+        draw_too_small(f, area);
+        return;
+    }
+
     draw_panel(f, app, area);
 
     let show_sync_overlay = app.active_action == ActiveAction::SyncTrees
@@ -59,6 +68,33 @@ pub fn draw(f: &mut Frame, app: &mut App) {
             err_area,
         );
     }
+}
+
+fn draw_too_small(f: &mut Frame, area: Rect) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+
+    f.render_widget(Clear, area);
+    f.render_widget(
+        Paragraph::new(vec![
+            Line::from(Span::styled(
+                "Terminal too small",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ))
+            .alignment(Alignment::Center),
+            Line::from(Span::styled(
+                "Resize to continue",
+                Style::default().fg(Color::DarkGray),
+            ))
+            .alignment(Alignment::Center),
+        ])
+        .alignment(Alignment::Center)
+        .wrap(Wrap { trim: false }),
+        area,
+    );
 }
 
 // ─────────────────────────────── Main panel ─────────────────────────────────
@@ -104,6 +140,10 @@ fn draw_panel(f: &mut Frame, app: &mut App, area: Rect) {
     let inner = block.inner(area);
     f.render_widget(block, area);
 
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+
     let sections = Layout::default()
         .direction(Direction::Vertical)
         .margin(1)
@@ -120,6 +160,10 @@ fn draw_panel(f: &mut Frame, app: &mut App, area: Rect) {
 }
 
 fn draw_commands(f: &mut Frame, app: &mut App, area: Rect) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+
     let sync_select = app.active_action == ActiveAction::SyncTrees
         && !app.sync_loading
         && app.sync_results.is_empty();
@@ -140,17 +184,23 @@ fn draw_commands(f: &mut Frame, app: &mut App, area: Rect) {
             .add_modifier(Modifier::BOLD)
     };
 
+    let header_area = Rect {
+        x: area.x,
+        y: area.y,
+        width: area.width,
+        height: 1,
+    };
     f.render_widget(
         Paragraph::new(Line::from(Span::styled("COMMANDS", header_style))),
-        Rect {
-            x: area.x,
-            y: area.y,
-            width: area.width,
-            height: 1,
-        },
+        header_area,
     );
 
-    for (i, command) in COMMANDS.iter().enumerate() {
+    let visible_rows = area.height.saturating_sub(1) as usize;
+    if visible_rows == 0 {
+        return;
+    }
+
+    for (i, command) in COMMANDS.iter().take(visible_rows).enumerate() {
         let row = area.y + 1 + i as u16;
         app.item_rows.push((row, i));
 
@@ -232,6 +282,10 @@ fn draw_commands(f: &mut Frame, app: &mut App, area: Rect) {
 }
 
 fn draw_worktrees(f: &mut Frame, app: &mut App, area: Rect) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+
     let sync_select = app.active_action == ActiveAction::SyncTrees
         && !app.sync_loading
         && app.sync_results.is_empty();
@@ -455,6 +509,10 @@ fn draw_worktrees(f: &mut Frame, app: &mut App, area: Rect) {
 }
 
 fn draw_help(f: &mut Frame, app: &App, area: Rect) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+
     let sync_select = app.active_action == ActiveAction::SyncTrees
         && !app.sync_loading
         && app.sync_results.is_empty();
@@ -1370,7 +1428,7 @@ fn draw_delete_overlay(f: &mut Frame, app: &App, area: Rect) {
             "[ No ]"
         };
 
-        let mut lines = vec![
+        let mut body_lines = vec![
             Line::from(Span::styled(
                 headline,
                 Style::default()
@@ -1385,26 +1443,26 @@ fn draw_delete_overlay(f: &mut Frame, app: &App, area: Rect) {
         ];
 
         if app.delete_warn_current {
-            lines.push(Line::from(Span::styled(
+            body_lines.push(Line::from(Span::styled(
                 detail,
                 Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
             )));
-            lines.push(Line::from(Span::styled(
+            body_lines.push(Line::from(Span::styled(
                 supporting_line,
                 Style::default().fg(Color::DarkGray),
             )));
         } else if branches.len() == 1 {
-            lines.push(Line::from(Span::styled(
+            body_lines.push(Line::from(Span::styled(
                 detail,
                 Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
             )));
-            lines.push(Line::from(Span::styled(
+            body_lines.push(Line::from(Span::styled(
                 supporting_line,
                 Style::default().fg(Color::DarkGray),
             )));
         } else {
             for branch in branches.iter().take(3) {
-                lines.push(Line::from(vec![
+                body_lines.push(Line::from(vec![
                     Span::styled("• ", Style::default().fg(Color::Red)),
                     Span::styled(
                         branch.clone(),
@@ -1415,31 +1473,149 @@ fn draw_delete_overlay(f: &mut Frame, app: &App, area: Rect) {
                 ]));
             }
             if branches.len() > 3 {
-                lines.push(Line::from(Span::styled(
+            body_lines.push(Line::from(Span::styled(
                     format!("... and {} more", branches.len() - 3),
                     Style::default().fg(Color::DarkGray),
                 )));
             }
         }
 
-        lines.push(Line::from(vec![]));
-        lines.push(
+        if inner.height == 0 {
+            return;
+        }
+
+        let footer_height = if inner.height >= 2 { 2 } else { 1 };
+        let sections = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Min(0), Constraint::Length(footer_height)])
+            .split(inner);
+        let body_area = sections[0];
+        let footer_area = sections[1];
+
+        if body_area.height > 0 {
+            f.render_widget(
+            Paragraph::new(body_lines).wrap(Wrap { trim: false }),
+            body_area,
+            );
+        }
+
+        let footer_rows = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints(if footer_height == 2 {
+            vec![Constraint::Length(1), Constraint::Length(1)]
+            } else {
+            vec![Constraint::Length(1)]
+            })
+            .split(footer_area);
+
+        f.render_widget(
+            Paragraph::new(
             Line::from(vec![
-                Span::styled("  Yes  ", yes_style),
-                Span::styled("   ", Style::default()),
-                Span::styled(no_label, no_style),
+            Span::styled("  Yes  ", yes_style),
+            Span::styled("   ", Style::default()),
+            Span::styled(no_label, no_style),
             ])
             .alignment(Alignment::Center),
-        );
-        lines.push(
-            Line::from(Span::styled(
-                "Use arrows, Enter, or Esc",
-                Style::default().fg(Color::DarkGray),
-            ))
-            .alignment(Alignment::Center),
+            ),
+            footer_rows[0],
         );
 
-        f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+        if footer_height == 2 {
+            f.render_widget(
+            Paragraph::new(
+                Line::from(Span::styled(
+                    "Use arrows, Enter, or Esc",
+                    Style::default().fg(Color::DarkGray),
+                ))
+                .alignment(Alignment::Center),
+            ),
+            footer_rows[1],
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use ratatui::{Terminal, backend::TestBackend};
+
+    use crate::{
+        app::App,
+        types::{ActiveAction, Worktree},
+    };
+
+    use super::{draw, draw_delete_overlay};
+
+    #[test]
+    fn delete_overlay_keeps_actions_visible_on_small_screens() {
+        let backend = TestBackend::new(40, 8);
+        let mut terminal = Terminal::new(backend).expect("test terminal should be created");
+        let mut app = App::new(PathBuf::from("/tmp/repo"));
+        app.worktrees = vec![
+            Worktree {
+            path: "/tmp/repo/main".to_string(),
+            branch: "main".to_string(),
+            is_main: true,
+            is_current: true,
+            has_secrets: false,
+            },
+            Worktree {
+            path: "/tmp/repo/feature-small".to_string(),
+            branch: "feature/small".to_string(),
+            is_main: false,
+            is_current: false,
+            has_secrets: false,
+            },
+        ];
+        app.active_action = ActiveAction::Delete;
+        app.delete_confirm_targets = vec![1];
+        app.delete_confirm_yes = true;
+
+        terminal
+            .draw(|frame| draw_delete_overlay(frame, &app, frame.area()))
+            .expect("delete overlay should render");
+
+        let buffer = terminal.backend().buffer();
+        let visible_text = buffer
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+
+        assert!(visible_text.contains("Yes"));
+        assert!(visible_text.contains("No"));
+    }
+
+    #[test]
+    fn full_ui_renders_without_overflow_on_small_screens() {
+        let backend = TestBackend::new(40, 8);
+        let mut terminal = Terminal::new(backend).expect("test terminal should be created");
+        let mut app = App::new(PathBuf::from("/tmp/repo"));
+        app.worktrees = vec![Worktree {
+            path: "/tmp/repo/main".to_string(),
+            branch: "main".to_string(),
+            is_main: true,
+            is_current: true,
+            has_secrets: false,
+        }];
+        app.worktrees_loading = false;
+
+        terminal
+            .draw(|frame| draw(frame, &mut app))
+            .expect("full ui should render on small screens");
+    }
+
+    #[test]
+    fn tiny_terminal_renders_fallback_without_panicking() {
+        let backend = TestBackend::new(12, 4);
+        let mut terminal = Terminal::new(backend).expect("test terminal should be created");
+        let mut app = App::new(PathBuf::from("/tmp/repo"));
+
+        terminal
+            .draw(|frame| draw(frame, &mut app))
+            .expect("tiny terminal should render fallback");
     }
 }
 
