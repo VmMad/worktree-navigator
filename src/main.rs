@@ -8,12 +8,14 @@ mod update;
 mod version;
 
 use std::io::{Write, stderr};
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::TryRecvError;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
 use crossterm::{
+    cursor::Show,
     event::{
         self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
         Event, KeyCode, KeyModifiers, MouseButton, MouseEventKind,
@@ -29,6 +31,28 @@ use text_input::TextInputKeyResult;
 use types::{
     ActiveAction, CheckoutRemotePhase, CloneEvent, CopySecretsPhase, SyncPrEvent, Worktree,
 };
+
+struct TuiCleanupGuard {
+    active: bool,
+}
+
+impl TuiCleanupGuard {
+    fn new() -> Self {
+        Self { active: true }
+    }
+
+    fn disarm(&mut self) {
+        self.active = false;
+    }
+}
+
+impl Drop for TuiCleanupGuard {
+    fn drop(&mut self) {
+        if self.active {
+            let _ = cleanup_terminal_state();
+        }
+    }
+}
 
 fn main() -> Result<()> {
     let args = cli::parse_args(std::env::args().skip(1))?;
@@ -124,6 +148,7 @@ fn run_tui(cwd: PathBuf, mark_tree: bool) -> Result<()> {
         EnableMouseCapture,
         EnableBracketedPaste
     )?;
+    let mut cleanup_guard = TuiCleanupGuard::new();
     let backend = CrosstermBackend::new(stderr);
     let mut terminal = Terminal::new(backend)?;
     let mut mouse_capture_enabled = true;
@@ -165,218 +190,217 @@ fn run_tui(cwd: PathBuf, mark_tree: bool) -> Result<()> {
         }
     }
 
-    loop {
-        if let Some(rx) = update_notice_rx.as_ref() {
-            match rx.try_recv() {
-                Ok(notice) => {
-                    update_notice = notice;
-                    update_notice_rx = None;
+    let run_result = catch_unwind(AssertUnwindSafe(|| -> Result<()> {
+        loop {
+            if let Some(rx) = update_notice_rx.as_ref() {
+                match rx.try_recv() {
+                    Ok(notice) => {
+                        update_notice = notice;
+                        update_notice_rx = None;
+                    }
+                    Err(TryRecvError::Empty) => {}
+                    Err(TryRecvError::Disconnected) => update_notice_rx = None,
                 }
-                Err(TryRecvError::Empty) => {}
-                Err(TryRecvError::Disconnected) => update_notice_rx = None,
             }
-        }
 
-        poll_clone_updates(&mut app);
-        poll_sync_pr_updates(&mut app);
-        poll_sync_updates(&mut app);
-        poll_checkout_remote_fetch(&mut app);
-        if app.sync_loading
-            || app.sync_pr_loading
-            || app.clone_loading
-            || app.new_branch_loading
-            || app.rename_loading
-            || app.delete_loading
-            || app.copy_secrets_loading
-            || app.checkout_remote_is_loading()
-        {
-            app.advance_loading_animation();
-        }
-        let wants_mouse_capture = text_input::wants_mouse_capture(&app);
-        if wants_mouse_capture != mouse_capture_enabled {
-            if wants_mouse_capture {
-                execute!(terminal.backend_mut(), EnableMouseCapture)?;
-            } else {
-                execute!(terminal.backend_mut(), DisableMouseCapture)?;
+            poll_clone_updates(&mut app);
+            poll_sync_pr_updates(&mut app);
+            poll_sync_updates(&mut app);
+            poll_checkout_remote_fetch(&mut app);
+            if app.sync_loading
+                || app.sync_pr_loading
+                || app.clone_loading
+                || app.new_branch_loading
+                || app.rename_loading
+                || app.delete_loading
+                || app.copy_secrets_loading
+                || app.checkout_remote_is_loading()
+            {
+                app.advance_loading_animation();
             }
-            mouse_capture_enabled = wants_mouse_capture;
-        }
-        terminal.draw(|f| ui::draw(f, &mut app))?;
+            let wants_mouse_capture = text_input::wants_mouse_capture(&app);
+            if wants_mouse_capture != mouse_capture_enabled {
+                if wants_mouse_capture {
+                    execute!(terminal.backend_mut(), EnableMouseCapture)?;
+                } else {
+                    execute!(terminal.backend_mut(), DisableMouseCapture)?;
+                }
+                mouse_capture_enabled = wants_mouse_capture;
+            }
+            terminal.draw(|f| ui::draw(f, &mut app))?;
 
-        // Start sync after the loading frame has been rendered.
-        if app.sync_pending {
-            app.sync_pending = false;
-            let wt = app.worktrees.get(app.sync_selected_idx).cloned();
-            if let Some(wt) = wt {
+            // Start sync after the loading frame has been rendered.
+            if app.sync_pending {
+                app.sync_pending = false;
+                let wt = app.worktrees.get(app.sync_selected_idx).cloned();
+                if let Some(wt) = wt {
+                    let root = app.repo_root.clone();
+                    app.sync_receiver = Some(git::start_sync_one_worktree(root, wt));
+                }
+            }
+
+            // Execute pending new branch after the loading frame has been rendered.
+            if let Some(branch) = app.new_branch_pending.take() {
                 let root = app.repo_root.clone();
-                app.sync_receiver = Some(git::start_sync_one_worktree(root, wt));
-            }
-        }
-
-        // Execute pending new branch after the loading frame has been rendered.
-        if let Some(branch) = app.new_branch_pending.take() {
-            let root = app.repo_root.clone();
-            let result = if app.new_branch_use_existing {
-                git::add_worktree_from_existing(&root, &branch)
-            } else {
-                let base = app.new_branch_base.as_deref();
-                git::add_worktree(&root, &branch, base)
-            };
-            match result {
-                Ok((_, dest)) => {
-                    app.new_branch_loading = false;
-                    app.new_branch_use_existing = false;
-                    app.new_branch_confirm_existing = None;
-                    app.active_action = ActiveAction::None;
-                    app.clear_input();
-                    refresh_worktrees(&mut app);
-                    app.exit_path = Some(dest.to_string_lossy().into_owned());
-                    app.should_quit = true;
-                }
-                Err(e) => {
-                    app.new_branch_loading = false;
-                    app.new_branch_use_existing = false;
-                    app.overlay_error = Some(format!("Failed to create branch: {e}"));
-                }
-            }
-        }
-
-        if let Some((worktree, branch)) = app.rename_pending.take() {
-            match git::rename_worktree(&app.repo_root, &worktree, &branch, app.is_workspace) {
-                Ok(new_path) => {
-                    let renamed_current = worktree.is_current;
-                    let new_path_str = new_path.to_string_lossy().into_owned();
-                    app.rename_loading = false;
-                    app.rename_target_idx = None;
-                    app.active_action = ActiveAction::None;
-                    app.clear_input();
-                    refresh_worktrees(&mut app);
-                    if let Some(idx) = app
-                        .worktrees
-                        .iter()
-                        .position(|wt| wt.path == new_path_str.as_str())
-                    {
-                        app.selected_index = app::COMMANDS.len() + idx;
-                    }
-                    if renamed_current {
-                        app.exit_path = Some(new_path.to_string_lossy().into_owned());
-                        app.should_quit = true;
-                    }
-                }
-                Err(e) => {
-                    app.rename_loading = false;
-                    app.overlay_error = Some(format!("Failed to rename worktree: {e}"));
-                }
-            }
-        }
-
-        // Execute pending delete after the loading frame has been rendered.
-        if let Some(paths) = app.delete_pending.take() {
-            let root = app.repo_root.clone();
-            match git::remove_worktrees(&root, &paths, app.is_workspace) {
-                Ok(_) => {
-                    app.delete_loading = false;
-                    app.active_action = ActiveAction::None;
-                    app.delete_warn_current = false;
-                    app.delete_confirm_targets.clear();
-                    app.overlay_error = None;
-                    app.delete_checked.clear();
-                    if let Some(path) = app.delete_redirect_path.take() {
-                        app.exit_path = Some(path);
-                        app.should_quit = true;
-                    } else {
-                        refresh_worktrees(&mut app);
-                    }
-                }
-                Err(e) => {
-                    app.delete_loading = false;
-                    app.active_action = ActiveAction::None;
-                    app.delete_warn_current = false;
-                    app.delete_confirm_targets.clear();
-                    app.delete_redirect_path = None;
-                    app.delete_checked.clear();
-                    app.overlay_error = Some(format!("Failed to delete worktree: {e}"));
-                }
-            }
-        }
-
-        // Execute pending copy secrets after the loading frame has been rendered.
-        if app.copy_secrets_pending {
-            app.copy_secrets_pending = false;
-            let source = app
-                .copy_secrets_source_idx
-                .and_then(|i| app.worktrees.get(i))
-                .cloned();
-            let target = app.worktrees.get(app.copy_secrets_target_idx).cloned();
-            if let (Some(source), Some(target)) = (source, target) {
-                match git::copy_secret_files(&source, &target, true) {
-                    Ok(_) => {
-                        app.copy_secrets_loading = false;
+                let result = if app.new_branch_use_existing {
+                    git::add_worktree_from_existing(&root, &branch)
+                } else {
+                    let base = app.new_branch_base.as_deref();
+                    git::add_worktree(&root, &branch, base)
+                };
+                match result {
+                    Ok((_, dest)) => {
+                        app.new_branch_loading = false;
+                        app.new_branch_use_existing = false;
+                        app.new_branch_confirm_existing = None;
                         app.active_action = ActiveAction::None;
-                        app.overlay_error = None;
+                        app.clear_input();
                         refresh_worktrees(&mut app);
+                        app.exit_path = Some(dest.to_string_lossy().into_owned());
+                        app.should_quit = true;
                     }
                     Err(e) => {
-                        app.copy_secrets_loading = false;
-                        app.copy_secrets_phase = CopySecretsPhase::SelectTarget;
-                        app.overlay_error = Some(format!("Failed to copy secrets: {e}"));
+                        app.new_branch_loading = false;
+                        app.new_branch_use_existing = false;
+                        app.overlay_error = Some(format!("Failed to create branch: {e}"));
                     }
                 }
-            } else {
-                app.copy_secrets_loading = false;
             }
-        }
 
-        if let Some((remote, branch)) = app.checkout_remote_pending.take() {
-            match git::checkout_remote_branch(&app.repo_root, &remote, &branch) {
-                Ok(dest) => {
-                    app.checkout_remote_phase = CheckoutRemotePhase::SelectRemote;
-                    app.active_action = ActiveAction::None;
-                    app.clear_input();
-                    refresh_worktrees(&mut app);
-                    app.exit_path = Some(dest.to_string_lossy().into_owned());
-                    app.should_quit = true;
+            if let Some((worktree, branch)) = app.rename_pending.take() {
+                match git::rename_worktree(&app.repo_root, &worktree, &branch, app.is_workspace) {
+                    Ok(new_path) => {
+                        let renamed_current = worktree.is_current;
+                        let new_path_str = new_path.to_string_lossy().into_owned();
+                        app.rename_loading = false;
+                        app.rename_target_idx = None;
+                        app.active_action = ActiveAction::None;
+                        app.clear_input();
+                        refresh_worktrees(&mut app);
+                        if let Some(idx) = app
+                            .worktrees
+                            .iter()
+                            .position(|wt| wt.path == new_path_str.as_str())
+                        {
+                            app.selected_index = app::COMMANDS.len() + idx;
+                        }
+                        if renamed_current {
+                            app.exit_path = Some(new_path.to_string_lossy().into_owned());
+                            app.should_quit = true;
+                        }
+                    }
+                    Err(e) => {
+                        app.rename_loading = false;
+                        app.overlay_error = Some(format!("Failed to rename worktree: {e}"));
+                    }
                 }
-                Err(e) => {
-                    app.checkout_remote_phase = CheckoutRemotePhase::EnterBranch;
-                    app.overlay_error = Some(e.to_string());
+            }
+
+            // Execute pending delete after the loading frame has been rendered.
+            if let Some(paths) = app.delete_pending.take() {
+                let root = app.repo_root.clone();
+                match git::remove_worktrees(&root, &paths, app.is_workspace) {
+                    Ok(_) => {
+                        app.delete_loading = false;
+                        app.active_action = ActiveAction::None;
+                        app.delete_warn_current = false;
+                        app.delete_confirm_targets.clear();
+                        app.overlay_error = None;
+                        app.delete_checked.clear();
+                        if let Some(path) = app.delete_redirect_path.take() {
+                            app.exit_path = Some(path);
+                            app.should_quit = true;
+                        } else {
+                            refresh_worktrees(&mut app);
+                        }
+                    }
+                    Err(e) => {
+                        app.delete_loading = false;
+                        app.active_action = ActiveAction::None;
+                        app.delete_warn_current = false;
+                        app.delete_confirm_targets.clear();
+                        app.delete_redirect_path = None;
+                        app.delete_checked.clear();
+                        app.overlay_error = Some(format!("Failed to delete worktree: {e}"));
+                    }
                 }
             }
-        }
 
-        if event::poll(Duration::from_millis(100))? {
-            match event::read()? {
-                Event::Key(key) => handle_key(&mut app, key.code, key.modifiers),
-                Event::Paste(text) => handle_paste(&mut app, &text),
-                Event::Mouse(m) => handle_mouse(&mut app, m.kind, m.column, m.row),
-                Event::Resize(_, _) => {}
-                _ => {}
+            // Execute pending copy secrets after the loading frame has been rendered.
+            if app.copy_secrets_pending {
+                app.copy_secrets_pending = false;
+                let source = app
+                    .copy_secrets_source_idx
+                    .and_then(|i| app.worktrees.get(i))
+                    .cloned();
+                let target = app.worktrees.get(app.copy_secrets_target_idx).cloned();
+                if let (Some(source), Some(target)) = (source, target) {
+                    match git::copy_secret_files(&source, &target, true) {
+                        Ok(_) => {
+                            app.copy_secrets_loading = false;
+                            app.active_action = ActiveAction::None;
+                            app.overlay_error = None;
+                            refresh_worktrees(&mut app);
+                        }
+                        Err(e) => {
+                            app.copy_secrets_loading = false;
+                            app.copy_secrets_phase = CopySecretsPhase::SelectTarget;
+                            app.overlay_error = Some(format!("Failed to copy secrets: {e}"));
+                        }
+                    }
+                } else {
+                    app.copy_secrets_loading = false;
+                }
+            }
+
+            if let Some((remote, branch)) = app.checkout_remote_pending.take() {
+                match git::checkout_remote_branch(&app.repo_root, &remote, &branch) {
+                    Ok(dest) => {
+                        app.checkout_remote_phase = CheckoutRemotePhase::SelectRemote;
+                        app.active_action = ActiveAction::None;
+                        app.clear_input();
+                        refresh_worktrees(&mut app);
+                        app.exit_path = Some(dest.to_string_lossy().into_owned());
+                        app.should_quit = true;
+                    }
+                    Err(e) => {
+                        app.checkout_remote_phase = CheckoutRemotePhase::EnterBranch;
+                        app.overlay_error = Some(e.to_string());
+                    }
+                }
+            }
+
+            if event::poll(Duration::from_millis(100))? {
+                match event::read()? {
+                    Event::Key(key) => handle_key(&mut app, key.code, key.modifiers),
+                    Event::Paste(text) => handle_paste(&mut app, &text),
+                    Event::Mouse(m) => handle_mouse(&mut app, m.kind, m.column, m.row),
+                    Event::Resize(_, _) => {}
+                    _ => {}
+                }
+            }
+
+            if app.should_quit {
+                break;
             }
         }
 
-        if app.should_quit {
-            break;
+        Ok(())
+    }));
+
+    drop(terminal);
+    let cleanup_result = cleanup_terminal_state();
+    cleanup_guard.disarm();
+
+    match (run_result, cleanup_result) {
+        (Err(panic_payload), _) => {
+            let message = panic_message(&panic_payload);
+            return Err(anyhow::anyhow!("wt crashed while rendering the TUI: {message}"));
         }
+        (Ok(Err(run_err)), _) => return Err(run_err),
+        (Ok(Ok(())), Err(cleanup_err)) => return Err(cleanup_err),
+        (Ok(Ok(())), Ok(())) => {}
     }
-
-    // Drain any mouse/key events buffered while the event loop was blocked
-    // (e.g. during synchronous git operations) so they don't leak into the shell.
-    while event::poll(Duration::from_millis(0)).unwrap_or(false) {
-        let _ = event::read();
-    }
-
-    execute!(
-        terminal.backend_mut(),
-        DisableBracketedPaste,
-        DisableMouseCapture,
-    )?;
-    while event::poll(Duration::from_millis(0)).unwrap_or(false) {
-        let _ = event::read();
-    }
-
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
-    disable_raw_mode()?;
-    terminal.show_cursor()?;
 
     if update_notice.is_none()
         && let Some(rx) = update_notice_rx.take()
@@ -394,6 +418,38 @@ fn run_tui(cwd: PathBuf, mark_tree: bool) -> Result<()> {
 
     if let Some(ref path) = app.exit_path {
         println!("{path}");
+    }
+
+    Ok(())
+}
+
+fn panic_message(payload: &Box<dyn std::any::Any + Send>) -> String {
+    if let Some(message) = payload.downcast_ref::<&'static str>() {
+        (*message).to_string()
+    } else if let Some(message) = payload.downcast_ref::<String>() {
+        message.clone()
+    } else {
+        "unknown panic".to_string()
+    }
+}
+
+fn cleanup_terminal_state() -> Result<()> {
+    while event::poll(Duration::from_millis(0)).unwrap_or(false) {
+        let _ = event::read();
+    }
+
+    let mut stderr = stderr();
+    execute!(
+        stderr,
+        DisableBracketedPaste,
+        DisableMouseCapture,
+        LeaveAlternateScreen,
+        Show
+    )?;
+    disable_raw_mode()?;
+
+    while event::poll(Duration::from_millis(0)).unwrap_or(false) {
+        let _ = event::read();
     }
 
     Ok(())
