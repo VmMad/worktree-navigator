@@ -12,7 +12,7 @@ pub enum ParsedArgs {
         pr_number: u32,
     },
     Checkout {
-        branch_name: String,
+        branch_name: Option<String>,
     },
     Branch {
         branch_name: String,
@@ -54,7 +54,7 @@ where
     let command = args.remove(0);
     match command.as_str() {
         "pr" | "checkout-pr" => parse_pr(args),
-        "co" | "checkout" => parse_checkout(args),
+        "gco" | "checkout" => parse_checkout(args),
         "b" | "branch" => parse_branch(args),
         "d" | "delete" => parse_delete(args),
         "--help" | "-h" | "help" => Ok(ParsedArgs::Help),
@@ -84,17 +84,16 @@ fn parse_pr(args: Vec<String>) -> Result<ParsedArgs> {
 }
 
 fn parse_checkout(args: Vec<String>) -> Result<ParsedArgs> {
-    if args.len() != 1 {
-        bail!("Usage: wt co <branch>");
-    }
-
-    let branch_name = args[0].trim();
-    if branch_name.is_empty() {
-        bail!("Branch name cannot be empty.");
+    if args.len() > 1 {
+        bail!("Usage: wt gco [branch]");
     }
 
     Ok(ParsedArgs::Checkout {
-        branch_name: branch_name.to_string(),
+        branch_name: args
+            .first()
+            .map(|value| value.trim())
+            .filter(|value| !value.is_empty())
+            .map(str::to_string),
     })
 }
 
@@ -178,7 +177,7 @@ fn ensure_auto_base(base: &BranchBase, flag: &str) -> Result<()> {
 }
 
 pub fn help_text() -> &'static str {
-   "\
+    "\
 wt opens the interactive worktree UI by default.
 
 Usage:
@@ -189,8 +188,8 @@ Available commands:
  help                           Show this help output
  pr <number>                    Checkout a pull request worktree
  checkout-pr <number>           Alias for `pr`
- co <branch>                    Jump to an existing worktree
- checkout <branch>              Alias for `co`
+ gco [branch]                   Jump to an existing worktree
+ checkout [branch]              Alias for `gco`
  b <branch> [base options]      Create a branch worktree
  branch <branch> [base options] Alias for `b`
  d [branch] [--yes]             Delete a worktree
@@ -253,17 +252,18 @@ mod tests {
     #[test]
     fn parses_checkout_aliases() {
         assert_eq!(
-            parse(&["co", "feat/test"]),
+            parse(&["gco", "feat/test"]),
             ParsedArgs::Checkout {
-                branch_name: "feat/test".to_string(),
+                branch_name: Some("feat/test".to_string()),
             }
         );
         assert_eq!(
             parse(&["checkout", "release/1"]),
             ParsedArgs::Checkout {
-                branch_name: "release/1".to_string(),
+                branch_name: Some("release/1".to_string()),
             }
         );
+        assert_eq!(parse(&["gco"]), ParsedArgs::Checkout { branch_name: None });
     }
 
     #[test]
@@ -348,8 +348,8 @@ mod tests {
             "help",
             "pr <number>",
             "checkout-pr <number>",
-            "co <branch>",
-            "checkout <branch>",
+            "gco [branch]",
+            "checkout [branch]",
             "b <branch> [base options]",
             "branch <branch> [base options]",
             "d [branch] [--yes]",

@@ -1473,7 +1473,7 @@ fn draw_delete_overlay(f: &mut Frame, app: &App, area: Rect) {
                 ]));
             }
             if branches.len() > 3 {
-            body_lines.push(Line::from(Span::styled(
+                body_lines.push(Line::from(Span::styled(
                     format!("... and {} more", branches.len() - 3),
                     Style::default().fg(Color::DarkGray),
                 )));
@@ -1494,42 +1494,42 @@ fn draw_delete_overlay(f: &mut Frame, app: &App, area: Rect) {
 
         if body_area.height > 0 {
             f.render_widget(
-            Paragraph::new(body_lines).wrap(Wrap { trim: false }),
-            body_area,
+                Paragraph::new(body_lines).wrap(Wrap { trim: false }),
+                body_area,
             );
         }
 
         let footer_rows = Layout::default()
             .direction(Direction::Vertical)
             .constraints(if footer_height == 2 {
-            vec![Constraint::Length(1), Constraint::Length(1)]
+                vec![Constraint::Length(1), Constraint::Length(1)]
             } else {
-            vec![Constraint::Length(1)]
+                vec![Constraint::Length(1)]
             })
             .split(footer_area);
 
         f.render_widget(
             Paragraph::new(
-            Line::from(vec![
-            Span::styled("  Yes  ", yes_style),
-            Span::styled("   ", Style::default()),
-            Span::styled(no_label, no_style),
-            ])
-            .alignment(Alignment::Center),
+                Line::from(vec![
+                    Span::styled("  Yes  ", yes_style),
+                    Span::styled("   ", Style::default()),
+                    Span::styled(no_label, no_style),
+                ])
+                .alignment(Alignment::Center),
             ),
             footer_rows[0],
         );
 
         if footer_height == 2 {
             f.render_widget(
-            Paragraph::new(
-                Line::from(Span::styled(
-                    "Use arrows, Enter, or Esc",
-                    Style::default().fg(Color::DarkGray),
-                ))
-                .alignment(Alignment::Center),
-            ),
-            footer_rows[1],
+                Paragraph::new(
+                    Line::from(Span::styled(
+                        "Use arrows, Enter, or Esc",
+                        Style::default().fg(Color::DarkGray),
+                    ))
+                    .alignment(Alignment::Center),
+                ),
+                footer_rows[1],
             );
         }
     }
@@ -1555,18 +1555,18 @@ mod tests {
         let mut app = App::new(PathBuf::from("/tmp/repo"));
         app.worktrees = vec![
             Worktree {
-            path: "/tmp/repo/main".to_string(),
-            branch: "main".to_string(),
-            is_main: true,
-            is_current: true,
-            has_secrets: false,
+                path: "/tmp/repo/main".to_string(),
+                branch: "main".to_string(),
+                is_main: true,
+                is_current: true,
+                has_secrets: false,
             },
             Worktree {
-            path: "/tmp/repo/feature-small".to_string(),
-            branch: "feature/small".to_string(),
-            is_main: false,
-            is_current: false,
-            has_secrets: false,
+                path: "/tmp/repo/feature-small".to_string(),
+                branch: "feature/small".to_string(),
+                is_main: false,
+                is_current: false,
+                has_secrets: false,
             },
         ];
         app.active_action = ActiveAction::Delete;

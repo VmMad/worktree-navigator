@@ -395,7 +395,9 @@ fn run_tui(cwd: PathBuf, mark_tree: bool) -> Result<()> {
     match (run_result, cleanup_result) {
         (Err(panic_payload), _) => {
             let message = panic_message(&panic_payload);
-            return Err(anyhow::anyhow!("wt crashed while rendering the TUI: {message}"));
+            return Err(anyhow::anyhow!(
+                "wt crashed while rendering the TUI: {message}"
+            ));
         }
         (Ok(Err(run_err)), _) => return Err(run_err),
         (Ok(Ok(())), Err(cleanup_err)) => return Err(cleanup_err),
@@ -469,7 +471,7 @@ fn run_cli_command(cwd: &Path, command: ParsedArgs) -> Result<()> {
             println!("{}", dest.display());
         }
         ParsedArgs::Checkout { branch_name } => {
-            let worktree = resolve_worktree_by_branch(&context, &branch_name)?;
+            let worktree = resolve_checkout_target(&context, branch_name.as_deref())?;
             println!("{}", worktree.path);
         }
         ParsedArgs::Branch { branch_name, base } => {
@@ -490,10 +492,7 @@ fn run_cli_command(cwd: &Path, command: ParsedArgs) -> Result<()> {
                 println!("{}", context.repo_root.display());
             }
         }
-        ParsedArgs::Tui { .. }
-        | ParsedArgs::Version
-        | ParsedArgs::Update
-        | ParsedArgs::Help => {
+        ParsedArgs::Tui { .. } | ParsedArgs::Version | ParsedArgs::Update | ParsedArgs::Help => {
             unreachable!("handled before CLI execution")
         }
     }
@@ -513,8 +512,12 @@ fn resolve_cli_branch_base(context: &RepoContext, base: &BranchBase) -> Result<S
     }
 }
 
-fn resolve_worktree_by_branch(context: &RepoContext, branch_name: &str) -> Result<Worktree> {
-    resolve_worktree_by_branch_in(list_context_worktrees(context)?, branch_name)
+fn resolve_checkout_target(context: &RepoContext, branch_name: Option<&str>) -> Result<Worktree> {
+    let worktrees = list_context_worktrees(context)?;
+    match branch_name {
+        Some(branch_name) => resolve_worktree_by_branch_in(worktrees, branch_name),
+        None => resolve_default_worktree_in(worktrees),
+    }
 }
 
 fn resolve_worktree_by_branch_in(worktrees: Vec<Worktree>, branch_name: &str) -> Result<Worktree> {
@@ -522,6 +525,13 @@ fn resolve_worktree_by_branch_in(worktrees: Vec<Worktree>, branch_name: &str) ->
         .into_iter()
         .find(|worktree| worktree.branch == branch_name)
         .ok_or_else(|| anyhow::anyhow!("No worktree found for branch '{branch_name}'."))
+}
+
+fn resolve_default_worktree_in(worktrees: Vec<Worktree>) -> Result<Worktree> {
+    worktrees
+        .into_iter()
+        .find(|worktree| worktree.is_main)
+        .ok_or_else(|| anyhow::anyhow!("No default-branch worktree found."))
 }
 
 fn resolve_delete_target(context: &RepoContext, branch_name: Option<&str>) -> Result<Worktree> {
@@ -1930,6 +1940,9 @@ mod tests {
         let err = resolve_worktree_by_branch_in(Vec::new(), "feature/test")
             .expect_err("missing branch should fail");
 
-        assert_eq!(err.to_string(), "No worktree found for branch 'feature/test'.");
+        assert_eq!(
+            err.to_string(),
+            "No worktree found for branch 'feature/test'."
+        );
     }
 }

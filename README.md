@@ -36,6 +36,8 @@ bash <(curl -fsSL https://raw.githubusercontent.com/VmMad/worktree-navigator/mai
 wt --update
 ```
 
+If `wt` detects a zsh or bash shell, it also refreshes the `wt()` shell wrapper and tells you to restart the console.
+
 ## Usage
 
 Open the interactive UI inside a repo or inside a worktree:
@@ -50,7 +52,8 @@ Fast CLI commands:
 wt pr 123
 wt pr #123
 
-wt co feature/login
+wt gco
+wt gco feature/login
 
 wt b feature/login
 wt b feature/login --from-default
@@ -80,7 +83,7 @@ Main commands:
 CLI commands:
 
 - `wt pr <number>` or `wt checkout-pr <number>` fetch the PR head branch, create/select its worktree, and print the destination path
-- `wt co <branch>` or `wt checkout <branch>` jump to an existing worktree by branch and print its path
+- `wt gco [branch]` or `wt checkout [branch]` jump to an existing worktree and print its path
 - `wt b <branch>` or `wt branch <branch>` create a new branch worktree and print the destination path
 - `wt b <branch> --from-default` branch from the repo default branch instead of the current branch
 - `wt b <branch> --from-current` force the current-branch base explicitly
@@ -91,6 +94,7 @@ CLI commands:
 Notes:
 
 - `wt b <branch>` defaults to branching from the current branch when run inside a worktree
+- `wt gco` defaults to the default-branch worktree
 - if the current directory is not itself a git worktree, `wt b <branch>` falls back to the repo default branch
 - when `wt d` deletes the current worktree, the shell wrapper moves you back to the repo root
 

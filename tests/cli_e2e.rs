@@ -28,8 +28,18 @@ impl TestEnv {
         fs::create_dir_all(&home).expect("home dir should be created");
         fs::create_dir_all(&bin_dir).expect("bin dir should be created");
 
-        git(&root, &["init", "--bare", origin.to_string_lossy().as_ref()]);
-        git(&root, &["clone", origin.to_string_lossy().as_ref(), repo.to_string_lossy().as_ref()]);
+        git(
+            &root,
+            &["init", "--bare", origin.to_string_lossy().as_ref()],
+        );
+        git(
+            &root,
+            &[
+                "clone",
+                origin.to_string_lossy().as_ref(),
+                repo.to_string_lossy().as_ref(),
+            ],
+        );
 
         git(&repo, &["config", "user.email", "wt@example.com"]);
         git(&repo, &["config", "user.name", "wt"]);
@@ -38,12 +48,16 @@ impl TestEnv {
         git(&repo, &["add", "README.md"]);
         git(&repo, &["commit", "-m", "init"]);
         git(&repo, &["push", "-u", "origin", "main"]);
-        git(
-            &origin,
-            &["symbolic-ref", "HEAD", "refs/heads/main"],
-        );
+        git(&origin, &["symbolic-ref", "HEAD", "refs/heads/main"]);
         git(&repo, &["fetch", "origin"]);
-        git(&repo, &["symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main"]);
+        git(
+            &repo,
+            &[
+                "symbolic-ref",
+                "refs/remotes/origin/HEAD",
+                "refs/remotes/origin/main",
+            ],
+        );
 
         Self {
             root,
@@ -213,7 +227,7 @@ fn help_and_version_work_end_to_end() {
     let help = run_wt(&env, &env.repo, &["--help"]);
     assert!(help.status.success());
     assert!(stdout(&help).contains("Available commands:"));
-    assert!(stdout(&help).contains("co <branch>"));
+    assert!(stdout(&help).contains("gco [branch]"));
 
     let help_alias = run_wt_wrapped(&env, &env.repo, &["help"]);
     assert!(help_alias.status.success());
@@ -232,10 +246,25 @@ fn checkout_commands_jump_to_existing_worktrees() {
     env.create_branch("feature/existing");
     let existing = env.create_existing_worktree("feature/existing");
 
-    for args in [&["co", "feature/existing"][..], &["checkout", "feature/existing"][..]] {
+    for args in [
+        &["gco", "feature/existing"][..],
+        &["checkout", "feature/existing"][..],
+    ] {
         let output = run_wt_wrapped(&env, &env.repo, args);
         assert!(output.status.success(), "stderr:\n{}", stderr(&output));
         assert_eq!(stdout(&output), existing.to_string_lossy());
+    }
+}
+
+#[test]
+fn checkout_commands_default_to_the_default_branch_worktree() {
+    let env = TestEnv::new("checkout-default");
+    let default_path = env.repo.clone();
+
+    for args in [&["gco"][..], &["checkout"][..]] {
+        let output = run_wt_wrapped(&env, &env.repo, args);
+        assert!(output.status.success(), "stderr:\n{}", stderr(&output));
+        assert_eq!(stdout(&output), default_path.to_string_lossy());
     }
 }
 
@@ -248,17 +277,23 @@ fn branch_commands_create_worktrees_from_expected_bases() {
     let main_head = git_stdout(&env.repo, &["rev-parse", "main"]);
     let current_head = git_stdout(&current_worktree, &["rev-parse", "HEAD"]);
 
-    let from_default = run_wt_wrapped(&env, &current_worktree, &["b", "feature/from-default", "-d"]);
+    let from_default = run_wt_wrapped(
+        &env,
+        &current_worktree,
+        &["b", "feature/from-default", "-d"],
+    );
     assert!(
         from_default.status.success(),
         "stderr:\n{}",
         stderr(&from_default)
     );
     let from_default_path = PathBuf::from(stdout(&from_default));
-    assert_eq!(git_stdout(&from_default_path, &["rev-parse", "HEAD"]), main_head);
+    assert_eq!(
+        git_stdout(&from_default_path, &["rev-parse", "HEAD"]),
+        main_head
+    );
 
-    let from_current =
-        run_wt_wrapped(&env, &current_worktree, &["branch", "feature/from-current"]);
+    let from_current = run_wt_wrapped(&env, &current_worktree, &["branch", "feature/from-current"]);
     assert!(
         from_current.status.success(),
         "stderr:\n{}",
@@ -313,7 +348,10 @@ fn pr_commands_create_or_reuse_pr_worktrees() {
     assert!(first.status.success(), "stderr:\n{}", stderr(&first));
     let pr_path = PathBuf::from(stdout(&first));
     assert!(pr_path.exists());
-    assert_eq!(git_stdout(&pr_path, &["symbolic-ref", "--short", "HEAD"]), pr_branch);
+    assert_eq!(
+        git_stdout(&pr_path, &["symbolic-ref", "--short", "HEAD"]),
+        pr_branch
+    );
 
     let second = run_wt_with_path(&env, &env.repo, &["checkout-pr", "123"]);
     assert!(second.status.success(), "stderr:\n{}", stderr(&second));
@@ -344,6 +382,40 @@ fn update_command_reports_missing_compatible_asset() {
 }
 
 #[test]
+fn update_command_refreshes_zsh_wrapper_and_prints_restart_message() {
+    let env = TestEnv::new("update-zsh-wrapper");
+    let update_target = env.root.join("wt-updated");
+    env.set_fake_gh(
+        "#!/usr/bin/env bash\nset -e\nif [[ \"$1\" == \"api\" ]]; then\n  printf '{\"tag_name\":\"v9.9.9\",\"assets\":[{\"name\":\"worktree-navigator-x86_64-linux-gnu\"}]}'\n  exit 0\nfi\nif [[ \"$1\" == \"release\" && \"$2\" == \"download\" ]]; then\n  out=\"\"\n  while [[ $# -gt 0 ]]; do\n    if [[ \"$1\" == \"--output\" ]]; then\n      out=\"$2\"\n      shift 2\n      continue\n    fi\n    shift\n  done\n  printf '#!/usr/bin/env bash\\nexit 0\\n' > \"$out\"\n  chmod +x \"$out\"\n  exit 0\nfi\necho \"unexpected gh invocation: $*\" >&2\nexit 1\n",
+    );
+
+    let output = Command::new(binary_path())
+        .arg("--update")
+        .current_dir(&env.repo)
+        .env("HOME", &env.home)
+        .env("PATH", env.path_env())
+        .env("SHELL", "/bin/zsh")
+        .env("WT_UPDATE_TARGET", &update_target)
+        .output()
+        .expect("wt update should run");
+
+    assert!(output.status.success(), "stderr:\n{}", stderr(&output));
+    assert!(update_target.exists());
+    assert!(stdout(&output).is_empty());
+
+    let zshrc = fs::read_to_string(env.home.join(".zshrc")).expect("zshrc should exist");
+    assert!(zshrc.contains("# worktree-navigator wt()"));
+    assert!(zshrc.contains("target=$(WT_CWD=\"$PWD\" command wt \"$@\")"));
+
+    let stderr = stderr(&output);
+    assert!(stderr.contains("Updated wt to v9.9.9"), "stderr:\n{stderr}");
+    assert!(
+        stderr.contains("Restart your console to reload the wt shell wrapper."),
+        "stderr:\n{stderr}"
+    );
+}
+
+#[test]
 fn mark_tree_creates_workspace_marker() {
     if Command::new("script").arg("-V").output().is_err() {
         return;
@@ -357,7 +429,11 @@ fn mark_tree_creates_workspace_marker() {
         .args([
             "-q",
             "-c",
-            &format!("env WT_CWD={} {} --mark-tree", workspace.display(), binary_path()),
+            &format!(
+                "env WT_CWD={} {} --mark-tree",
+                workspace.display(),
+                binary_path()
+            ),
             "/dev/null",
         ])
         .current_dir(&workspace)
