@@ -177,7 +177,7 @@ fn ensure_auto_base(base: &BranchBase, flag: &str) -> Result<()> {
 }
 
 pub fn help_text() -> &'static str {
-   "\
+    "\
 wt opens the interactive worktree UI by default.
 
 Usage:

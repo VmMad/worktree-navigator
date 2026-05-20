@@ -395,7 +395,9 @@ fn run_tui(cwd: PathBuf, mark_tree: bool) -> Result<()> {
     match (run_result, cleanup_result) {
         (Err(panic_payload), _) => {
             let message = panic_message(&panic_payload);
-            return Err(anyhow::anyhow!("wt crashed while rendering the TUI: {message}"));
+            return Err(anyhow::anyhow!(
+                "wt crashed while rendering the TUI: {message}"
+            ));
         }
         (Ok(Err(run_err)), _) => return Err(run_err),
         (Ok(Ok(())), Err(cleanup_err)) => return Err(cleanup_err),
@@ -490,10 +492,7 @@ fn run_cli_command(cwd: &Path, command: ParsedArgs) -> Result<()> {
                 println!("{}", context.repo_root.display());
             }
         }
-        ParsedArgs::Tui { .. }
-        | ParsedArgs::Version
-        | ParsedArgs::Update
-        | ParsedArgs::Help => {
+        ParsedArgs::Tui { .. } | ParsedArgs::Version | ParsedArgs::Update | ParsedArgs::Help => {
             unreachable!("handled before CLI execution")
         }
     }
@@ -1941,6 +1940,9 @@ mod tests {
         let err = resolve_worktree_by_branch_in(Vec::new(), "feature/test")
             .expect_err("missing branch should fail");
 
-        assert_eq!(err.to_string(), "No worktree found for branch 'feature/test'.");
+        assert_eq!(
+            err.to_string(),
+            "No worktree found for branch 'feature/test'."
+        );
     }
 }

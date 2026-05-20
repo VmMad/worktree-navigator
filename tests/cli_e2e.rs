@@ -28,8 +28,18 @@ impl TestEnv {
         fs::create_dir_all(&home).expect("home dir should be created");
         fs::create_dir_all(&bin_dir).expect("bin dir should be created");
 
-        git(&root, &["init", "--bare", origin.to_string_lossy().as_ref()]);
-        git(&root, &["clone", origin.to_string_lossy().as_ref(), repo.to_string_lossy().as_ref()]);
+        git(
+            &root,
+            &["init", "--bare", origin.to_string_lossy().as_ref()],
+        );
+        git(
+            &root,
+            &[
+                "clone",
+                origin.to_string_lossy().as_ref(),
+                repo.to_string_lossy().as_ref(),
+            ],
+        );
 
         git(&repo, &["config", "user.email", "wt@example.com"]);
         git(&repo, &["config", "user.name", "wt"]);
@@ -38,12 +48,16 @@ impl TestEnv {
         git(&repo, &["add", "README.md"]);
         git(&repo, &["commit", "-m", "init"]);
         git(&repo, &["push", "-u", "origin", "main"]);
-        git(
-            &origin,
-            &["symbolic-ref", "HEAD", "refs/heads/main"],
-        );
+        git(&origin, &["symbolic-ref", "HEAD", "refs/heads/main"]);
         git(&repo, &["fetch", "origin"]);
-        git(&repo, &["symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main"]);
+        git(
+            &repo,
+            &[
+                "symbolic-ref",
+                "refs/remotes/origin/HEAD",
+                "refs/remotes/origin/main",
+            ],
+        );
 
         Self {
             root,
@@ -232,7 +246,10 @@ fn checkout_commands_jump_to_existing_worktrees() {
     env.create_branch("feature/existing");
     let existing = env.create_existing_worktree("feature/existing");
 
-    for args in [&["gco", "feature/existing"][..], &["checkout", "feature/existing"][..]] {
+    for args in [
+        &["gco", "feature/existing"][..],
+        &["checkout", "feature/existing"][..],
+    ] {
         let output = run_wt_wrapped(&env, &env.repo, args);
         assert!(output.status.success(), "stderr:\n{}", stderr(&output));
         assert_eq!(stdout(&output), existing.to_string_lossy());
@@ -260,17 +277,23 @@ fn branch_commands_create_worktrees_from_expected_bases() {
     let main_head = git_stdout(&env.repo, &["rev-parse", "main"]);
     let current_head = git_stdout(&current_worktree, &["rev-parse", "HEAD"]);
 
-    let from_default = run_wt_wrapped(&env, &current_worktree, &["b", "feature/from-default", "-d"]);
+    let from_default = run_wt_wrapped(
+        &env,
+        &current_worktree,
+        &["b", "feature/from-default", "-d"],
+    );
     assert!(
         from_default.status.success(),
         "stderr:\n{}",
         stderr(&from_default)
     );
     let from_default_path = PathBuf::from(stdout(&from_default));
-    assert_eq!(git_stdout(&from_default_path, &["rev-parse", "HEAD"]), main_head);
+    assert_eq!(
+        git_stdout(&from_default_path, &["rev-parse", "HEAD"]),
+        main_head
+    );
 
-    let from_current =
-        run_wt_wrapped(&env, &current_worktree, &["branch", "feature/from-current"]);
+    let from_current = run_wt_wrapped(&env, &current_worktree, &["branch", "feature/from-current"]);
     assert!(
         from_current.status.success(),
         "stderr:\n{}",
@@ -325,7 +348,10 @@ fn pr_commands_create_or_reuse_pr_worktrees() {
     assert!(first.status.success(), "stderr:\n{}", stderr(&first));
     let pr_path = PathBuf::from(stdout(&first));
     assert!(pr_path.exists());
-    assert_eq!(git_stdout(&pr_path, &["symbolic-ref", "--short", "HEAD"]), pr_branch);
+    assert_eq!(
+        git_stdout(&pr_path, &["symbolic-ref", "--short", "HEAD"]),
+        pr_branch
+    );
 
     let second = run_wt_with_path(&env, &env.repo, &["checkout-pr", "123"]);
     assert!(second.status.success(), "stderr:\n{}", stderr(&second));
@@ -403,7 +429,11 @@ fn mark_tree_creates_workspace_marker() {
         .args([
             "-q",
             "-c",
-            &format!("env WT_CWD={} {} --mark-tree", workspace.display(), binary_path()),
+            &format!(
+                "env WT_CWD={} {} --mark-tree",
+                workspace.display(),
+                binary_path()
+            ),
             "/dev/null",
         ])
         .current_dir(&workspace)

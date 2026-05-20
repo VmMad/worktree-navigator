@@ -163,22 +163,34 @@ fn run_update_internal(asset_name_hint: Option<&str>, latest_hint: Option<&str>)
         writeln!(stderr, "Updated wt at {}", target.to_string_lossy())?;
     }
 
-    if let Some(refresh) = refresh_shell_wrapper()? {
-        if refresh.wrote_wrapper {
+    match refresh_shell_wrapper() {
+        Ok(Some(refresh)) => {
+            if refresh.wrote_wrapper {
+                writeln!(
+                    stderr,
+                    "Added wt() to {} for {}",
+                    refresh.rc_path.to_string_lossy(),
+                    refresh.shell.name
+                )?;
+            } else {
+                writeln!(
+                    stderr,
+                    "wt() already present in {}",
+                    refresh.rc_path.to_string_lossy()
+                )?;
+            }
             writeln!(
                 stderr,
-                "Added wt() to {} for {}",
-                refresh.rc_path.to_string_lossy(),
-                refresh.shell.name
-            )?;
-        } else {
-            writeln!(
-                stderr,
-                "wt() already present in {}",
-                refresh.rc_path.to_string_lossy()
+                "Restart your console to reload the wt shell wrapper."
             )?;
         }
-        writeln!(stderr, "Restart your console to reload the wt shell wrapper.")?;
+        Ok(None) => {}
+        Err(err) => {
+            writeln!(
+                stderr,
+                "Updated wt, but failed to refresh the shell wrapper: {err:#}"
+            )?;
+        }
     }
 
     Ok(())
@@ -340,7 +352,10 @@ fn ensure_shell_wrapper(rc_path: &Path) -> Result<bool> {
         Err(err) if err.kind() == io::ErrorKind::NotFound => String::new(),
         Err(err) => {
             return Err(err).with_context(|| {
-                format!("Failed to read shell config at {}", rc_path.to_string_lossy())
+                format!(
+                    "Failed to read shell config at {}",
+                    rc_path.to_string_lossy()
+                )
             });
         }
     };
@@ -362,7 +377,12 @@ fn ensure_shell_wrapper(rc_path: &Path) -> Result<bool> {
         .create(true)
         .append(true)
         .open(rc_path)
-        .with_context(|| format!("Failed to open shell config at {}", rc_path.to_string_lossy()))?;
+        .with_context(|| {
+            format!(
+                "Failed to open shell config at {}",
+                rc_path.to_string_lossy()
+            )
+        })?;
 
     if !existing.is_empty() {
         if !existing.ends_with('\n') {
@@ -371,7 +391,12 @@ fn ensure_shell_wrapper(rc_path: &Path) -> Result<bool> {
         file.write_all(b"\n")?;
     }
     file.write_all(SHELL_WRAPPER_BODY.as_bytes())
-        .with_context(|| format!("Failed to update shell config at {}", rc_path.to_string_lossy()))?;
+        .with_context(|| {
+            format!(
+                "Failed to update shell config at {}",
+                rc_path.to_string_lossy()
+            )
+        })?;
 
     Ok(true)
 }
@@ -607,7 +632,8 @@ mod tests {
 
     #[test]
     fn ensure_shell_wrapper_appends_wrapper_once() {
-        let temp_dir = std::env::temp_dir().join(format!("wt-shell-wrapper-{}", now_unix_seconds()));
+        let temp_dir =
+            std::env::temp_dir().join(format!("wt-shell-wrapper-{}", now_unix_seconds()));
         fs::create_dir_all(&temp_dir).expect("temp dir should exist");
         let rc_path = temp_dir.join(".zshrc");
 
