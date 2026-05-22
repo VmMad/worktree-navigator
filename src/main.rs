@@ -790,13 +790,11 @@ fn open_action(app: &mut App, action: ActiveAction) {
     app.rename_pending = None;
 
     if action == ActiveAction::NewBranch {
-        let idx = app.selected_index;
-        if idx >= app::COMMANDS.len() {
-            let wt_idx = idx - app::COMMANDS.len();
-            if let Some(wt) = app.worktrees.get(wt_idx) {
-                app.new_branch_base = Some(wt.branch.clone());
-            }
-        }
+        app.new_branch_base = app
+            .selected_worktree_idx()
+            .or_else(|| app.default_worktree_idx())
+            .and_then(|wt_idx| app.worktrees.get(wt_idx))
+            .map(|wt| wt.branch.clone());
     }
 
     if action == ActiveAction::Rename {
@@ -1815,7 +1813,7 @@ fn handle_paste(app: &mut App, text: &str) {
 mod tests {
     use std::path::PathBuf;
 
-    use super::{handle_paste, resolve_worktree_by_branch_in};
+    use super::{handle_paste, open_action, resolve_worktree_by_branch_in};
     use crate::{
         app::App,
         text_input,
@@ -1944,5 +1942,57 @@ mod tests {
             err.to_string(),
             "No worktree found for branch 'feature/test'."
         );
+    }
+
+    #[test]
+    fn new_branch_uses_default_worktree_base_when_command_is_selected() {
+        let mut app = test_app();
+        app.worktrees = vec![
+            Worktree {
+                path: "/repo/main".to_string(),
+                branch: "main".to_string(),
+                is_main: true,
+                is_current: false,
+                has_secrets: false,
+            },
+            Worktree {
+                path: "/repo/feature-test".to_string(),
+                branch: "feature/test".to_string(),
+                is_main: false,
+                is_current: true,
+                has_secrets: false,
+            },
+        ];
+        app.selected_index = 0;
+
+        open_action(&mut app, ActiveAction::NewBranch);
+
+        assert_eq!(app.new_branch_base.as_deref(), Some("main"));
+    }
+
+    #[test]
+    fn new_branch_prefers_selected_worktree_base() {
+        let mut app = test_app();
+        app.worktrees = vec![
+            Worktree {
+                path: "/repo/main".to_string(),
+                branch: "main".to_string(),
+                is_main: true,
+                is_current: false,
+                has_secrets: false,
+            },
+            Worktree {
+                path: "/repo/feature-test".to_string(),
+                branch: "feature/test".to_string(),
+                is_main: false,
+                is_current: true,
+                has_secrets: false,
+            },
+        ];
+        app.selected_index = crate::app::COMMANDS.len() + 1;
+
+        open_action(&mut app, ActiveAction::NewBranch);
+
+        assert_eq!(app.new_branch_base.as_deref(), Some("feature/test"));
     }
 }
