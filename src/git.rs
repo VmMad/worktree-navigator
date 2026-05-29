@@ -1000,10 +1000,15 @@ pub fn dest_from_url(source: &str, cwd: &Path) -> String {
     cwd.join(name).to_string_lossy().into_owned()
 }
 
+pub fn clone_repo_with_layout(url: &str, dest: &Path) -> Result<PathBuf> {
+    let (tx, _rx) = mpsc::channel();
+    clone_repo_with_layout_inner(url, dest, &tx)
+}
+
 pub fn start_clone_repo_with_layout(url: String, dest: PathBuf) -> Receiver<CloneEvent> {
     let (tx, rx) = mpsc::channel();
 
-    thread::spawn(move || match clone_repo_with_layout(&url, &dest, &tx) {
+    thread::spawn(move || match clone_repo_with_layout_inner(&url, &dest, &tx) {
         Ok(worktree_path) => {
             let _ = tx.send(CloneEvent::Finished(worktree_path));
         }
@@ -1015,7 +1020,7 @@ pub fn start_clone_repo_with_layout(url: String, dest: PathBuf) -> Receiver<Clon
     rx
 }
 
-fn clone_repo_with_layout(url: &str, dest: &Path, tx: &Sender<CloneEvent>) -> Result<PathBuf> {
+fn clone_repo_with_layout_inner(url: &str, dest: &Path, tx: &Sender<CloneEvent>) -> Result<PathBuf> {
     let source = url.trim();
     fs::create_dir_all(dest).context("Failed to create destination directory")?;
     let tmp_dir = dest.join(format!(

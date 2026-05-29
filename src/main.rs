@@ -458,29 +458,31 @@ fn cleanup_terminal_state() -> Result<()> {
 }
 
 fn run_cli_command(cwd: &Path, command: ParsedArgs) -> Result<()> {
-    let context = resolve_repo_context(cwd);
-    if context.no_repo {
-        anyhow::bail!(
-            "No git repository found here. Run `wt` with no args to start the clone flow."
-        );
-    }
-
     match command {
+        ParsedArgs::Clone { repo_source, dest } => {
+            let dest = resolve_cli_clone_dest(cwd, &repo_source, dest.as_deref());
+            let worktree_path = git::clone_repo_with_layout(&repo_source, &dest)?;
+            println!("{}", worktree_path.display());
+        }
         ParsedArgs::CheckoutPr { pr_number } => {
+            let context = require_repo_context(cwd)?;
             let (_, dest) = git::checkout_pr_as_worktree(&context.repo_root, pr_number)?;
             println!("{}", dest.display());
         }
         ParsedArgs::Checkout { branch_name } => {
+            let context = require_repo_context(cwd)?;
             let worktree = resolve_checkout_target(&context, branch_name.as_deref())?;
             println!("{}", worktree.path);
         }
         ParsedArgs::Branch { branch_name, base } => {
+            let context = require_repo_context(cwd)?;
             let base_branch = resolve_cli_branch_base(&context, &base)?;
             let (_, dest) =
                 git::add_worktree(&context.repo_root, &branch_name, Some(&base_branch))?;
             println!("{}", dest.display());
         }
         ParsedArgs::Delete { branch_name, yes } => {
+            let context = require_repo_context(cwd)?;
             let worktree = resolve_delete_target(&context, branch_name.as_deref())?;
             confirm_delete(&worktree, yes)?;
             git::remove_worktree(&context.repo_root, &worktree.path, context.is_workspace)?;
@@ -492,12 +494,39 @@ fn run_cli_command(cwd: &Path, command: ParsedArgs) -> Result<()> {
                 println!("{}", context.repo_root.display());
             }
         }
-        ParsedArgs::Tui { .. } | ParsedArgs::Version | ParsedArgs::Update | ParsedArgs::Help => {
+        ParsedArgs::Tui { .. }
+        | ParsedArgs::Version
+        | ParsedArgs::Update
+        | ParsedArgs::Help => {
             unreachable!("handled before CLI execution")
         }
     }
 
     Ok(())
+}
+
+fn require_repo_context(cwd: &Path) -> Result<RepoContext> {
+    let context = resolve_repo_context(cwd);
+    if context.no_repo {
+        anyhow::bail!(
+            "No git repository found here. Run `wt clone <repo>` or `wt` with no args to start the clone flow."
+        );
+    }
+    Ok(context)
+}
+
+fn resolve_cli_clone_dest(cwd: &Path, repo_source: &str, dest: Option<&str>) -> PathBuf {
+    match dest {
+        Some(dest) => {
+            let path = PathBuf::from(dest);
+            if path.is_absolute() {
+                path
+            } else {
+                cwd.join(path)
+            }
+        }
+        None => PathBuf::from(git::dest_from_url(repo_source, cwd)),
+    }
 }
 
 fn resolve_cli_branch_base(context: &RepoContext, base: &BranchBase) -> Result<String> {

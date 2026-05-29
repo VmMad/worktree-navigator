@@ -8,6 +8,10 @@ pub enum ParsedArgs {
     Version,
     Update,
     Help,
+    Clone {
+        repo_source: String,
+        dest: Option<String>,
+    },
     CheckoutPr {
         pr_number: u32,
     },
@@ -53,6 +57,7 @@ where
 
     let command = args.remove(0);
     match command.as_str() {
+        "clone" => parse_clone(args),
         "pr" | "checkout-pr" => parse_pr(args),
         "gco" | "checkout" => parse_checkout(args),
         "b" | "branch" => parse_branch(args),
@@ -60,6 +65,29 @@ where
         "--help" | "-h" | "help" => Ok(ParsedArgs::Help),
         _ => bail!("Unknown command '{command}'. Run `wt --help` for usage."),
     }
+}
+
+fn parse_clone(args: Vec<String>) -> Result<ParsedArgs> {
+    if args.is_empty() || args.len() > 2 {
+        bail!("Usage: wt clone <repo> [dest]");
+    }
+
+    let repo_source = args[0].trim().to_string();
+    if repo_source.is_empty() {
+        bail!("Usage: wt clone <repo> [dest]");
+    }
+
+    let dest = args
+        .get(1)
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+
+    if args.len() == 2 && dest.is_none() {
+        bail!("Destination cannot be empty.");
+    }
+
+    Ok(ParsedArgs::Clone { repo_source, dest })
 }
 
 fn parse_pr(args: Vec<String>) -> Result<ParsedArgs> {
@@ -186,6 +214,7 @@ Usage:
 
 Available commands:
  help                           Show this help output
+ clone <repo> [dest]            Clone a repo into a worktree workspace
  pr <number>                    Checkout a pull request worktree
  checkout-pr <number>           Alias for `pr`
  gco [branch]                   Jump to an existing worktree
@@ -246,6 +275,31 @@ mod tests {
         assert_eq!(
             parse(&["checkout-pr", "#42"]),
             ParsedArgs::CheckoutPr { pr_number: 42 }
+        );
+    }
+
+    #[test]
+    fn parses_clone_command_with_optional_dest() {
+        assert_eq!(
+            parse(&["clone", "owner/repo"]),
+            ParsedArgs::Clone {
+                repo_source: "owner/repo".to_string(),
+                dest: None,
+            }
+        );
+        assert_eq!(
+            parse(&["clone", "https://github.com/owner/repo.git", "repos/repo"]),
+            ParsedArgs::Clone {
+                repo_source: "https://github.com/owner/repo.git".to_string(),
+                dest: Some("repos/repo".to_string()),
+            }
+        );
+        assert_eq!(
+            parse(&["clone", "git@github.com:owner/repo.git", "/tmp/repo"]),
+            ParsedArgs::Clone {
+                repo_source: "git@github.com:owner/repo.git".to_string(),
+                dest: Some("/tmp/repo".to_string()),
+            }
         );
     }
 
@@ -346,6 +400,7 @@ mod tests {
         let help = help_text();
         for command in [
             "help",
+            "clone <repo> [dest]",
             "pr <number>",
             "checkout-pr <number>",
             "gco [branch]",
