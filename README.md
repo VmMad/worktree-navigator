@@ -1,8 +1,10 @@
-# Worktree-navigator
+# Worktree Navigator
 
-Interactive UI for managing git worktrees on Ubuntu.
+> Interactive UI for managing git worktrees on Ubuntu.
 
-`wt` opens full screen, works with keyboard and mouse, and lets you jump between worktrees without typing long git commands.
+`wt` opens full-screen, works with keyboard and mouse, and lets you jump between worktrees without typing long git commands.
+
+---
 
 ## Install
 
@@ -13,7 +15,7 @@ curl -fsSL https://github.com/VmMad/worktree-navigator/releases/latest/download/
   -o ~/.local/bin/wt && chmod +x ~/.local/bin/wt
 ```
 
-Then add the `wt()` shell wrapper so navigating to a worktree changes your shell's directory. Pick the installer that matches your shell:
+Then add the `wt()` shell wrapper so navigating to a worktree changes your shell's directory:
 
 **zsh**
 
@@ -29,94 +31,135 @@ bash <(curl -fsSL https://raw.githubusercontent.com/VmMad/worktree-navigator/mai
   && source ~/.bashrc
 ```
 
-
 ### Update existing install
 
 ```bash
 wt --update
 ```
 
-If `wt` detects a zsh or bash shell, it also refreshes the `wt()` shell wrapper and tells you to restart the console.
+If `wt` detects a zsh or bash shell, it also refreshes the `wt()` shell wrapper and prompts you to restart the console.
+
+---
 
 ## Usage
 
-Open the interactive UI inside a repo or inside a worktree:
+### Interactive UI
+
+Open the UI inside a repo or a worktree:
 
 ```bash
 wt
 ```
 
-Fast CLI commands:
+#### UI commands
+
+| Command | Key | Description |
+|---|---|---|
+| New Branch | `b` | Create a new branch worktree and jump into it |
+| Rename Worktree | `m` | Rename the selected non-default branch and move its folder |
+| Sync with PR | `p` | Enter a PR number and create/sync its worktree |
+| Delete Worktree | `d` | Select inline, then confirm with `Enter` or `y` |
+| Sync Worktree | `s` | Fast-forward a worktree from `origin/<branch>` |
+| Copy Secrets | `c` | Copy secret files into the selected worktree |
+| Checkout Remote | `r` | Fetch a remote branch and create a worktree for it |
+
+#### Navigation
+
+| Key | Action |
+|---|---|
+| `↑` / `↓` or `j` / `k` | Move selection |
+| `Enter` or click | Activate |
+| Mouse scroll | Move selection |
+| `Esc` | Cancel current mode |
+| `q` | Quit |
+
+---
+
+### CLI commands
+
+Clone a repo into a worktree workspace:
+
+```bash
+wt clone owner/repo
+wt clone git@github.com:owner/repo.git
+wt clone https://github.com/owner/repo.git ~/src/repo
+```
+
+Check out a PR:
 
 ```bash
 wt pr 123
 wt pr #123
+```
 
+Jump to an existing worktree:
+
+```bash
 wt gco
 wt gco feature/login
+```
 
+Create a new branch worktree:
+
+```bash
 wt b feature/login
 wt b feature/login --from-default
 wt b feature/login --base release/1
+```
 
+Delete a worktree:
+
+```bash
 wt d
 wt d feature/login
 wt d feature/login --yes
 ```
 
-Mark existing worktree repo:
+Mark an existing repo as a worktree workspace:
 
 ```bash
 wt --mark-tree
 ```
 
-Main commands:
+#### CLI reference
 
-- `New Branch [b]` create a new branch worktree and jump into it
-- `Rename Worktree [m]` rename the selected non-default branch and move its worktree folder to match
-- `Sync with PR [p]` enter a PR number (`#123` or `123`) and create/sync its worktree
-- `Delete Worktree [d]` inline select in the worktree list, then confirm with `Enter` or `y` (`n`/`Esc` cancels)
-- `Sync Worktree [s]` inline select a worktree to fast-forward from `origin/<branch>`
-- `Copy Secrets [c]` copy secret files into the selected worktree
-- `Checkout Remote [r]` fetch a remote branch and create a worktree for it
+| Command | Aliases | Description |
+|---|---|---|
+| `wt clone <repo> [dest]` | | Clone into a worktree workspace, print the default-branch path |
+| `wt pr <number>` | `checkout-pr` | Fetch the PR head branch, create/select its worktree |
+| `wt gco [branch]` | `checkout` | Jump to an existing worktree; defaults to the default branch |
+| `wt b <branch>` | `branch` | Create a new branch worktree |
+| `wt b <branch> --from-default` | | Branch from the repo default branch |
+| `wt b <branch> --from-current` | | Force the current branch as base |
+| `wt b <branch> --base <branch>` | | Branch from an explicit base |
+| `wt d [branch]` | `delete` | Delete a worktree by branch, or the current one if omitted |
+| `wt d ... --yes` | | Skip the branch-name confirmation prompt |
 
-CLI commands:
+#### Notes
 
-- `wt pr <number>` or `wt checkout-pr <number>` fetch the PR head branch, create/select its worktree, and print the destination path
-- `wt gco [branch]` or `wt checkout [branch]` jump to an existing worktree and print its path
-- `wt b <branch>` or `wt branch <branch>` create a new branch worktree and print the destination path
-- `wt b <branch> --from-default` branch from the repo default branch instead of the current branch
-- `wt b <branch> --from-current` force the current-branch base explicitly
-- `wt b <branch> --base <branch>` branch from an explicit base branch
-- `wt d [branch]` or `wt delete [branch]` delete a worktree by branch, or the current worktree when no branch is passed
-- `wt d ...` requires typing the branch name to confirm unless `--yes` is passed
+- `wt b <branch>` defaults to the current branch when run inside a worktree; falls back to the repo default branch otherwise.
+- `wt gco` with no argument goes to the default-branch worktree.
+- When `wt d` deletes the current worktree, the shell wrapper moves you back to the repo root.
 
-Notes:
-
-- `wt b <branch>` defaults to branching from the current branch when run inside a worktree
-- `wt gco` defaults to the default-branch worktree
-- if the current directory is not itself a git worktree, `wt b <branch>` falls back to the repo default branch
-- when `wt d` deletes the current worktree, the shell wrapper moves you back to the repo root
-
-Navigation:
-
-- `↑↓` or `j/k` move
-- `Enter` or click activate
-- mouse scroll moves selection
-- `Esc` cancel current mode
-- `q` quit
+---
 
 ## Requirements
 
 - Linux
 - `git`
-- `gh` for PR sync
-- `zsh` or `bash` if you want the `wt` shell wrapper
+- `gh` (for PR sync)
+- `zsh` or `bash` (for the `wt` shell wrapper)
+
+---
 
 ## Testing
-
-Run the CLI end-to-end suite with:
 
 ```bash
 cargo test --test cli_e2e
 ```
+
+---
+
+## License
+
+MIT

@@ -12,6 +12,7 @@ fn binary_path() -> &'static str {
 
 struct TestEnv {
     root: PathBuf,
+    origin: PathBuf,
     repo: PathBuf,
     home: PathBuf,
     bin_dir: PathBuf,
@@ -61,6 +62,7 @@ impl TestEnv {
 
         Self {
             root,
+            origin,
             repo,
             home,
             bin_dir,
@@ -227,6 +229,7 @@ fn help_and_version_work_end_to_end() {
     let help = run_wt(&env, &env.repo, &["--help"]);
     assert!(help.status.success());
     assert!(stdout(&help).contains("Available commands:"));
+    assert!(stdout(&help).contains("clone <repo> [dest]"));
     assert!(stdout(&help).contains("gco [branch]"));
 
     let help_alias = run_wt_wrapped(&env, &env.repo, &["help"]);
@@ -238,6 +241,55 @@ fn help_and_version_work_end_to_end() {
     assert!(version.status.success());
     assert!(stdout(&version).is_empty());
     assert!(stderr(&version).starts_with("wt v"));
+}
+
+#[test]
+fn clone_command_clones_repo_into_default_destination() {
+    let env = TestEnv::new("clone-default-dest");
+    let source = env.origin.to_string_lossy().into_owned();
+
+    let output = run_wt_wrapped(&env, &env.root, &["clone", source.as_str()]);
+    assert!(output.status.success(), "stderr:\n{}", stderr(&output));
+
+    let workspace = env.root.join("origin");
+    let worktree = workspace.join("main");
+    assert_eq!(stdout(&output), worktree.to_string_lossy());
+    assert!(worktree.exists());
+    assert!(workspace.join(".wt-workspace").exists());
+}
+
+#[test]
+fn clone_command_honors_explicit_destination() {
+    let env = TestEnv::new("clone-explicit-dest");
+    let source = env.origin.to_string_lossy().into_owned();
+
+    let output = run_wt_wrapped(&env, &env.root, &["clone", source.as_str(), "custom-clone"]);
+    assert!(output.status.success(), "stderr:\n{}", stderr(&output));
+
+    let workspace = env.root.join("custom-clone");
+    let worktree = workspace.join("main");
+    assert_eq!(stdout(&output), worktree.to_string_lossy());
+    assert!(worktree.exists());
+    assert!(workspace.join(".wt-workspace").exists());
+}
+
+#[test]
+fn clone_command_accepts_github_slug_sources() {
+    let env = TestEnv::new("clone-gh-slug");
+    let source = env.origin.to_string_lossy().into_owned();
+    env.set_fake_gh(&format!(
+        "#!/usr/bin/env bash\nset -e\nif [[ \"$1\" == \"--version\" ]]; then\n  printf 'gh version 99.0.0\\n'\n  exit 0\nfi\nif [[ \"$1\" == \"repo\" && \"$2\" == \"clone\" && \"$3\" == \"owner/repo\" ]]; then\n  git clone --progress \"{}\" \"$4\"\n  exit 0\nfi\necho \"unexpected gh invocation: $*\" >&2\nexit 1\n",
+        source
+    ));
+
+    let output = run_wt_with_path(&env, &env.root, &["clone", "owner/repo"]);
+    assert!(output.status.success(), "stderr:\n{}", stderr(&output));
+
+    let workspace = env.root.join("repo");
+    let worktree = workspace.join("main");
+    assert_eq!(stdout(&output), worktree.to_string_lossy());
+    assert!(worktree.exists());
+    assert!(workspace.join(".wt-workspace").exists());
 }
 
 #[test]
