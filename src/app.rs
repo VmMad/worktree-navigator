@@ -6,6 +6,14 @@ use crate::types::{
     ActiveAction, CheckoutRemotePhase, CloneEvent, CopySecretsPhase, SyncResult, Worktree,
 };
 
+#[derive(Debug, Clone)]
+pub enum PendingConsoleOperation {
+    CloneRepo { url: String, dest: PathBuf },
+    SyncPr { pr_number: u32 },
+    SyncWorktree { wt: Worktree },
+    FetchRemote { remote: String },
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct CommandSpec {
     pub label: &'static str,
@@ -91,6 +99,9 @@ pub struct App {
     pub loading_animation_frame: usize,
     pub clone_error: Option<String>,
     pub clone_output: Vec<String>,
+    pub pending_console_operation: Option<PendingConsoleOperation>,
+    pub console_handoff_active: bool,
+    pub console_handoff_needs_resume: bool,
 
     pub selected_index: usize,
     pub active_action: ActiveAction,
@@ -166,6 +177,9 @@ impl App {
             loading_animation_frame: 0,
             clone_error: None,
             clone_output: vec![],
+            pending_console_operation: None,
+            console_handoff_active: false,
+            console_handoff_needs_resume: false,
             selected_index: 0,
             active_action: ActiveAction::None,
             input_buffer: String::new(),

@@ -1,11 +1,9 @@
 use anyhow::{Context, Result};
 use std::collections::HashSet;
 use std::fs;
-use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::mpsc::{self, Receiver, Sender};
-use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -34,7 +32,7 @@ fn fetch_remote_tracking_branch(
     remote: &str,
     branch: &str,
     quiet: bool,
-) -> Result<std::process::Output> {
+) -> Result<std::process::ExitStatus> {
     let remote_refspec = format!("refs/heads/{branch}:refs/remotes/{remote}/{branch}");
     let mut args = vec!["fetch", remote];
     if quiet {
@@ -45,8 +43,27 @@ fn fetch_remote_tracking_branch(
     Command::new("git")
         .args(&args)
         .current_dir(git_cwd)
-        .output()
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .status()
         .with_context(|| format!("Failed to run git fetch {remote} {remote_refspec}"))
+}
+
+fn run_command_capture_stdout(
+    command: &mut Command,
+    spawn_context: &'static str,
+) -> Result<std::process::Output> {
+    let child = command
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .context(spawn_context)?;
+
+    child
+        .wait_with_output()
+        .context("Failed while waiting for command output")
 }
 
 fn git_branch_exists(repo_root: &Path, branch: &str) -> bool {
@@ -512,7 +529,8 @@ fn checkout_pr_as_worktree_impl(
 
     let pr_ref = format!("#{pr_number}");
     push_sync_pr_progress(tx, &mut messages, format!("$ gh pr view {pr_ref}"));
-    let pr_info = Command::new("gh")
+    let mut pr_info_cmd = Command::new("gh");
+    pr_info_cmd
         .args([
             "pr",
             "view",
@@ -522,13 +540,11 @@ fn checkout_pr_as_worktree_impl(
             "-q",
             ".headRefName",
         ])
-        .current_dir(&git_cwd)
-        .output()
-        .context("Failed to run gh pr view")?;
+        .current_dir(&git_cwd);
+    let pr_info = run_command_capture_stdout(&mut pr_info_cmd, "Failed to run gh pr view")?;
 
     if !pr_info.status.success() {
-        let stderr = String::from_utf8_lossy(&pr_info.stderr);
-        anyhow::bail!("{}", stderr.trim());
+        anyhow::bail!("gh pr view failed.");
     }
 
     let branch_name = String::from_utf8_lossy(&pr_info.stdout).trim().to_string();
@@ -549,12 +565,11 @@ fn checkout_pr_as_worktree_impl(
     let fetch = fetch_remote_tracking_branch(&git_cwd, "origin", &branch_name, false);
 
     match fetch {
-        Ok(out) if !out.status.success() => {
-            let stderr = String::from_utf8_lossy(&out.stderr);
+        Ok(status) if !status.success() => {
             push_sync_pr_progress(
                 tx,
                 &mut messages,
-                format!("  (fetch note: {})", stderr.trim()),
+                "  (fetch note: git fetch failed)".to_string(),
             );
         }
         Err(e) => push_sync_pr_progress(tx, &mut messages, format!("  (fetch warn: {e})")),
@@ -721,8 +736,8 @@ fn sync_existing_pr_worktree(
     );
     let fetch = fetch_remote_tracking_branch(&git_cwd, "origin", &wt.branch, true)?;
 
-    if !fetch.status.success() {
-        let err = command_failure_summary(&fetch, "Could not fetch remotes");
+    if !fetch.success() {
+        let err = "Could not fetch remotes.".to_string();
         push_sync_pr_progress(tx, messages, format!("✗ {err}"));
         anyhow::bail!("Could not sync PR #{pr_number}: {err}");
     }
@@ -784,20 +799,6 @@ fn sync_existing_pr_worktree(
     let err = describe_pr_sync_failure(&String::from_utf8_lossy(&merge.stderr), &wt.branch);
     push_sync_pr_progress(tx, messages, format!("✗ {err}"));
     anyhow::bail!("{err}");
-}
-
-fn command_failure_summary(output: &std::process::Output, fallback: &str) -> String {
-    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-    if !stderr.is_empty() {
-        return stderr;
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if !stdout.is_empty() {
-        return stdout;
-    }
-
-    fallback.to_string()
 }
 
 fn describe_pr_sync_failure(stderr: &str, branch_name: &str) -> String {
@@ -862,17 +863,14 @@ fn push_sync_pr_progress(
     }
 }
 
-/// Fetch the tracked branch ref from origin, then fast-forward a single worktree to origin/<branch>.
-/// Returns (fetch_succeeded, SyncResult).
 pub fn sync_one_worktree(repo_root: &Path, wt: &Worktree) -> (bool, SyncResult) {
     let git_cwd = resolve_git_cwd(repo_root);
     let fetch_ok = fetch_remote_tracking_branch(&git_cwd, "origin", &wt.branch, true)
-        .map(|out| out.status.success())
+        .map(|status| status.success())
         .unwrap_or(false);
 
     let remote_ref = format!("origin/{}", wt.branch);
 
-    // Check that origin/<branch> exists before attempting the merge.
     let ref_exists = Command::new("git")
         .args(["rev-parse", "--verify", &remote_ref])
         .current_dir(&wt.path)
@@ -1008,19 +1006,25 @@ pub fn clone_repo_with_layout(url: &str, dest: &Path) -> Result<PathBuf> {
 pub fn start_clone_repo_with_layout(url: String, dest: PathBuf) -> Receiver<CloneEvent> {
     let (tx, rx) = mpsc::channel();
 
-    thread::spawn(move || match clone_repo_with_layout_inner(&url, &dest, &tx) {
-        Ok(worktree_path) => {
-            let _ = tx.send(CloneEvent::Finished(worktree_path));
-        }
-        Err(err) => {
-            let _ = tx.send(CloneEvent::Error(err.to_string()));
-        }
-    });
+    thread::spawn(
+        move || match clone_repo_with_layout_inner(&url, &dest, &tx) {
+            Ok(worktree_path) => {
+                let _ = tx.send(CloneEvent::Finished(worktree_path));
+            }
+            Err(err) => {
+                let _ = tx.send(CloneEvent::Error(err.to_string()));
+            }
+        },
+    );
 
     rx
 }
 
-fn clone_repo_with_layout_inner(url: &str, dest: &Path, tx: &Sender<CloneEvent>) -> Result<PathBuf> {
+fn clone_repo_with_layout_inner(
+    url: &str,
+    dest: &Path,
+    tx: &Sender<CloneEvent>,
+) -> Result<PathBuf> {
     let source = url.trim();
     fs::create_dir_all(dest).context("Failed to create destination directory")?;
     let tmp_dir = dest.join(format!(
@@ -1035,7 +1039,7 @@ fn clone_repo_with_layout_inner(url: &str, dest: &Path, tx: &Sender<CloneEvent>)
 
     if is_github_owner_repo(source) {
         if gh_available() {
-            match clone_with_gh(source, &tmp_str, tx) {
+            match clone_with_gh(source, &tmp_str) {
                 Ok(()) => {}
                 Err(_) => {
                     if tmp_dir.exists() {
@@ -1043,19 +1047,18 @@ fn clone_repo_with_layout_inner(url: &str, dest: &Path, tx: &Sender<CloneEvent>)
                     }
                     let protocol = preferred_github_protocol();
                     let repo_url = github_url_from_slug(source, &protocol);
-                    clone_with_git(&repo_url, &tmp_str, tx)?;
+                    clone_with_git(&repo_url, &tmp_str)?;
                 }
             }
         } else {
             let protocol = preferred_github_protocol();
             let repo_url = github_url_from_slug(source, &protocol);
-            clone_with_git(&repo_url, &tmp_str, tx)?;
+            clone_with_git(&repo_url, &tmp_str)?;
         }
     } else {
-        clone_with_git(source, &tmp_str, tx)?;
+        clone_with_git(source, &tmp_str)?;
     }
 
-    // Detect the default branch from the cloned checkout.
     let head = Command::new("git")
         .args(["symbolic-ref", "--short", "HEAD"])
         .current_dir(&tmp_dir)
@@ -1088,118 +1091,36 @@ fn clone_repo_with_layout_inner(url: &str, dest: &Path, tx: &Sender<CloneEvent>)
     Ok(worktree_path)
 }
 
-fn clone_with_gh(source: &str, dest: &str, tx: &Sender<CloneEvent>) -> Result<()> {
-    clone_with_command(
-        Command::new("gh"),
-        &["repo", "clone", source, dest, "--", "--progress"],
-        "Failed to run gh repo clone",
-        "gh repo clone failed",
-        tx,
-    )
-}
-
-fn clone_with_git(source: &str, dest: &str, tx: &Sender<CloneEvent>) -> Result<()> {
-    clone_with_command(
-        Command::new("git"),
-        &["clone", "--progress", source, dest],
-        "Failed to run git clone",
-        "git clone failed",
-        tx,
-    )
-}
-
-fn clone_with_command(
-    mut command: Command,
-    args: &[&str],
-    spawn_context: &'static str,
-    fallback_error: &'static str,
-    tx: &Sender<CloneEvent>,
-) -> Result<()> {
-    let mut child = command
-        .args(args)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .context(spawn_context)?;
-
-    let stdout = child
-        .stdout
-        .take()
-        .context("Failed to capture clone stdout")?;
-    let stderr = child
-        .stderr
-        .take()
-        .context("Failed to capture clone stderr")?;
-
-    let last_line = Arc::new(Mutex::new(None::<String>));
-    let stdout_handle = spawn_output_forwarder(stdout, tx.clone(), Arc::clone(&last_line));
-    let stderr_handle = spawn_output_forwarder(stderr, tx.clone(), Arc::clone(&last_line));
-
-    let status = child.wait().context("Failed to wait for clone process")?;
-
-    let _ = stdout_handle.join();
-    let _ = stderr_handle.join();
+fn clone_with_gh(source: &str, dest: &str) -> Result<()> {
+    let status = Command::new("gh")
+        .args(["repo", "clone", source, dest])
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .status()
+        .context("Failed to run gh repo clone")?;
 
     if status.success() {
         Ok(())
     } else {
-        let message = last_line
-            .lock()
-            .ok()
-            .and_then(|line| line.clone())
-            .filter(|line| !line.is_empty())
-            .unwrap_or_else(|| fallback_error.to_string());
-        Err(anyhow::anyhow!("{message}"))
+        anyhow::bail!("gh repo clone failed.")
     }
 }
 
-fn spawn_output_forwarder(
-    mut stream: impl Read + Send + 'static,
-    tx: Sender<CloneEvent>,
-    last_line: Arc<Mutex<Option<String>>>,
-) -> thread::JoinHandle<()> {
-    thread::spawn(move || {
-        let mut buf = [0u8; 4096];
-        let mut current = Vec::new();
-        loop {
-            match stream.read(&mut buf) {
-                Ok(0) => break,
-                Ok(read) => {
-                    for &byte in &buf[..read] {
-                        match byte {
-                            b'\r' => {
-                                emit_clone_output(&tx, &last_line, std::mem::take(&mut current));
-                            }
-                            b'\n' => {
-                                emit_clone_output(&tx, &last_line, std::mem::take(&mut current));
-                            }
-                            _ => current.push(byte),
-                        }
-                    }
-                }
-                Err(_) => break,
-            }
-        }
+fn clone_with_git(source: &str, dest: &str) -> Result<()> {
+    let status = Command::new("git")
+        .args(["clone", source, dest])
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .status()
+        .context("Failed to run git clone")?;
 
-        emit_clone_output(&tx, &last_line, current);
-    })
-}
-
-fn emit_clone_output(
-    tx: &Sender<CloneEvent>,
-    last_line: &Arc<Mutex<Option<String>>>,
-    bytes: Vec<u8>,
-) {
-    let line = String::from_utf8_lossy(&bytes).trim_end().to_string();
-    if line.is_empty() {
-        return;
+    if status.success() {
+        Ok(())
+    } else {
+        anyhow::bail!("git clone failed.")
     }
-
-    if let Ok(mut last) = last_line.lock() {
-        *last = Some(line.clone());
-    }
-
-    let _ = tx.send(CloneEvent::Progress { line });
 }
 
 fn gh_available() -> bool {
@@ -1626,17 +1547,13 @@ pub fn start_fetch_remote(repo_root: PathBuf, remote: String) -> Receiver<Result
         let out = Command::new("git")
             .args(["fetch", &remote])
             .current_dir(&git_cwd)
-            .output();
+            .stdin(Stdio::inherit())
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit())
+            .status();
         let result = match out {
-            Ok(o) if o.status.success() => Ok(()),
-            Ok(o) => {
-                let stderr = String::from_utf8_lossy(&o.stderr).trim().to_string();
-                Err(if stderr.is_empty() {
-                    format!("git fetch {remote} failed")
-                } else {
-                    stderr
-                })
-            }
+            Ok(status) if status.success() => Ok(()),
+            Ok(_) => Err(format!("git fetch {remote} failed")),
             Err(e) => Err(e.to_string()),
         };
         let _ = tx.send(result);

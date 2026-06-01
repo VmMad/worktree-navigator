@@ -21,11 +21,12 @@ use crossterm::{
         Event, KeyCode, KeyModifiers, MouseButton, MouseEventKind,
     },
     execute,
+    style::Stylize,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use ratatui::{Terminal, backend::CrosstermBackend};
 
-use app::App;
+use app::{App, PendingConsoleOperation};
 use cli::{BranchBase, ParsedArgs};
 use text_input::TextInputKeyResult;
 use types::{
@@ -68,6 +69,7 @@ fn main() -> Result<()> {
             }
             Ok(())
         }
+
         ParsedArgs::Update => update::run_manual_update(),
         ParsedArgs::Help => {
             cli::print_help();
@@ -75,6 +77,78 @@ fn main() -> Result<()> {
         }
         command => run_cli_command(&cwd, command),
     }
+}
+
+fn suspend_terminal(
+    mouse_capture_enabled: &mut bool,
+    terminal: &mut Terminal<CrosstermBackend<std::io::Stderr>>,
+) -> Result<()> {
+    terminal.backend_mut().flush()?;
+    cleanup_terminal_state()?;
+    *mouse_capture_enabled = false;
+    Ok(())
+}
+
+fn resume_terminal(
+    app: &App,
+    mouse_capture_enabled: &mut bool,
+    terminal: &mut Terminal<CrosstermBackend<std::io::Stderr>>,
+) -> Result<()> {
+    enable_raw_mode()?;
+    if text_input::wants_mouse_capture(app) {
+        execute!(
+            terminal.backend_mut(),
+            EnterAlternateScreen,
+            EnableMouseCapture,
+            EnableBracketedPaste
+        )?;
+        *mouse_capture_enabled = true;
+    } else {
+        execute!(
+            terminal.backend_mut(),
+            EnterAlternateScreen,
+            EnableBracketedPaste
+        )?;
+        *mouse_capture_enabled = false;
+    }
+    terminal.clear()?;
+    Ok(())
+}
+
+fn start_pending_console_operation(
+    app: &mut App,
+    mouse_capture_enabled: &mut bool,
+    terminal: &mut Terminal<CrosstermBackend<std::io::Stderr>>,
+) -> Result<()> {
+    let Some(operation) = app.pending_console_operation.take() else {
+        return Ok(());
+    };
+
+    suspend_terminal(mouse_capture_enabled, terminal)?;
+    app.console_handoff_active = true;
+    app.console_handoff_needs_resume = false;
+
+    match operation {
+        PendingConsoleOperation::CloneRepo { url, dest } => {
+            eprintln!();
+            app.clone_receiver = Some(git::start_clone_repo_with_layout(url, dest));
+        }
+        PendingConsoleOperation::SyncPr { pr_number } => {
+            app.sync_pr_receiver = Some(git::start_checkout_pr_as_worktree(
+                app.repo_root.clone(),
+                pr_number,
+            ));
+        }
+        PendingConsoleOperation::SyncWorktree { wt } => {
+            app.sync_receiver = Some(git::start_sync_one_worktree(app.repo_root.clone(), wt));
+        }
+        PendingConsoleOperation::FetchRemote { remote } => {
+            app.checkout_remote_fetch_receiver =
+                Some(git::start_fetch_remote(app.repo_root.clone(), remote));
+        }
+    }
+
+    Ok(())
 }
 
 #[derive(Debug, Clone)]
@@ -90,6 +164,20 @@ fn resolve_cwd() -> PathBuf {
         .map(PathBuf::from)
         .or_else(|_| std::env::current_dir())
         .expect("no cwd")
+}
+
+fn display_path_with_home(path: &Path) -> String {
+    match std::env::var_os("HOME") {
+        Some(home) => {
+            let home = PathBuf::from(home);
+            match path.strip_prefix(&home) {
+                Ok(relative) if relative.as_os_str().is_empty() => "~".to_string(),
+                Ok(relative) => format!("~/{}", relative.display()),
+                Err(_) => path.display().to_string(),
+            }
+        }
+        None => path.display().to_string(),
+    }
 }
 
 fn resolve_repo_context(cwd: &Path) -> RepoContext {
@@ -218,28 +306,34 @@ fn run_tui(cwd: PathBuf, mark_tree: bool) -> Result<()> {
             {
                 app.advance_loading_animation();
             }
-            let wants_mouse_capture = text_input::wants_mouse_capture(&app);
-            if wants_mouse_capture != mouse_capture_enabled {
-                if wants_mouse_capture {
-                    execute!(terminal.backend_mut(), EnableMouseCapture)?;
-                } else {
-                    execute!(terminal.backend_mut(), DisableMouseCapture)?;
-                }
-                mouse_capture_enabled = wants_mouse_capture;
+            if app.console_handoff_needs_resume {
+                resume_terminal(&app, &mut mouse_capture_enabled, &mut terminal)?;
+                app.console_handoff_active = false;
+                app.console_handoff_needs_resume = false;
             }
-            terminal.draw(|f| ui::draw(f, &mut app))?;
 
-            // Start sync after the loading frame has been rendered.
+            if !app.console_handoff_active {
+                let wants_mouse_capture = text_input::wants_mouse_capture(&app);
+                if wants_mouse_capture != mouse_capture_enabled {
+                    if wants_mouse_capture {
+                        execute!(terminal.backend_mut(), EnableMouseCapture)?;
+                    } else {
+                        execute!(terminal.backend_mut(), DisableMouseCapture)?;
+                    }
+                    mouse_capture_enabled = wants_mouse_capture;
+                }
+                terminal.draw(|f| ui::draw(f, &mut app))?;
+            }
+
             if app.sync_pending {
                 app.sync_pending = false;
                 let wt = app.worktrees.get(app.sync_selected_idx).cloned();
                 if let Some(wt) = wt {
-                    let root = app.repo_root.clone();
-                    app.sync_receiver = Some(git::start_sync_one_worktree(root, wt));
+                    app.pending_console_operation =
+                        Some(PendingConsoleOperation::SyncWorktree { wt });
                 }
             }
 
-            // Execute pending new branch after the loading frame has been rendered.
             if let Some(branch) = app.new_branch_pending.take() {
                 let root = app.repo_root.clone();
                 let result = if app.new_branch_use_existing {
@@ -296,7 +390,6 @@ fn run_tui(cwd: PathBuf, mark_tree: bool) -> Result<()> {
                 }
             }
 
-            // Execute pending delete after the loading frame has been rendered.
             if let Some(paths) = app.delete_pending.take() {
                 let root = app.repo_root.clone();
                 match git::remove_worktrees(&root, &paths, app.is_workspace) {
@@ -326,7 +419,6 @@ fn run_tui(cwd: PathBuf, mark_tree: bool) -> Result<()> {
                 }
             }
 
-            // Execute pending copy secrets after the loading frame has been rendered.
             if app.copy_secrets_pending {
                 app.copy_secrets_pending = false;
                 let source = app
@@ -370,7 +462,11 @@ fn run_tui(cwd: PathBuf, mark_tree: bool) -> Result<()> {
                 }
             }
 
-            if event::poll(Duration::from_millis(100))? {
+            start_pending_console_operation(&mut app, &mut mouse_capture_enabled, &mut terminal)?;
+
+            if app.console_handoff_active {
+                std::thread::sleep(Duration::from_millis(100));
+            } else if event::poll(Duration::from_millis(100))? {
                 match event::read()? {
                     Event::Key(key) => handle_key(&mut app, key.code, key.modifiers),
                     Event::Paste(text) => handle_paste(&mut app, &text),
@@ -494,10 +590,7 @@ fn run_cli_command(cwd: &Path, command: ParsedArgs) -> Result<()> {
                 println!("{}", context.repo_root.display());
             }
         }
-        ParsedArgs::Tui { .. }
-        | ParsedArgs::Version
-        | ParsedArgs::Update
-        | ParsedArgs::Help => {
+        ParsedArgs::Tui { .. } | ParsedArgs::Version | ParsedArgs::Update | ParsedArgs::Help => {
             unreachable!("handled before CLI execution")
         }
     }
@@ -901,10 +994,9 @@ fn open_action(app: &mut App, action: ActiveAction) {
             app.checkout_remote_name = remotes[0].clone();
             app.checkout_remote_remotes = remotes;
             app.checkout_remote_phase = CheckoutRemotePhase::FetchingRemote;
-            app.checkout_remote_fetch_receiver = Some(git::start_fetch_remote(
-                app.repo_root.clone(),
-                app.checkout_remote_name.clone(),
-            ));
+            app.pending_console_operation = Some(PendingConsoleOperation::FetchRemote {
+                remote: app.checkout_remote_name.clone(),
+            });
             app.reset_loading_animation();
         } else {
             app.checkout_remote_remotes = remotes;
@@ -1114,10 +1206,7 @@ fn handle_sync_pr_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
             app.sync_pr_loading = true;
             app.clear_sync_pr_output();
             app.reset_loading_animation();
-            app.sync_pr_receiver = Some(git::start_checkout_pr_as_worktree(
-                app.repo_root.clone(),
-                pr_number,
-            ));
+            app.pending_console_operation = Some(PendingConsoleOperation::SyncPr { pr_number });
         }
         TextInputKeyResult::Updated
         | TextInputKeyResult::Ignored
@@ -1158,6 +1247,7 @@ fn poll_sync_pr_updates(app: &mut App) {
                 app.push_sync_pr_output(line);
             }
             SyncPrEvent::Finished(worktree_path) => {
+                app.console_handoff_needs_resume |= app.console_handoff_active;
                 app.sync_pr_loading = false;
                 app.active_action = ActiveAction::None;
                 app.clear_input();
@@ -1166,6 +1256,7 @@ fn poll_sync_pr_updates(app: &mut App) {
                 app.should_quit = true;
             }
             SyncPrEvent::Error(err) => {
+                app.console_handoff_needs_resume |= app.console_handoff_active;
                 app.sync_pr_loading = false;
                 app.overlay_error = Some(format!("Failed to sync PR: {err}"));
             }
@@ -1173,6 +1264,7 @@ fn poll_sync_pr_updates(app: &mut App) {
     }
 
     if disconnected && app.sync_pr_loading {
+        app.console_handoff_needs_resume |= app.console_handoff_active;
         app.sync_pr_loading = false;
         app.overlay_error = Some("PR sync ended unexpectedly.".to_string());
     }
@@ -1199,12 +1291,14 @@ fn poll_sync_updates(app: &mut App) {
     }
 
     if let Some((fetch_ok, result)) = completed {
+        app.console_handoff_needs_resume |= app.console_handoff_active;
         app.sync_fetch_ok = fetch_ok;
         app.sync_results = vec![result];
         app.sync_loading = false;
         app.sync_receiver = None;
         refresh_worktrees(app);
     } else if disconnected && app.sync_loading {
+        app.console_handoff_needs_resume |= app.console_handoff_active;
         app.sync_loading = false;
         app.sync_receiver = None;
         app.overlay_error = Some("Sync ended unexpectedly.".to_string());
@@ -1662,10 +1756,10 @@ fn handle_clone_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
                 app.clone_error = None;
                 app.clear_clone_output();
                 app.reset_loading_animation();
-                app.clone_receiver = Some(git::start_clone_repo_with_layout(
-                    app.clone_url.clone(),
-                    PathBuf::from(input),
-                ));
+                app.pending_console_operation = Some(PendingConsoleOperation::CloneRepo {
+                    url: app.clone_url.clone(),
+                    dest: PathBuf::from(input),
+                });
             }
         }
         TextInputKeyResult::Updated
@@ -1708,10 +1802,20 @@ fn poll_clone_updates(app: &mut App) {
             }
             CloneEvent::Finished(worktree_path) => {
                 app.clone_loading = false;
+                if app.console_handoff_active {
+                    let display_path = display_path_with_home(&worktree_path);
+                    eprintln!();
+                    eprintln!(
+                        "{} Cloned into {}",
+                        "[wt]".green().bold(),
+                        display_path.green()
+                    );
+                }
                 app.exit_path = Some(worktree_path.to_string_lossy().into_owned());
                 app.should_quit = true;
             }
             CloneEvent::Error(err) => {
+                app.console_handoff_needs_resume |= app.console_handoff_active;
                 app.clone_loading = false;
                 app.clone_error = Some(err);
             }
@@ -1719,6 +1823,7 @@ fn poll_clone_updates(app: &mut App) {
     }
 
     if disconnected && app.clone_loading {
+        app.console_handoff_needs_resume |= app.console_handoff_active;
         app.clone_loading = false;
         app.clone_error = Some("Clone process ended unexpectedly.".to_string());
     }
@@ -1748,8 +1853,8 @@ fn handle_checkout_remote_key(app: &mut App, code: KeyCode, modifiers: KeyModifi
                 app.checkout_remote_name = remote.clone();
                 app.overlay_error = None;
                 app.checkout_remote_phase = CheckoutRemotePhase::FetchingRemote;
-                app.checkout_remote_fetch_receiver =
-                    Some(git::start_fetch_remote(app.repo_root.clone(), remote));
+                app.pending_console_operation =
+                    Some(PendingConsoleOperation::FetchRemote { remote });
                 app.reset_loading_animation();
             }
             TextInputKeyResult::Updated
@@ -1815,6 +1920,7 @@ fn poll_checkout_remote_fetch(app: &mut App) {
         });
 
     if let Some(result) = result {
+        app.console_handoff_needs_resume |= app.console_handoff_active;
         app.checkout_remote_fetch_receiver = None;
         match result {
             Ok(()) => {
