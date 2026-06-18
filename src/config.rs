@@ -32,7 +32,7 @@ pub struct PostCreateRequest {
     pub scripts: Vec<PostCreateScript>,
 }
 
-fn default_true() -> bool {
+const fn default_true() -> bool {
     true
 }
 
@@ -298,7 +298,7 @@ mod tests {
         fs::create_dir_all(&worktree).expect("worktree dir should be created");
 
         let request_path = write_post_create_request(&PostCreateRequest {
-            repo_root: repo.clone(),
+            repo_root: repo,
             worktree_path: worktree.clone(),
             branch: "feature/test".to_string(),
             base_branch: Some("main".to_string()),

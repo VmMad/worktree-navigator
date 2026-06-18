@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-fn binary_path() -> &'static str {
+const fn binary_path() -> &'static str {
     env!("CARGO_BIN_EXE_worktree-navigator")
 }
 
@@ -109,7 +109,7 @@ impl TestEnv {
         path
     }
 
-    fn commit_in_worktree(&self, worktree: &Path, message: &str) {
+    fn commit_in_worktree(worktree: &Path, message: &str) {
         let file_name = format!("{}.txt", message.replace('/', "-"));
         fs::write(worktree.join(file_name), format!("{message}\n"))
             .expect("worktree file should be written");
@@ -278,8 +278,7 @@ fn clone_command_accepts_github_slug_sources() {
     let env = TestEnv::new("clone-gh-slug");
     let source = env.origin.to_string_lossy().into_owned();
     env.set_fake_gh(&format!(
-        "#!/usr/bin/env bash\nset -e\nif [[ \"$1\" == \"--version\" ]]; then\n  printf 'gh version 99.0.0\\n'\n  exit 0\nfi\nif [[ \"$1\" == \"repo\" && \"$2\" == \"clone\" && \"$3\" == \"owner/repo\" ]]; then\n  git clone --progress \"{}\" \"$4\"\n  exit 0\nfi\necho \"unexpected gh invocation: $*\" >&2\nexit 1\n",
-        source
+        "#!/usr/bin/env bash\nset -e\nif [[ \"$1\" == \"--version\" ]]; then\n  printf 'gh version 99.0.0\\n'\n  exit 0\nfi\nif [[ \"$1\" == \"repo\" && \"$2\" == \"clone\" && \"$3\" == \"owner/repo\" ]]; then\n  git clone --progress \"{source}\" \"$4\"\n  exit 0\nfi\necho \"unexpected gh invocation: $*\" >&2\nexit 1\n"
     ));
 
     let output = run_wt_with_path(&env, &env.root, &["clone", "owner/repo"]);
@@ -324,7 +323,7 @@ fn checkout_commands_default_to_the_default_branch_worktree() {
 fn branch_commands_create_worktrees_from_expected_bases() {
     let env = TestEnv::new("branch-create");
     let current_worktree = env.create_worktree_from_base("feature/current", "main");
-    env.commit_in_worktree(&current_worktree, "feature/current");
+    TestEnv::commit_in_worktree(&current_worktree, "feature/current");
 
     let main_head = git_stdout(&env.repo, &["rev-parse", "main"]);
     let current_head = git_stdout(&current_worktree, &["rev-parse", "HEAD"]);

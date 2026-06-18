@@ -227,7 +227,7 @@ impl App {
         }
     }
 
-    pub fn checkout_remote_is_loading(&self) -> bool {
+    pub const fn checkout_remote_is_loading(&self) -> bool {
         matches!(
             self.checkout_remote_phase,
             CheckoutRemotePhase::FetchingRemote | CheckoutRemotePhase::CreatingWorktree
@@ -253,7 +253,7 @@ impl App {
             .map(|b| b[input.len()..].to_string())
     }
 
-    pub fn total_items(&self) -> usize {
+    pub const fn total_items(&self) -> usize {
         COMMANDS.len() + self.worktrees.len()
     }
 
@@ -307,7 +307,7 @@ impl App {
         self.worktrees.iter().position(|wt| wt.is_current)
     }
 
-    pub fn selected_worktree_idx(&self) -> Option<usize> {
+    pub const fn selected_worktree_idx(&self) -> Option<usize> {
         if self.selected_index >= COMMANDS.len() {
             Some(self.selected_index - COMMANDS.len())
         } else {
@@ -376,7 +376,7 @@ impl App {
         }
     }
 
-    pub fn input_left(&mut self) {
+    pub const fn input_left(&mut self) {
         self.input_cursor = self.input_cursor.saturating_sub(1);
     }
 
@@ -443,7 +443,7 @@ impl App {
         self.input_buffer.replace_range(start..end, "");
     }
 
-    pub fn input_home(&mut self) {
+    pub const fn input_home(&mut self) {
         self.input_cursor = 0;
     }
 
@@ -464,7 +464,7 @@ impl App {
         self.input_cursor = 0;
     }
 
-    pub fn reset_loading_animation(&mut self) {
+    pub const fn reset_loading_animation(&mut self) {
         self.loading_animation_frame = 0;
     }
 
@@ -477,11 +477,11 @@ impl App {
         self.sync_pr_output.push(line);
     }
 
-    pub fn advance_loading_animation(&mut self) {
+    pub const fn advance_loading_animation(&mut self) {
         self.loading_animation_frame = (self.loading_animation_frame + 1) % 3;
     }
 
-    pub fn loading_animation_dots(&self) -> &'static str {
+    pub const fn loading_animation_dots(&self) -> &'static str {
         match self.loading_animation_frame {
             0 => ".  ",
             1 => ".. ",

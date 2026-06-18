@@ -149,7 +149,11 @@ pub fn list_worktrees(repo_root: &Path) -> Result<Vec<Worktree>> {
     let cwd = cwd.canonicalize().unwrap_or(cwd);
     let default_branch = get_default_branch(repo_root);
 
-    parse_worktree_porcelain(&stdout, &cwd, default_branch.as_deref())
+    Ok(parse_worktree_porcelain(
+        &stdout,
+        &cwd,
+        default_branch.as_deref(),
+    ))
 }
 
 pub fn git_common_dir(repo_root: &Path) -> Result<PathBuf> {
@@ -272,11 +276,7 @@ pub fn current_branch(dir: &Path) -> Result<String> {
     Ok(branch)
 }
 
-fn parse_worktree_porcelain(
-    raw: &str,
-    cwd: &Path,
-    default_branch: Option<&str>,
-) -> Result<Vec<Worktree>> {
+fn parse_worktree_porcelain(raw: &str, cwd: &Path, default_branch: Option<&str>) -> Vec<Worktree> {
     let mut worktrees = Vec::new();
 
     for block in raw.trim().split("\n\n") {
@@ -307,11 +307,8 @@ fn parse_worktree_porcelain(
             .or_else(|| head_line.map(|l| l.trim_start_matches("HEAD ").to_string()))
             .unwrap_or_else(|| "HEAD".to_string());
 
-        let is_main = match default_branch {
-            Some(db) => branch == db,
-            None => worktrees.is_empty(),
-        };
-        let is_current = path.canonicalize().unwrap_or(path.clone()) == cwd;
+        let is_main = default_branch.map_or(worktrees.is_empty(), |db| branch == db);
+        let is_current = path.canonicalize().unwrap_or_else(|_| path.clone()) == cwd;
 
         worktrees.push(Worktree {
             path: path_str.to_string(),
@@ -323,7 +320,7 @@ fn parse_worktree_porcelain(
     }
 
     worktrees.sort_by_key(|w| !w.is_main);
-    Ok(worktrees)
+    worktrees
 }
 
 pub fn add_worktree(
@@ -697,7 +694,7 @@ fn checkout_pr_as_worktree_impl(
 
         if local_branch_exists {
             let new_worktree = Worktree {
-                path: dest_str.clone(),
+                path: dest_str,
                 branch: branch_name.clone(),
                 is_main: false,
                 is_current: false,
@@ -1380,9 +1377,8 @@ fn read_git_origin_from_config(git_config: &Path) -> Option<String> {
 pub fn detect_worktree_workspace(dir: &Path) -> bool {
     const MAX_SCAN: usize = 50;
 
-    let entries = match fs::read_dir(dir) {
-        Ok(e) => e,
-        Err(_) => return false,
+    let Ok(entries) = fs::read_dir(dir) else {
+        return false;
     };
 
     let mut origin: Option<String> = None;
@@ -1450,11 +1446,10 @@ pub fn list_workspace_worktrees(workspace_dir: &Path) -> Result<Vec<Worktree>> {
         };
 
         let path_str = path.to_string_lossy().to_string();
-        let is_main = match default_branch.as_deref() {
-            Some(db) => branch == db,
-            None => worktrees.is_empty(),
-        };
-        let is_current = path.canonicalize().unwrap_or(path.clone()) == cwd;
+        let is_main = default_branch
+            .as_deref()
+            .map_or(worktrees.is_empty(), |db| branch == db);
+        let is_current = path.canonicalize().unwrap_or_else(|_| path.clone()) == cwd;
 
         worktrees.push(Worktree {
             path: path_str,

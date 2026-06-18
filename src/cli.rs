@@ -60,10 +60,10 @@ where
 
     let command = args.remove(0);
     match command.as_str() {
-        "__run-post-create" => parse_run_post_create(args),
-        "clone" => parse_clone(args),
-        "pr" | "checkout-pr" => parse_pr(args),
-        "gco" | "checkout" => parse_checkout(args),
+        "__run-post-create" => parse_run_post_create(&args),
+        "clone" => parse_clone(&args),
+        "pr" | "checkout-pr" => parse_pr(&args),
+        "gco" | "checkout" => parse_checkout(&args),
         "b" | "branch" => parse_branch(args),
         "d" | "delete" => parse_delete(args),
         "--help" | "-h" | "help" => Ok(ParsedArgs::Help),
@@ -71,7 +71,7 @@ where
     }
 }
 
-fn parse_clone(args: Vec<String>) -> Result<ParsedArgs> {
+fn parse_clone(args: &[String]) -> Result<ParsedArgs> {
     if args.is_empty() || args.len() > 2 {
         bail!("Usage: wt clone <repo> [dest]");
     }
@@ -94,7 +94,7 @@ fn parse_clone(args: Vec<String>) -> Result<ParsedArgs> {
     Ok(ParsedArgs::Clone { repo_source, dest })
 }
 
-fn parse_pr(args: Vec<String>) -> Result<ParsedArgs> {
+fn parse_pr(args: &[String]) -> Result<ParsedArgs> {
     if args.len() != 1 {
         bail!("Usage: wt pr <number>");
     }
@@ -115,7 +115,7 @@ fn parse_pr(args: Vec<String>) -> Result<ParsedArgs> {
     Ok(ParsedArgs::CheckoutPr { pr_number })
 }
 
-fn parse_checkout(args: Vec<String>) -> Result<ParsedArgs> {
+fn parse_checkout(args: &[String]) -> Result<ParsedArgs> {
     if args.len() > 1 {
         bail!("Usage: wt gco [branch]");
     }
@@ -201,7 +201,7 @@ fn parse_delete(args: Vec<String>) -> Result<ParsedArgs> {
     Ok(ParsedArgs::Delete { branch_name, yes })
 }
 
-fn parse_run_post_create(args: Vec<String>) -> Result<ParsedArgs> {
+fn parse_run_post_create(args: &[String]) -> Result<ParsedArgs> {
     if args.len() != 1 || args[0].trim().is_empty() {
         bail!("Usage: wt __run-post-create <request-file>");
     }
@@ -218,7 +218,7 @@ fn ensure_auto_base(base: &BranchBase, flag: &str) -> Result<()> {
     Ok(())
 }
 
-pub fn help_text() -> &'static str {
+pub const fn help_text() -> &'static str {
     "\
 wt opens the interactive worktree UI by default.
 

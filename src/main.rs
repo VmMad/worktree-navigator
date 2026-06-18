@@ -41,11 +41,11 @@ struct TuiCleanupGuard {
 }
 
 impl TuiCleanupGuard {
-    fn new() -> Self {
+    const fn new() -> Self {
         Self { active: true }
     }
 
-    fn disarm(&mut self) {
+    const fn disarm(&mut self) {
         self.active = false;
     }
 }
@@ -63,7 +63,7 @@ fn main() -> Result<()> {
     let cwd = resolve_cwd();
 
     match args {
-        ParsedArgs::Tui { mark_tree } => run_tui(cwd, mark_tree),
+        ParsedArgs::Tui { mark_tree } => run_tui(&cwd, mark_tree),
         ParsedArgs::Version => {
             if std::env::var_os("WT_CWD").is_some() {
                 eprintln!("wt v{}", version::current_version());
@@ -318,17 +318,17 @@ fn resolve_cwd() -> PathBuf {
 }
 
 fn display_path_with_home(path: &Path) -> String {
-    match std::env::var_os("HOME") {
-        Some(home) => {
+    std::env::var_os("HOME").map_or_else(
+        || path.display().to_string(),
+        |home| {
             let home = PathBuf::from(home);
             match path.strip_prefix(&home) {
                 Ok(relative) if relative.as_os_str().is_empty() => "~".to_string(),
                 Ok(relative) => format!("~/{}", relative.display()),
                 Err(_) => path.display().to_string(),
             }
-        }
-        None => path.display().to_string(),
-    }
+        },
+    )
 }
 
 fn resolve_repo_context(cwd: &Path) -> RepoContext {
@@ -367,15 +367,15 @@ fn list_context_worktrees(context: &RepoContext) -> Result<Vec<Worktree>> {
     }
 }
 
-fn run_tui(cwd: PathBuf, mark_tree: bool) -> Result<()> {
+fn run_tui(cwd: &Path, mark_tree: bool) -> Result<()> {
     let mut update_notice_rx = (!mark_tree).then(update::start_background_update_check);
     let mut update_notice = None;
 
     if mark_tree {
-        git::create_workspace_marker(&cwd)?;
+        git::create_workspace_marker(cwd)?;
     }
 
-    let context = resolve_repo_context(&cwd);
+    let context = resolve_repo_context(cwd);
     let no_repo = context.no_repo;
     let repo_root = context.repo_root.clone();
 
@@ -398,12 +398,10 @@ fn run_tui(cwd: PathBuf, mark_tree: bool) -> Result<()> {
         app.no_repo = true;
         app.worktrees_loading = false;
         app.active_action = ActiveAction::CloneRepo;
-    } else {
-        if let Err(err) = config::load_repo_config(&repo_root).map(|config| {
-            app.repo_config = config;
-        }) {
-            app.overlay_error = Some(format!("Failed to load options: {err}"));
-        }
+    } else if let Err(err) = config::load_repo_config(&repo_root).map(|config| {
+        app.repo_config = config;
+    }) {
+        app.overlay_error = Some(format!("Failed to load options: {err}"));
     }
 
     if !no_repo && context.is_workspace {
@@ -634,7 +632,6 @@ fn run_tui(cwd: PathBuf, mark_tree: bool) -> Result<()> {
                     Event::Key(key) => handle_key(&mut app, key.code, key.modifiers),
                     Event::Paste(text) => handle_paste(&mut app, &text),
                     Event::Mouse(m) => handle_mouse(&mut app, m.kind, m.column, m.row),
-                    Event::Resize(_, _) => {}
                     _ => {}
                 }
             }
@@ -692,13 +689,11 @@ fn run_tui(cwd: PathBuf, mark_tree: bool) -> Result<()> {
 }
 
 fn panic_message(payload: &Box<dyn std::any::Any + Send>) -> String {
-    if let Some(message) = payload.downcast_ref::<&'static str>() {
-        (*message).to_string()
-    } else if let Some(message) = payload.downcast_ref::<String>() {
-        message.clone()
-    } else {
-        "unknown panic".to_string()
-    }
+    payload
+        .downcast_ref::<&'static str>()
+        .map(|message| (*message).to_string())
+        .or_else(|| payload.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "unknown panic".to_string())
 }
 
 fn cleanup_terminal_state() -> Result<()> {
@@ -784,17 +779,17 @@ fn require_repo_context(cwd: &Path) -> Result<RepoContext> {
 }
 
 fn resolve_cli_clone_dest(cwd: &Path, repo_source: &str, dest: Option<&str>) -> PathBuf {
-    match dest {
-        Some(dest) => {
+    dest.map_or_else(
+        || PathBuf::from(git::dest_from_url(repo_source, cwd)),
+        |dest| {
             let path = PathBuf::from(dest);
             if path.is_absolute() {
                 path
             } else {
                 cwd.join(path)
             }
-        }
-        None => PathBuf::from(git::dest_from_url(repo_source, cwd)),
-    }
+        },
+    )
 }
 
 fn resolve_cli_branch_base(context: &RepoContext, base: &BranchBase) -> Result<String> {
@@ -1214,12 +1209,8 @@ fn handle_sync_trees_key(app: &mut App, code: KeyCode) {
         return;
     }
 
-    // Results phase: Esc/Enter (or any other key) closes.
+    // Results phase: any key closes.
     if !app.sync_results.is_empty() {
-        match code {
-            KeyCode::Esc | KeyCode::Enter => {}
-            _ => {}
-        }
         app.active_action = ActiveAction::None;
         app.sync_results.clear();
         return;
@@ -1253,22 +1244,22 @@ fn handle_new_branch_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) 
 
     if app.new_branch_confirm_existing.is_some() {
         match code {
-            KeyCode::Left | KeyCode::Up | KeyCode::Char('h') | KeyCode::Char('k') => {
+            KeyCode::Left | KeyCode::Up | KeyCode::Char('h' | 'k') => {
                 app.new_branch_confirm_yes = true;
             }
-            KeyCode::Right | KeyCode::Down | KeyCode::Char('j') | KeyCode::Char('l') => {
+            KeyCode::Right | KeyCode::Down | KeyCode::Char('j' | 'l') => {
                 app.new_branch_confirm_yes = false;
             }
-            KeyCode::Char('y') | KeyCode::Char('Y') => {
+            KeyCode::Char('y' | 'Y') => {
                 app.new_branch_confirm_yes = true;
                 finish_new_branch_existing_confirmation(app, true);
             }
-            KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+            KeyCode::Char('n' | 'N') | KeyCode::Esc => {
                 app.new_branch_confirm_yes = false;
                 finish_new_branch_existing_confirmation(app, false);
             }
             KeyCode::Enter => {
-                finish_new_branch_existing_confirmation(app, app.new_branch_confirm_yes)
+                finish_new_branch_existing_confirmation(app, app.new_branch_confirm_yes);
             }
             _ => {}
         }
@@ -1338,7 +1329,7 @@ fn handle_options_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
 
                 let edit_idx = app.options_edit_idx;
                 let save_result = update_repo_config(app, |config| match edit_idx {
-                    Some(idx) => config.post_create_scripts[idx].command = command.clone(),
+                    Some(idx) => config.post_create_scripts[idx].command.clone_from(&command),
                     None => config.post_create_scripts.push(PostCreateScript {
                         command: command.clone(),
                         enabled: true,
@@ -1617,17 +1608,17 @@ fn handle_delete_key(app: &mut App, code: KeyCode) {
 
     if app.delete_warn_current {
         match code {
-            KeyCode::Left | KeyCode::Up | KeyCode::Char('h') | KeyCode::Char('k') => {
+            KeyCode::Left | KeyCode::Up | KeyCode::Char('h' | 'k') => {
                 app.delete_confirm_yes = true;
             }
-            KeyCode::Right | KeyCode::Down | KeyCode::Char('j') | KeyCode::Char('l') => {
+            KeyCode::Right | KeyCode::Down | KeyCode::Char('j' | 'l') => {
                 app.delete_confirm_yes = false;
             }
-            KeyCode::Char('y') | KeyCode::Char('Y') => {
+            KeyCode::Char('y' | 'Y') => {
                 app.delete_confirm_yes = true;
                 finish_delete_current_warning(app, true);
             }
-            KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+            KeyCode::Char('n' | 'N') | KeyCode::Esc => {
                 app.delete_confirm_yes = false;
                 finish_delete_current_warning(app, false);
             }
@@ -1639,17 +1630,17 @@ fn handle_delete_key(app: &mut App, code: KeyCode) {
 
     if app.delete_confirming {
         match code {
-            KeyCode::Left | KeyCode::Up | KeyCode::Char('h') | KeyCode::Char('k') => {
+            KeyCode::Left | KeyCode::Up | KeyCode::Char('h' | 'k') => {
                 app.delete_confirm_yes = true;
             }
-            KeyCode::Right | KeyCode::Down | KeyCode::Char('j') | KeyCode::Char('l') => {
+            KeyCode::Right | KeyCode::Down | KeyCode::Char('j' | 'l') => {
                 app.delete_confirm_yes = false;
             }
-            KeyCode::Char('y') | KeyCode::Char('Y') => {
+            KeyCode::Char('y' | 'Y') => {
                 app.delete_confirm_yes = true;
                 finish_delete_confirmation(app, true);
             }
-            KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+            KeyCode::Char('n' | 'N') | KeyCode::Esc => {
                 app.delete_confirm_yes = false;
                 finish_delete_confirmation(app, false);
             }
@@ -1724,11 +1715,11 @@ fn handle_copy_secrets_key(app: &mut App, code: KeyCode) {
         CopySecretsPhase::ConfirmOverwrite => match code {
             KeyCode::Left | KeyCode::Char('h') => app.copy_secrets_confirm_yes = true,
             KeyCode::Right | KeyCode::Char('l') => app.copy_secrets_confirm_yes = false,
-            KeyCode::Char('y') | KeyCode::Char('Y') => {
+            KeyCode::Char('y' | 'Y') => {
                 app.copy_secrets_confirm_yes = true;
                 finish_copy_secrets(app, true);
             }
-            KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+            KeyCode::Char('n' | 'N') | KeyCode::Esc => {
                 app.copy_secrets_confirm_yes = false;
                 finish_copy_secrets(app, false);
             }
@@ -1804,7 +1795,7 @@ fn handle_copy_secrets_select(app: &mut App, wt_idx: usize) {
     }
 }
 
-fn finish_copy_secrets(app: &mut App, confirmed: bool) {
+const fn finish_copy_secrets(app: &mut App, confirmed: bool) {
     if !confirmed {
         app.copy_secrets_phase = CopySecretsPhase::SelectTarget;
         return;
@@ -2047,10 +2038,10 @@ fn handle_clone_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
                 return;
             }
             if app.clone_step == 0 {
-                app.clone_url = input.clone();
+                app.clone_url.clone_from(&input);
                 let dest = git::dest_from_url(&input, &app.repo_root);
                 app.clear_input();
-                app.input_buffer = dest.clone();
+                app.input_buffer.clone_from(&dest);
                 app.input_cursor = dest.chars().count();
                 app.clone_step = 1;
                 app.clone_error = None;
@@ -2149,7 +2140,7 @@ fn handle_checkout_remote_key(app: &mut App, code: KeyCode, modifiers: KeyModifi
                 if remote.is_empty() {
                     return;
                 }
-                app.checkout_remote_name = remote.clone();
+                app.checkout_remote_name.clone_from(&remote);
                 app.overlay_error = None;
                 app.checkout_remote_phase = CheckoutRemotePhase::FetchingRemote;
                 app.pending_console_operation =

@@ -585,13 +585,13 @@ fn update_state_dir() -> PathBuf {
     if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
         return PathBuf::from(xdg).join("worktree-navigator");
     }
-    match std::env::var("HOME") {
-        Ok(home) => PathBuf::from(home).join(".config/worktree-navigator"),
-        Err(_) => PathBuf::from("."),
-    }
+    std::env::var("HOME").map_or_else(
+        |_| PathBuf::from("."),
+        |home| PathBuf::from(home).join(".config/worktree-navigator"),
+    )
 }
 
-fn update_cache_is_fresh(last_checked_unix: u64, now_unix: u64) -> bool {
+const fn update_cache_is_fresh(last_checked_unix: u64, now_unix: u64) -> bool {
     now_unix.saturating_sub(last_checked_unix) < UPDATE_CACHE_TTL_SECS
 }
 

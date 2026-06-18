@@ -824,7 +824,7 @@ fn draw_options_overlay(f: &mut Frame, app: &App, area: Rect) {
 
         if start > 0 {
             body_rows.push(Line::from(Span::styled(
-                format!("... {} earlier", start),
+                format!("... {start} earlier"),
                 Style::default().fg(Color::DarkGray),
             )));
         }
@@ -927,7 +927,7 @@ fn draw_new_branch_overlay(f: &mut Frame, app: &App, area: Rect) {
         let branch = app
             .new_branch_pending
             .as_deref()
-            .unwrap_or(app.input_buffer.trim());
+            .unwrap_or_else(|| app.input_buffer.trim());
         let loading_label = if app.new_branch_use_existing {
             format!(
                 "⟳  Creating worktree from {}{}",
@@ -1567,10 +1567,10 @@ fn draw_delete_overlay(f: &mut Frame, app: &App, area: Rect) {
             String::new()
         };
         let supporting_line = if app.delete_warn_current {
-            match fallback_branch {
-                Some(branch) => format!("wt will switch to {branch} after deletion"),
-                None => "wt will switch to the default worktree after deletion".to_string(),
-            }
+            fallback_branch.map_or_else(
+                || "wt will switch to the default worktree after deletion".to_string(),
+                |branch| format!("wt will switch to {branch} after deletion"),
+            )
         } else if paths.len() == 1 {
             paths.first().cloned().unwrap_or_default()
         } else {
@@ -1764,8 +1764,8 @@ fn draw_clone_overlay(f: &mut Frame, app: &App, area: Rect) {
         .constraints(rows_constraints)
         .split(inner);
 
+    let (before, after) = app.input_parts();
     if app.clone_step == 0 {
-        let (before, after) = app.input_parts();
         f.render_widget(
             Paragraph::new(input_line("Repo:      ", before, after, Color::Green)),
             rows[0],
@@ -1785,7 +1785,6 @@ fn draw_clone_overlay(f: &mut Frame, app: &App, area: Rect) {
             rows[4],
         );
     } else {
-        let (before, after) = app.input_parts();
         f.render_widget(
             Paragraph::new(Line::from(vec![
                 Span::styled("Repo:      ", Style::default().fg(Color::Gray)),
@@ -1920,8 +1919,8 @@ fn draw_checkout_remote_overlay(f: &mut Frame, app: &App, area: Rect) {
                 .constraints(constraints)
                 .split(inner);
 
+            let (before, after) = app.input_parts();
             if app.checkout_remote_phase == CheckoutRemotePhase::SelectRemote {
-                let (before, after) = app.input_parts();
                 f.render_widget(
                     Paragraph::new(input_line("Remote:  ", before, after, COLOR)),
                     rows[0],
@@ -1941,7 +1940,6 @@ fn draw_checkout_remote_overlay(f: &mut Frame, app: &App, area: Rect) {
                     rows[3],
                 );
             } else {
-                let (before, after) = app.input_parts();
                 let ghost = app.checkout_remote_ghost().unwrap_or_default();
                 f.render_widget(
                     Paragraph::new(Line::from(vec![

@@ -1,6 +1,6 @@
 pub const CURRENT_VERSION: &str = env!("WT_VERSION");
 
-pub fn current_version() -> &'static str {
+pub const fn current_version() -> &'static str {
     CURRENT_VERSION
 }
 

@@ -9,7 +9,7 @@ pub struct Worktree {
     pub has_secrets: bool,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ActiveAction {
     None,
     NewBranch,
@@ -29,7 +29,7 @@ pub enum OptionsPhase {
     Editing,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CheckoutRemotePhase {
     SelectRemote,
     FetchingRemote,
@@ -37,7 +37,7 @@ pub enum CheckoutRemotePhase {
     CreatingWorktree,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CopySecretsPhase {
     SelectSource,
     SelectTarget,
