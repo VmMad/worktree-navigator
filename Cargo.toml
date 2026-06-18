@@ -10,3 +10,16 @@ crossterm = { version = "0.28", features = ["event-stream"] }
 anyhow = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+# A From impl that can panic should be TryFrom; never let conversions abort.
+fallible_impl_from = "deny"
+# Terminal layout casts are bounded by screen geometry, never the full usize range.
+cast_possible_truncation = "allow"
+# Render and event-dispatch routines are intentionally linear; splitting them
+# would add indirection without improving clarity.
+too_many_lines = "allow"
+# `App` is the aggregate of independent, unrelated UI toggles, not a state record
+# that should be modelled as an enum.
+struct_excessive_bools = "allow"

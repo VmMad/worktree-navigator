@@ -2,7 +2,7 @@ use crossterm::event::{KeyCode, KeyModifiers};
 
 use crate::{
     app::App,
-    types::{ActiveAction, CheckoutRemotePhase},
+    types::{ActiveAction, CheckoutRemotePhase, OptionsPhase},
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -27,6 +27,7 @@ pub fn is_active(app: &App) -> bool {
                     CheckoutRemotePhase::SelectRemote | CheckoutRemotePhase::EnterBranch
                 )
         }
+        ActiveAction::Options => app.options_phase == OptionsPhase::Editing,
         _ => false,
     }
 }

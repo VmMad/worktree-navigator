@@ -1,5 +1,6 @@
 mod app;
 mod cli;
+mod config;
 mod git;
 mod text_input;
 mod types;
@@ -21,15 +22,18 @@ use crossterm::{
         Event, KeyCode, KeyModifiers, MouseButton, MouseEventKind,
     },
     execute,
+    style::Stylize,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use ratatui::{Terminal, backend::CrosstermBackend};
 
-use app::App;
+use app::{App, PendingConsoleOperation};
 use cli::{BranchBase, ParsedArgs};
+use config::{PostCreateRequest, PostCreateScript, RepoConfig};
 use text_input::TextInputKeyResult;
 use types::{
-    ActiveAction, CheckoutRemotePhase, CloneEvent, CopySecretsPhase, SyncPrEvent, Worktree,
+    ActiveAction, CheckoutRemotePhase, CloneEvent, CopySecretsPhase, OptionsPhase, SyncPrEvent,
+    Worktree,
 };
 
 struct TuiCleanupGuard {
@@ -37,11 +41,11 @@ struct TuiCleanupGuard {
 }
 
 impl TuiCleanupGuard {
-    fn new() -> Self {
+    const fn new() -> Self {
         Self { active: true }
     }
 
-    fn disarm(&mut self) {
+    const fn disarm(&mut self) {
         self.active = false;
     }
 }
@@ -59,7 +63,7 @@ fn main() -> Result<()> {
     let cwd = resolve_cwd();
 
     match args {
-        ParsedArgs::Tui { mark_tree } => run_tui(cwd, mark_tree),
+        ParsedArgs::Tui { mark_tree } => run_tui(&cwd, mark_tree),
         ParsedArgs::Version => {
             if std::env::var_os("WT_CWD").is_some() {
                 eprintln!("wt v{}", version::current_version());
@@ -68,6 +72,7 @@ fn main() -> Result<()> {
             }
             Ok(())
         }
+
         ParsedArgs::Update => update::run_manual_update(),
         ParsedArgs::Help => {
             cli::print_help();
@@ -75,6 +80,226 @@ fn main() -> Result<()> {
         }
         command => run_cli_command(&cwd, command),
     }
+}
+
+fn suspend_terminal(
+    mouse_capture_enabled: &mut bool,
+    terminal: &mut Terminal<CrosstermBackend<std::io::Stderr>>,
+) -> Result<()> {
+    terminal.backend_mut().flush()?;
+    cleanup_terminal_state()?;
+    *mouse_capture_enabled = false;
+    Ok(())
+}
+
+fn resume_terminal(
+    app: &App,
+    mouse_capture_enabled: &mut bool,
+    terminal: &mut Terminal<CrosstermBackend<std::io::Stderr>>,
+) -> Result<()> {
+    enable_raw_mode()?;
+    if text_input::wants_mouse_capture(app) {
+        execute!(
+            terminal.backend_mut(),
+            EnterAlternateScreen,
+            EnableMouseCapture,
+            EnableBracketedPaste
+        )?;
+        *mouse_capture_enabled = true;
+    } else {
+        execute!(
+            terminal.backend_mut(),
+            EnterAlternateScreen,
+            EnableBracketedPaste
+        )?;
+        *mouse_capture_enabled = false;
+    }
+    terminal.clear()?;
+    Ok(())
+}
+
+fn update_repo_config(app: &mut App, update: impl FnOnce(&mut RepoConfig)) -> Result<()> {
+    let mut next = app.repo_config.clone();
+    update(&mut next);
+    config::save_repo_config(&app.repo_root, &next)?;
+    app.repo_config = next;
+    Ok(())
+}
+
+fn select_worktree_by_path(app: &mut App, path: &Path) {
+    let path = path.to_string_lossy();
+    if let Some(idx) = app.worktrees.iter().position(|wt| wt.path == path) {
+        app.selected_index = app::COMMANDS.len() + idx;
+    }
+}
+
+fn write_exit_post_create_request(
+    app: &mut App,
+    branch: &str,
+    base_branch: Option<String>,
+    dest: &Path,
+    scripts: Vec<PostCreateScript>,
+) -> Result<()> {
+    let request_path = config::write_post_create_request(&PostCreateRequest {
+        repo_root: app.repo_root.clone(),
+        worktree_path: dest.to_path_buf(),
+        branch: branch.to_string(),
+        base_branch,
+        scripts,
+    })?;
+    app.exit_path = Some(dest.to_string_lossy().into_owned());
+    app.exit_post_create_request = Some(request_path.to_string_lossy().into_owned());
+    app.should_quit = true;
+    Ok(())
+}
+
+fn complete_new_worktree_creation(
+    app: &mut App,
+    mouse_capture_enabled: &mut bool,
+    terminal: &mut Terminal<CrosstermBackend<std::io::Stderr>>,
+    branch: &str,
+    base_branch: Option<String>,
+    dest: &Path,
+) -> Result<()> {
+    let scripts = app.repo_config.enabled_post_create_scripts();
+
+    app.new_branch_loading = false;
+    app.new_branch_use_existing = false;
+    app.new_branch_confirm_existing = None;
+    app.active_action = ActiveAction::None;
+    app.clear_input();
+    refresh_worktrees(app);
+    select_worktree_by_path(app, dest);
+
+    if scripts.is_empty() {
+        app.exit_path = Some(dest.to_string_lossy().into_owned());
+        app.should_quit = true;
+        return Ok(());
+    }
+
+    if std::env::var_os("WT_SHELL_WRAPPER").is_some() {
+        return write_exit_post_create_request(app, branch, base_branch, dest, scripts);
+    }
+
+    suspend_terminal(mouse_capture_enabled, terminal)?;
+    eprintln!(
+        "[wt] Running {} post-create setup step(s) for {}",
+        scripts.len(),
+        branch
+    );
+
+    match config::run_post_create_scripts(
+        &app.repo_root,
+        dest,
+        branch,
+        base_branch.as_deref(),
+        &scripts,
+    ) {
+        Ok(()) => {
+            eprintln!();
+            eprintln!("[wt] Setup complete.");
+            app.exit_path = Some(dest.to_string_lossy().into_owned());
+            app.should_quit = true;
+        }
+        Err(err) => {
+            resume_terminal(app, mouse_capture_enabled, terminal)?;
+            app.overlay_error = Some(format!("Worktree created, but setup failed: {err}"));
+        }
+    }
+
+    Ok(())
+}
+
+fn run_post_create_during_handoff(
+    app: &mut App,
+    branch: &str,
+    base_branch: Option<String>,
+    dest: &Path,
+) {
+    let scripts = app.repo_config.enabled_post_create_scripts();
+    if scripts.is_empty() {
+        app.exit_path = Some(dest.to_string_lossy().into_owned());
+        app.should_quit = true;
+        return;
+    }
+
+    if std::env::var_os("WT_SHELL_WRAPPER").is_some() {
+        match write_exit_post_create_request(app, branch, base_branch, dest, scripts) {
+            Ok(()) => {}
+            Err(err) => {
+                app.console_handoff_needs_resume |= app.console_handoff_active;
+                app.overlay_error =
+                    Some(format!("Worktree created, but setup request failed: {err}"));
+            }
+        }
+        return;
+    }
+
+    eprintln!();
+    eprintln!(
+        "[wt] Running {} post-create setup step(s) for {branch}",
+        scripts.len()
+    );
+    match config::run_post_create_scripts(
+        &app.repo_root,
+        dest,
+        branch,
+        base_branch.as_deref(),
+        &scripts,
+    ) {
+        Ok(()) => {
+            eprintln!();
+            eprintln!("[wt] Setup complete.");
+            app.exit_path = Some(dest.to_string_lossy().into_owned());
+            app.should_quit = true;
+        }
+        Err(err) => {
+            app.console_handoff_needs_resume |= app.console_handoff_active;
+            app.overlay_error = Some(format!("Worktree created, but setup failed: {err}"));
+        }
+    }
+}
+
+fn start_pending_console_operation(
+    app: &mut App,
+    mouse_capture_enabled: &mut bool,
+    terminal: &mut Terminal<CrosstermBackend<std::io::Stderr>>,
+) -> Result<()> {
+    let Some(operation) = app.pending_console_operation.take() else {
+        return Ok(());
+    };
+
+    suspend_terminal(mouse_capture_enabled, terminal)?;
+    app.console_handoff_active = true;
+    app.console_handoff_needs_resume = false;
+
+    match operation {
+        PendingConsoleOperation::CloneRepo { url, dest } => {
+            eprintln!();
+            app.clone_receiver = Some(git::start_clone_repo_with_layout(url, dest));
+        }
+        PendingConsoleOperation::SyncPr { pr_number } => {
+            eprintln!();
+            eprintln!("[wt] Syncing PR #{pr_number}…");
+            app.sync_pr_receiver = Some(git::start_checkout_pr_as_worktree(
+                app.repo_root.clone(),
+                pr_number,
+            ));
+        }
+        PendingConsoleOperation::SyncWorktree { wt } => {
+            eprintln!();
+            eprintln!("[wt] Syncing {} with origin…", wt.branch);
+            app.sync_receiver = Some(git::start_sync_one_worktree(app.repo_root.clone(), wt));
+        }
+        PendingConsoleOperation::FetchRemote { remote } => {
+            eprintln!();
+            eprintln!("[wt] Fetching from {remote}…");
+            app.checkout_remote_fetch_receiver =
+                Some(git::start_fetch_remote(app.repo_root.clone(), remote));
+        }
+    }
+
+    Ok(())
 }
 
 #[derive(Debug, Clone)]
@@ -90,6 +315,20 @@ fn resolve_cwd() -> PathBuf {
         .map(PathBuf::from)
         .or_else(|_| std::env::current_dir())
         .expect("no cwd")
+}
+
+fn display_path_with_home(path: &Path) -> String {
+    std::env::var_os("HOME").map_or_else(
+        || path.display().to_string(),
+        |home| {
+            let home = PathBuf::from(home);
+            match path.strip_prefix(&home) {
+                Ok(relative) if relative.as_os_str().is_empty() => "~".to_string(),
+                Ok(relative) => format!("~/{}", relative.display()),
+                Err(_) => path.display().to_string(),
+            }
+        },
+    )
 }
 
 fn resolve_repo_context(cwd: &Path) -> RepoContext {
@@ -128,15 +367,15 @@ fn list_context_worktrees(context: &RepoContext) -> Result<Vec<Worktree>> {
     }
 }
 
-fn run_tui(cwd: PathBuf, mark_tree: bool) -> Result<()> {
+fn run_tui(cwd: &Path, mark_tree: bool) -> Result<()> {
     let mut update_notice_rx = (!mark_tree).then(update::start_background_update_check);
     let mut update_notice = None;
 
     if mark_tree {
-        git::create_workspace_marker(&cwd)?;
+        git::create_workspace_marker(cwd)?;
     }
 
-    let context = resolve_repo_context(&cwd);
+    let context = resolve_repo_context(cwd);
     let no_repo = context.no_repo;
     let repo_root = context.repo_root.clone();
 
@@ -159,7 +398,13 @@ fn run_tui(cwd: PathBuf, mark_tree: bool) -> Result<()> {
         app.no_repo = true;
         app.worktrees_loading = false;
         app.active_action = ActiveAction::CloneRepo;
-    } else if context.is_workspace {
+    } else if let Err(err) = config::load_repo_config(&repo_root).map(|config| {
+        app.repo_config = config;
+    }) {
+        app.overlay_error = Some(format!("Failed to load options: {err}"));
+    }
+
+    if !no_repo && context.is_workspace {
         app.is_workspace = true;
         match git::list_workspace_worktrees(&repo_root) {
             Ok(wts) => {
@@ -173,7 +418,7 @@ fn run_tui(cwd: PathBuf, mark_tree: bool) -> Result<()> {
                 app.worktrees_error = Some(e.to_string());
             }
         }
-    } else {
+    } else if !no_repo {
         match git::list_worktrees(&repo_root) {
             Ok(wts) => {
                 let current_idx = wts.iter().position(|w| w.is_current).unwrap_or(0);
@@ -218,47 +463,54 @@ fn run_tui(cwd: PathBuf, mark_tree: bool) -> Result<()> {
             {
                 app.advance_loading_animation();
             }
-            let wants_mouse_capture = text_input::wants_mouse_capture(&app);
-            if wants_mouse_capture != mouse_capture_enabled {
-                if wants_mouse_capture {
-                    execute!(terminal.backend_mut(), EnableMouseCapture)?;
-                } else {
-                    execute!(terminal.backend_mut(), DisableMouseCapture)?;
-                }
-                mouse_capture_enabled = wants_mouse_capture;
+            // When a console operation finishes and we're exiting anyway, skip the
+            // resume: re-entering the alternate screen would clear the operation's
+            // console output and flash the TUI for one frame before quitting.
+            if app.console_handoff_needs_resume && !app.should_quit {
+                resume_terminal(&app, &mut mouse_capture_enabled, &mut terminal)?;
+                app.console_handoff_active = false;
+                app.console_handoff_needs_resume = false;
             }
-            terminal.draw(|f| ui::draw(f, &mut app))?;
 
-            // Start sync after the loading frame has been rendered.
+            if !app.console_handoff_active {
+                let wants_mouse_capture = text_input::wants_mouse_capture(&app);
+                if wants_mouse_capture != mouse_capture_enabled {
+                    if wants_mouse_capture {
+                        execute!(terminal.backend_mut(), EnableMouseCapture)?;
+                    } else {
+                        execute!(terminal.backend_mut(), DisableMouseCapture)?;
+                    }
+                    mouse_capture_enabled = wants_mouse_capture;
+                }
+                terminal.draw(|f| ui::draw(f, &mut app))?;
+            }
+
             if app.sync_pending {
                 app.sync_pending = false;
                 let wt = app.worktrees.get(app.sync_selected_idx).cloned();
                 if let Some(wt) = wt {
-                    let root = app.repo_root.clone();
-                    app.sync_receiver = Some(git::start_sync_one_worktree(root, wt));
+                    app.pending_console_operation =
+                        Some(PendingConsoleOperation::SyncWorktree { wt });
                 }
             }
 
-            // Execute pending new branch after the loading frame has been rendered.
             if let Some(branch) = app.new_branch_pending.take() {
                 let root = app.repo_root.clone();
+                let base = app.new_branch_base.clone();
                 let result = if app.new_branch_use_existing {
                     git::add_worktree_from_existing(&root, &branch)
                 } else {
-                    let base = app.new_branch_base.as_deref();
-                    git::add_worktree(&root, &branch, base)
+                    git::add_worktree(&root, &branch, base.as_deref())
                 };
                 match result {
-                    Ok((_, dest)) => {
-                        app.new_branch_loading = false;
-                        app.new_branch_use_existing = false;
-                        app.new_branch_confirm_existing = None;
-                        app.active_action = ActiveAction::None;
-                        app.clear_input();
-                        refresh_worktrees(&mut app);
-                        app.exit_path = Some(dest.to_string_lossy().into_owned());
-                        app.should_quit = true;
-                    }
+                    Ok((_, dest)) => complete_new_worktree_creation(
+                        &mut app,
+                        &mut mouse_capture_enabled,
+                        &mut terminal,
+                        &branch,
+                        base,
+                        &dest,
+                    )?,
                     Err(e) => {
                         app.new_branch_loading = false;
                         app.new_branch_use_existing = false;
@@ -296,7 +548,6 @@ fn run_tui(cwd: PathBuf, mark_tree: bool) -> Result<()> {
                 }
             }
 
-            // Execute pending delete after the loading frame has been rendered.
             if let Some(paths) = app.delete_pending.take() {
                 let root = app.repo_root.clone();
                 match git::remove_worktrees(&root, &paths, app.is_workspace) {
@@ -326,7 +577,6 @@ fn run_tui(cwd: PathBuf, mark_tree: bool) -> Result<()> {
                 }
             }
 
-            // Execute pending copy secrets after the loading frame has been rendered.
             if app.copy_secrets_pending {
                 app.copy_secrets_pending = false;
                 let source = app
@@ -357,11 +607,14 @@ fn run_tui(cwd: PathBuf, mark_tree: bool) -> Result<()> {
                 match git::checkout_remote_branch(&app.repo_root, &remote, &branch) {
                     Ok(dest) => {
                         app.checkout_remote_phase = CheckoutRemotePhase::SelectRemote;
-                        app.active_action = ActiveAction::None;
-                        app.clear_input();
-                        refresh_worktrees(&mut app);
-                        app.exit_path = Some(dest.to_string_lossy().into_owned());
-                        app.should_quit = true;
+                        complete_new_worktree_creation(
+                            &mut app,
+                            &mut mouse_capture_enabled,
+                            &mut terminal,
+                            &branch,
+                            None,
+                            &dest,
+                        )?;
                     }
                     Err(e) => {
                         app.checkout_remote_phase = CheckoutRemotePhase::EnterBranch;
@@ -370,12 +623,15 @@ fn run_tui(cwd: PathBuf, mark_tree: bool) -> Result<()> {
                 }
             }
 
-            if event::poll(Duration::from_millis(100))? {
+            start_pending_console_operation(&mut app, &mut mouse_capture_enabled, &mut terminal)?;
+
+            if app.console_handoff_active {
+                std::thread::sleep(Duration::from_millis(100));
+            } else if event::poll(Duration::from_millis(100))? {
                 match event::read()? {
                     Event::Key(key) => handle_key(&mut app, key.code, key.modifiers),
                     Event::Paste(text) => handle_paste(&mut app, &text),
                     Event::Mouse(m) => handle_mouse(&mut app, m.kind, m.column, m.row),
-                    Event::Resize(_, _) => {}
                     _ => {}
                 }
             }
@@ -419,20 +675,25 @@ fn run_tui(cwd: PathBuf, mark_tree: bool) -> Result<()> {
     }
 
     if let Some(ref path) = app.exit_path {
-        println!("{path}");
+        if std::env::var_os("WT_SHELL_WRAPPER").is_some() {
+            println!("WT_PATH={path}");
+            if let Some(ref request) = app.exit_post_create_request {
+                println!("WT_POST_CREATE={request}");
+            }
+        } else {
+            println!("{path}");
+        }
     }
 
     Ok(())
 }
 
 fn panic_message(payload: &Box<dyn std::any::Any + Send>) -> String {
-    if let Some(message) = payload.downcast_ref::<&'static str>() {
-        (*message).to_string()
-    } else if let Some(message) = payload.downcast_ref::<String>() {
-        message.clone()
-    } else {
-        "unknown panic".to_string()
-    }
+    payload
+        .downcast_ref::<&'static str>()
+        .map(|message| (*message).to_string())
+        .or_else(|| payload.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "unknown panic".to_string())
 }
 
 fn cleanup_terminal_state() -> Result<()> {
@@ -494,10 +755,12 @@ fn run_cli_command(cwd: &Path, command: ParsedArgs) -> Result<()> {
                 println!("{}", context.repo_root.display());
             }
         }
-        ParsedArgs::Tui { .. }
-        | ParsedArgs::Version
-        | ParsedArgs::Update
-        | ParsedArgs::Help => {
+        ParsedArgs::RunPostCreate { request_file } => {
+            config::run_post_create_scripts_from_request(Path::new(&request_file))?;
+            eprintln!();
+            eprintln!("[wt] Setup complete.");
+        }
+        ParsedArgs::Tui { .. } | ParsedArgs::Version | ParsedArgs::Update | ParsedArgs::Help => {
             unreachable!("handled before CLI execution")
         }
     }
@@ -516,17 +779,17 @@ fn require_repo_context(cwd: &Path) -> Result<RepoContext> {
 }
 
 fn resolve_cli_clone_dest(cwd: &Path, repo_source: &str, dest: Option<&str>) -> PathBuf {
-    match dest {
-        Some(dest) => {
+    dest.map_or_else(
+        || PathBuf::from(git::dest_from_url(repo_source, cwd)),
+        |dest| {
             let path = PathBuf::from(dest);
             if path.is_absolute() {
                 path
             } else {
                 cwd.join(path)
             }
-        }
-        None => PathBuf::from(git::dest_from_url(repo_source, cwd)),
-    }
+        },
+    )
 }
 
 fn resolve_cli_branch_base(context: &RepoContext, base: &BranchBase) -> Result<String> {
@@ -623,6 +886,7 @@ fn handle_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
         ActiveAction::SyncTrees => handle_sync_trees_key(app, code),
         ActiveAction::Delete => handle_delete_key(app, code),
         ActiveAction::CopySecrets => handle_copy_secrets_key(app, code),
+        ActiveAction::Options => handle_options_key(app, code, modifiers),
         ActiveAction::CloneRepo => handle_clone_key(app, code, modifiers),
         ActiveAction::CheckoutRemote => handle_checkout_remote_key(app, code, modifiers),
         ActiveAction::None => handle_nav_key(app, code, modifiers),
@@ -817,6 +1081,7 @@ fn open_action(app: &mut App, action: ActiveAction) {
     app.rename_loading = false;
     app.rename_target_idx = None;
     app.rename_pending = None;
+    app.reset_options_editor();
 
     if action == ActiveAction::NewBranch {
         app.new_branch_base = app
@@ -887,6 +1152,11 @@ fn open_action(app: &mut App, action: ActiveAction) {
         app.copy_secrets_confirm_yes = true;
     }
 
+    if action == ActiveAction::Options {
+        let max_idx = app.repo_config.post_create_scripts.len().saturating_sub(1);
+        app.options_selected_idx = app.options_selected_idx.min(max_idx);
+    }
+
     if action == ActiveAction::CheckoutRemote {
         app.checkout_remote_name.clear();
         app.checkout_remote_fetch_receiver = None;
@@ -901,10 +1171,9 @@ fn open_action(app: &mut App, action: ActiveAction) {
             app.checkout_remote_name = remotes[0].clone();
             app.checkout_remote_remotes = remotes;
             app.checkout_remote_phase = CheckoutRemotePhase::FetchingRemote;
-            app.checkout_remote_fetch_receiver = Some(git::start_fetch_remote(
-                app.repo_root.clone(),
-                app.checkout_remote_name.clone(),
-            ));
+            app.pending_console_operation = Some(PendingConsoleOperation::FetchRemote {
+                remote: app.checkout_remote_name.clone(),
+            });
             app.reset_loading_animation();
         } else {
             app.checkout_remote_remotes = remotes;
@@ -940,12 +1209,8 @@ fn handle_sync_trees_key(app: &mut App, code: KeyCode) {
         return;
     }
 
-    // Results phase: Esc/Enter (or any other key) closes.
+    // Results phase: any key closes.
     if !app.sync_results.is_empty() {
-        match code {
-            KeyCode::Esc | KeyCode::Enter => {}
-            _ => {}
-        }
         app.active_action = ActiveAction::None;
         app.sync_results.clear();
         return;
@@ -963,12 +1228,10 @@ fn handle_sync_trees_key(app: &mut App, code: KeyCode) {
             let max = app.worktrees.len().saturating_sub(1);
             app.sync_selected_idx = (app.sync_selected_idx + 1).min(max);
         }
-        KeyCode::Enter => {
-            if !app.worktrees.is_empty() {
-                app.sync_loading = true;
-                app.reset_loading_animation();
-                app.sync_pending = true;
-            }
+        KeyCode::Enter if !app.worktrees.is_empty() => {
+            app.sync_loading = true;
+            app.reset_loading_animation();
+            app.sync_pending = true;
         }
         _ => {}
     }
@@ -981,22 +1244,22 @@ fn handle_new_branch_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) 
 
     if app.new_branch_confirm_existing.is_some() {
         match code {
-            KeyCode::Left | KeyCode::Up | KeyCode::Char('h') | KeyCode::Char('k') => {
+            KeyCode::Left | KeyCode::Up | KeyCode::Char('h' | 'k') => {
                 app.new_branch_confirm_yes = true;
             }
-            KeyCode::Right | KeyCode::Down | KeyCode::Char('j') | KeyCode::Char('l') => {
+            KeyCode::Right | KeyCode::Down | KeyCode::Char('j' | 'l') => {
                 app.new_branch_confirm_yes = false;
             }
-            KeyCode::Char('y') | KeyCode::Char('Y') => {
+            KeyCode::Char('y' | 'Y') => {
                 app.new_branch_confirm_yes = true;
                 finish_new_branch_existing_confirmation(app, true);
             }
-            KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+            KeyCode::Char('n' | 'N') | KeyCode::Esc => {
                 app.new_branch_confirm_yes = false;
                 finish_new_branch_existing_confirmation(app, false);
             }
             KeyCode::Enter => {
-                finish_new_branch_existing_confirmation(app, app.new_branch_confirm_yes)
+                finish_new_branch_existing_confirmation(app, app.new_branch_confirm_yes);
             }
             _ => {}
         }
@@ -1034,6 +1297,123 @@ fn handle_new_branch_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) 
         TextInputKeyResult::Updated
         | TextInputKeyResult::Ignored
         | TextInputKeyResult::Complete => {}
+    }
+}
+
+fn begin_options_edit(app: &mut App, index: Option<usize>) {
+    app.options_phase = OptionsPhase::Editing;
+    app.options_edit_idx = index;
+    app.overlay_error = None;
+    match index {
+        Some(idx) => {
+            app.input_buffer = app.repo_config.post_create_scripts[idx].command.clone();
+            app.input_cursor = app.input_buffer.chars().count();
+        }
+        None => app.clear_input(),
+    }
+}
+
+fn handle_options_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
+    if app.options_phase == OptionsPhase::Editing {
+        match text_input::handle_key(app, code, modifiers) {
+            TextInputKeyResult::Cancel => {
+                app.reset_options_editor();
+                app.overlay_error = None;
+            }
+            TextInputKeyResult::Submit => {
+                let command = app.input_buffer.trim().to_string();
+                if command.is_empty() {
+                    app.overlay_error = Some("Command can't be empty.".to_string());
+                    return;
+                }
+
+                let edit_idx = app.options_edit_idx;
+                let save_result = update_repo_config(app, |config| match edit_idx {
+                    Some(idx) => config.post_create_scripts[idx].command.clone_from(&command),
+                    None => config.post_create_scripts.push(PostCreateScript {
+                        command: command.clone(),
+                        enabled: true,
+                    }),
+                });
+
+                match save_result {
+                    Ok(()) => {
+                        if edit_idx.is_none() {
+                            app.options_selected_idx =
+                                app.repo_config.post_create_scripts.len().saturating_sub(1);
+                        }
+                        app.reset_options_editor();
+                        app.overlay_error = None;
+                    }
+                    Err(err) => {
+                        app.overlay_error =
+                            Some(format!("Failed to save post-create scripts: {err}"));
+                    }
+                }
+            }
+            TextInputKeyResult::Updated
+            | TextInputKeyResult::Ignored
+            | TextInputKeyResult::Complete => {}
+        }
+        return;
+    }
+
+    let script_count = app.repo_config.post_create_scripts.len();
+    let has_scripts = script_count > 0;
+
+    match code {
+        KeyCode::Esc => {
+            app.active_action = ActiveAction::None;
+            app.reset_options_editor();
+        }
+        KeyCode::Up | KeyCode::Char('k') => {
+            app.options_selected_idx = app.options_selected_idx.saturating_sub(1);
+        }
+        KeyCode::Down | KeyCode::Char('j') => {
+            app.options_selected_idx =
+                (app.options_selected_idx + 1).min(script_count.saturating_sub(1));
+        }
+        KeyCode::Char('a') => begin_options_edit(app, None),
+        KeyCode::Enter | KeyCode::Char('e') => {
+            if has_scripts {
+                begin_options_edit(app, Some(app.options_selected_idx));
+            } else {
+                begin_options_edit(app, None);
+            }
+        }
+        KeyCode::Char(' ') => {
+            if !has_scripts {
+                return;
+            }
+            let idx = app.options_selected_idx;
+            if let Err(err) = update_repo_config(app, |config| {
+                config.post_create_scripts[idx].enabled = !config.post_create_scripts[idx].enabled;
+            }) {
+                app.overlay_error = Some(format!("Failed to save post-create scripts: {err}"));
+            } else {
+                app.overlay_error = None;
+            }
+        }
+        KeyCode::Char('d') | KeyCode::Delete | KeyCode::Backspace => {
+            if !has_scripts {
+                return;
+            }
+            let idx = app.options_selected_idx;
+            match update_repo_config(app, |config| {
+                config.post_create_scripts.remove(idx);
+            }) {
+                Ok(()) => {
+                    app.options_selected_idx = app
+                        .options_selected_idx
+                        .min(app.repo_config.post_create_scripts.len().saturating_sub(1));
+                    app.overlay_error = None;
+                }
+                Err(err) => {
+                    app.overlay_error = Some(format!("Failed to save post-create scripts: {err}"));
+                }
+            }
+        }
+        _ => {}
     }
 }
 
@@ -1102,22 +1482,18 @@ fn handle_sync_pr_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
                 app.overlay_error = Some("Invalid PR number. Use #123 or 123.".to_string());
                 return;
             }
-            let pr_number: u32 = match pr_input.parse() {
-                Ok(n) => n,
-                Err(_) => {
-                    app.overlay_error = Some("Invalid PR number. Use #123 or 123.".to_string());
-                    return;
-                }
+            let pr_number: u32 = if let Ok(n) = pr_input.parse() {
+                n
+            } else {
+                app.overlay_error = Some("Invalid PR number. Use #123 or 123.".to_string());
+                return;
             };
 
             app.overlay_error = None;
             app.sync_pr_loading = true;
             app.clear_sync_pr_output();
             app.reset_loading_animation();
-            app.sync_pr_receiver = Some(git::start_checkout_pr_as_worktree(
-                app.repo_root.clone(),
-                pr_number,
-            ));
+            app.pending_console_operation = Some(PendingConsoleOperation::SyncPr { pr_number });
         }
         TextInputKeyResult::Updated
         | TextInputKeyResult::Ignored
@@ -1135,7 +1511,7 @@ fn poll_sync_pr_updates(app: &mut App) {
             match receiver.try_recv() {
                 Ok(event) => {
                     let is_terminal =
-                        matches!(event, SyncPrEvent::Finished(_) | SyncPrEvent::Error(_));
+                        matches!(event, SyncPrEvent::Finished { .. } | SyncPrEvent::Error(_));
                     events.push(event);
                     if is_terminal {
                         clear_receiver = true;
@@ -1157,15 +1533,26 @@ fn poll_sync_pr_updates(app: &mut App) {
             SyncPrEvent::Progress { line } => {
                 app.push_sync_pr_output(line);
             }
-            SyncPrEvent::Finished(worktree_path) => {
+            SyncPrEvent::Finished {
+                worktree_path,
+                branch,
+                base_branch,
+                created,
+            } => {
                 app.sync_pr_loading = false;
                 app.active_action = ActiveAction::None;
                 app.clear_input();
                 refresh_worktrees(app);
-                app.exit_path = Some(worktree_path.to_string_lossy().into_owned());
-                app.should_quit = true;
+                select_worktree_by_path(app, &worktree_path);
+                if created {
+                    run_post_create_during_handoff(app, &branch, base_branch, &worktree_path);
+                } else {
+                    app.exit_path = Some(worktree_path.to_string_lossy().into_owned());
+                    app.should_quit = true;
+                }
             }
             SyncPrEvent::Error(err) => {
+                app.console_handoff_needs_resume |= app.console_handoff_active;
                 app.sync_pr_loading = false;
                 app.overlay_error = Some(format!("Failed to sync PR: {err}"));
             }
@@ -1173,6 +1560,7 @@ fn poll_sync_pr_updates(app: &mut App) {
     }
 
     if disconnected && app.sync_pr_loading {
+        app.console_handoff_needs_resume |= app.console_handoff_active;
         app.sync_pr_loading = false;
         app.overlay_error = Some("PR sync ended unexpectedly.".to_string());
     }
@@ -1199,12 +1587,14 @@ fn poll_sync_updates(app: &mut App) {
     }
 
     if let Some((fetch_ok, result)) = completed {
+        app.console_handoff_needs_resume |= app.console_handoff_active;
         app.sync_fetch_ok = fetch_ok;
         app.sync_results = vec![result];
         app.sync_loading = false;
         app.sync_receiver = None;
         refresh_worktrees(app);
     } else if disconnected && app.sync_loading {
+        app.console_handoff_needs_resume |= app.console_handoff_active;
         app.sync_loading = false;
         app.sync_receiver = None;
         app.overlay_error = Some("Sync ended unexpectedly.".to_string());
@@ -1218,17 +1608,17 @@ fn handle_delete_key(app: &mut App, code: KeyCode) {
 
     if app.delete_warn_current {
         match code {
-            KeyCode::Left | KeyCode::Up | KeyCode::Char('h') | KeyCode::Char('k') => {
+            KeyCode::Left | KeyCode::Up | KeyCode::Char('h' | 'k') => {
                 app.delete_confirm_yes = true;
             }
-            KeyCode::Right | KeyCode::Down | KeyCode::Char('j') | KeyCode::Char('l') => {
+            KeyCode::Right | KeyCode::Down | KeyCode::Char('j' | 'l') => {
                 app.delete_confirm_yes = false;
             }
-            KeyCode::Char('y') | KeyCode::Char('Y') => {
+            KeyCode::Char('y' | 'Y') => {
                 app.delete_confirm_yes = true;
                 finish_delete_current_warning(app, true);
             }
-            KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+            KeyCode::Char('n' | 'N') | KeyCode::Esc => {
                 app.delete_confirm_yes = false;
                 finish_delete_current_warning(app, false);
             }
@@ -1240,17 +1630,17 @@ fn handle_delete_key(app: &mut App, code: KeyCode) {
 
     if app.delete_confirming {
         match code {
-            KeyCode::Left | KeyCode::Up | KeyCode::Char('h') | KeyCode::Char('k') => {
+            KeyCode::Left | KeyCode::Up | KeyCode::Char('h' | 'k') => {
                 app.delete_confirm_yes = true;
             }
-            KeyCode::Right | KeyCode::Down | KeyCode::Char('j') | KeyCode::Char('l') => {
+            KeyCode::Right | KeyCode::Down | KeyCode::Char('j' | 'l') => {
                 app.delete_confirm_yes = false;
             }
-            KeyCode::Char('y') | KeyCode::Char('Y') => {
+            KeyCode::Char('y' | 'Y') => {
                 app.delete_confirm_yes = true;
                 finish_delete_confirmation(app, true);
             }
-            KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+            KeyCode::Char('n' | 'N') | KeyCode::Esc => {
                 app.delete_confirm_yes = false;
                 finish_delete_confirmation(app, false);
             }
@@ -1325,11 +1715,11 @@ fn handle_copy_secrets_key(app: &mut App, code: KeyCode) {
         CopySecretsPhase::ConfirmOverwrite => match code {
             KeyCode::Left | KeyCode::Char('h') => app.copy_secrets_confirm_yes = true,
             KeyCode::Right | KeyCode::Char('l') => app.copy_secrets_confirm_yes = false,
-            KeyCode::Char('y') | KeyCode::Char('Y') => {
+            KeyCode::Char('y' | 'Y') => {
                 app.copy_secrets_confirm_yes = true;
                 finish_copy_secrets(app, true);
             }
-            KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+            KeyCode::Char('n' | 'N') | KeyCode::Esc => {
                 app.copy_secrets_confirm_yes = false;
                 finish_copy_secrets(app, false);
             }
@@ -1405,7 +1795,7 @@ fn handle_copy_secrets_select(app: &mut App, wt_idx: usize) {
     }
 }
 
-fn finish_copy_secrets(app: &mut App, confirmed: bool) {
+const fn finish_copy_secrets(app: &mut App, confirmed: bool) {
     if !confirmed {
         app.copy_secrets_phase = CopySecretsPhase::SelectTarget;
         return;
@@ -1550,12 +1940,10 @@ fn start_delete_pending(app: &mut App) {
 }
 
 fn delete_targets_include_current(app: &App) -> bool {
-    app.delete_confirm_targets.iter().copied().any(|idx| {
-        app.worktrees
-            .get(idx)
-            .map(|wt| wt.is_current)
-            .unwrap_or(false)
-    })
+    app.delete_confirm_targets
+        .iter()
+        .copied()
+        .any(|idx| app.worktrees.get(idx).is_some_and(|wt| wt.is_current))
 }
 
 fn handle_delete_confirm_click(app: &mut App, column: u16, row: u16) {
@@ -1650,22 +2038,21 @@ fn handle_clone_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
                 return;
             }
             if app.clone_step == 0 {
-                app.clone_url = input.clone();
+                app.clone_url.clone_from(&input);
                 let dest = git::dest_from_url(&input, &app.repo_root);
                 app.clear_input();
-                app.input_buffer = dest.clone();
+                app.input_buffer.clone_from(&dest);
                 app.input_cursor = dest.chars().count();
                 app.clone_step = 1;
                 app.clone_error = None;
             } else {
                 app.clone_loading = true;
                 app.clone_error = None;
-                app.clear_clone_output();
                 app.reset_loading_animation();
-                app.clone_receiver = Some(git::start_clone_repo_with_layout(
-                    app.clone_url.clone(),
-                    PathBuf::from(input),
-                ));
+                app.pending_console_operation = Some(PendingConsoleOperation::CloneRepo {
+                    url: app.clone_url.clone(),
+                    dest: PathBuf::from(input),
+                });
             }
         }
         TextInputKeyResult::Updated
@@ -1703,15 +2090,22 @@ fn poll_clone_updates(app: &mut App) {
 
     for event in events {
         match event {
-            CloneEvent::Progress { line } => {
-                app.push_clone_output(line);
-            }
             CloneEvent::Finished(worktree_path) => {
                 app.clone_loading = false;
+                if app.console_handoff_active {
+                    let display_path = display_path_with_home(&worktree_path);
+                    eprintln!();
+                    eprintln!(
+                        "{} Cloned into {}",
+                        "[wt]".green().bold(),
+                        display_path.green()
+                    );
+                }
                 app.exit_path = Some(worktree_path.to_string_lossy().into_owned());
                 app.should_quit = true;
             }
             CloneEvent::Error(err) => {
+                app.console_handoff_needs_resume |= app.console_handoff_active;
                 app.clone_loading = false;
                 app.clone_error = Some(err);
             }
@@ -1719,6 +2113,7 @@ fn poll_clone_updates(app: &mut App) {
     }
 
     if disconnected && app.clone_loading {
+        app.console_handoff_needs_resume |= app.console_handoff_active;
         app.clone_loading = false;
         app.clone_error = Some("Clone process ended unexpectedly.".to_string());
     }
@@ -1745,11 +2140,11 @@ fn handle_checkout_remote_key(app: &mut App, code: KeyCode, modifiers: KeyModifi
                 if remote.is_empty() {
                     return;
                 }
-                app.checkout_remote_name = remote.clone();
+                app.checkout_remote_name.clone_from(&remote);
                 app.overlay_error = None;
                 app.checkout_remote_phase = CheckoutRemotePhase::FetchingRemote;
-                app.checkout_remote_fetch_receiver =
-                    Some(git::start_fetch_remote(app.repo_root.clone(), remote));
+                app.pending_console_operation =
+                    Some(PendingConsoleOperation::FetchRemote { remote });
                 app.reset_loading_animation();
             }
             TextInputKeyResult::Updated
@@ -1815,6 +2210,7 @@ fn poll_checkout_remote_fetch(app: &mut App) {
         });
 
     if let Some(result) = result {
+        app.console_handoff_needs_resume |= app.console_handoff_active;
         app.checkout_remote_fetch_receiver = None;
         match result {
             Ok(()) => {
@@ -1846,7 +2242,7 @@ mod tests {
     use crate::{
         app::App,
         text_input,
-        types::{ActiveAction, CheckoutRemotePhase, Worktree},
+        types::{ActiveAction, CheckoutRemotePhase, OptionsPhase, Worktree},
     };
 
     fn test_app() -> App {
@@ -1890,6 +2286,13 @@ mod tests {
         assert!(text_input::is_active(&app));
         app.checkout_remote_phase = CheckoutRemotePhase::FetchingRemote;
         assert!(!text_input::is_active(&app));
+
+        app = test_app();
+        app.active_action = ActiveAction::Options;
+        app.options_phase = OptionsPhase::Editing;
+        assert!(text_input::is_active(&app));
+        app.options_phase = OptionsPhase::BrowsingScripts;
+        assert!(!text_input::is_active(&app));
     }
 
     #[test]
@@ -1919,6 +2322,15 @@ mod tests {
             assert_eq!(app.input_buffer, "feature/test");
             assert_eq!(app.input_cursor, "feature/test".chars().count());
         }
+
+        let mut app = test_app();
+        app.active_action = ActiveAction::Options;
+        app.options_phase = OptionsPhase::Editing;
+
+        handle_paste(&mut app, "pnpm i\n");
+
+        assert_eq!(app.input_buffer, "pnpm i");
+        assert_eq!(app.input_cursor, "pnpm i".chars().count());
     }
 
     #[test]

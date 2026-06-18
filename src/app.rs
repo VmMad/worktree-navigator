@@ -2,9 +2,19 @@ use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::sync::mpsc::Receiver;
 
+use crate::config::RepoConfig;
 use crate::types::{
-    ActiveAction, CheckoutRemotePhase, CloneEvent, CopySecretsPhase, SyncResult, Worktree,
+    ActiveAction, CheckoutRemotePhase, CloneEvent, CopySecretsPhase, OptionsPhase, SyncResult,
+    Worktree,
 };
+
+#[derive(Debug, Clone)]
+pub enum PendingConsoleOperation {
+    CloneRepo { url: String, dest: PathBuf },
+    SyncPr { pr_number: u32 },
+    SyncWorktree { wt: Worktree },
+    FetchRemote { remote: String },
+}
 
 #[derive(Debug, Clone, Copy)]
 pub struct CommandSpec {
@@ -43,6 +53,11 @@ pub const COMMANDS: &[CommandSpec] = &[
         label: "Copy Secrets",
         shortcut: 'c',
         action: ActiveAction::CopySecrets,
+    },
+    CommandSpec {
+        label: "Options",
+        shortcut: 'o',
+        action: ActiveAction::Options,
     },
     CommandSpec {
         label: "Checkout Remote",
@@ -90,7 +105,9 @@ pub struct App {
     pub clone_receiver: Option<Receiver<CloneEvent>>,
     pub loading_animation_frame: usize,
     pub clone_error: Option<String>,
-    pub clone_output: Vec<String>,
+    pub pending_console_operation: Option<PendingConsoleOperation>,
+    pub console_handoff_active: bool,
+    pub console_handoff_needs_resume: bool,
 
     pub selected_index: usize,
     pub active_action: ActiveAction,
@@ -106,6 +123,10 @@ pub struct App {
     pub delete_redirect_path: Option<String>,
     pub delete_checked: BTreeSet<usize>,
     pub overlay_error: Option<String>,
+    pub repo_config: RepoConfig,
+    pub options_phase: OptionsPhase,
+    pub options_selected_idx: usize,
+    pub options_edit_idx: Option<usize>,
     pub copy_secrets_phase: CopySecretsPhase,
     pub copy_secrets_source_idx: Option<usize>,
     pub copy_secrets_target_idx: usize,
@@ -119,6 +140,7 @@ pub struct App {
     pub checkout_remote_pending: Option<(String, String)>,
 
     pub exit_path: Option<String>,
+    pub exit_post_create_request: Option<String>,
     pub should_quit: bool,
 
     /// Maps screen row → item index, populated each render frame for mouse hit detection.
@@ -165,7 +187,9 @@ impl App {
             clone_receiver: None,
             loading_animation_frame: 0,
             clone_error: None,
-            clone_output: vec![],
+            pending_console_operation: None,
+            console_handoff_active: false,
+            console_handoff_needs_resume: false,
             selected_index: 0,
             active_action: ActiveAction::None,
             input_buffer: String::new(),
@@ -179,6 +203,10 @@ impl App {
             delete_redirect_path: None,
             delete_checked: BTreeSet::new(),
             overlay_error: None,
+            repo_config: RepoConfig::default(),
+            options_phase: OptionsPhase::BrowsingScripts,
+            options_selected_idx: 0,
+            options_edit_idx: None,
             copy_secrets_phase: CopySecretsPhase::SelectSource,
             copy_secrets_source_idx: None,
             copy_secrets_target_idx: 0,
@@ -190,6 +218,7 @@ impl App {
             checkout_remote_fetch_receiver: None,
             checkout_remote_pending: None,
             exit_path: None,
+            exit_post_create_request: None,
             should_quit: false,
             item_rows: vec![],
             hovered_row: None,
@@ -198,11 +227,17 @@ impl App {
         }
     }
 
-    pub fn checkout_remote_is_loading(&self) -> bool {
+    pub const fn checkout_remote_is_loading(&self) -> bool {
         matches!(
             self.checkout_remote_phase,
             CheckoutRemotePhase::FetchingRemote | CheckoutRemotePhase::CreatingWorktree
         )
+    }
+
+    pub fn reset_options_editor(&mut self) {
+        self.options_phase = OptionsPhase::BrowsingScripts;
+        self.options_edit_idx = None;
+        self.clear_input();
     }
 
     /// Returns the completion suffix for the current branch input, if any branch
@@ -218,7 +253,7 @@ impl App {
             .map(|b| b[input.len()..].to_string())
     }
 
-    pub fn total_items(&self) -> usize {
+    pub const fn total_items(&self) -> usize {
         COMMANDS.len() + self.worktrees.len()
     }
 
@@ -234,10 +269,7 @@ impl App {
     }
 
     pub fn is_deletable_worktree_idx(&self, idx: usize) -> bool {
-        self.worktrees
-            .get(idx)
-            .map(|wt| !wt.is_main)
-            .unwrap_or(false)
+        self.worktrees.get(idx).is_some_and(|wt| !wt.is_main)
     }
 
     pub fn first_deletable_worktree_idx(&self) -> Option<usize> {
@@ -275,8 +307,12 @@ impl App {
         self.worktrees.iter().position(|wt| wt.is_current)
     }
 
-    pub fn selected_worktree_idx(&self) -> Option<usize> {
-        (self.selected_index >= COMMANDS.len()).then_some(self.selected_index - COMMANDS.len())
+    pub const fn selected_worktree_idx(&self) -> Option<usize> {
+        if self.selected_index >= COMMANDS.len() {
+            Some(self.selected_index - COMMANDS.len())
+        } else {
+            None
+        }
     }
 
     pub fn next_copy_target_idx(&self, from: usize) -> Option<usize> {
@@ -302,8 +338,7 @@ impl App {
         self.input_buffer
             .char_indices()
             .nth(cursor)
-            .map(|(i, _)| i)
-            .unwrap_or(self.input_buffer.len())
+            .map_or(self.input_buffer.len(), |(i, _)| i)
     }
 
     fn input_len(&self) -> usize {
@@ -341,7 +376,7 @@ impl App {
         }
     }
 
-    pub fn input_left(&mut self) {
+    pub const fn input_left(&mut self) {
         self.input_cursor = self.input_cursor.saturating_sub(1);
     }
 
@@ -408,7 +443,7 @@ impl App {
         self.input_buffer.replace_range(start..end, "");
     }
 
-    pub fn input_home(&mut self) {
+    pub const fn input_home(&mut self) {
         self.input_cursor = 0;
     }
 
@@ -429,17 +464,8 @@ impl App {
         self.input_cursor = 0;
     }
 
-    pub fn reset_loading_animation(&mut self) {
+    pub const fn reset_loading_animation(&mut self) {
         self.loading_animation_frame = 0;
-    }
-
-    pub fn clear_clone_output(&mut self) {
-        self.clone_output.clear();
-    }
-
-    pub fn push_clone_output(&mut self, line: String) {
-        self.clone_output.clear();
-        self.clone_output.push(line);
     }
 
     pub fn clear_sync_pr_output(&mut self) {
@@ -451,11 +477,11 @@ impl App {
         self.sync_pr_output.push(line);
     }
 
-    pub fn advance_loading_animation(&mut self) {
+    pub const fn advance_loading_animation(&mut self) {
         self.loading_animation_frame = (self.loading_animation_frame + 1) % 3;
     }
 
-    pub fn loading_animation_dots(&self) -> &'static str {
+    pub const fn loading_animation_dots(&self) -> &'static str {
         match self.loading_animation_frame {
             0 => ".  ",
             1 => ".. ",

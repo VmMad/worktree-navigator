@@ -1,11 +1,9 @@
 use anyhow::{Context, Result};
 use std::collections::HashSet;
 use std::fs;
-use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::mpsc::{self, Receiver, Sender};
-use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -34,7 +32,7 @@ fn fetch_remote_tracking_branch(
     remote: &str,
     branch: &str,
     quiet: bool,
-) -> Result<std::process::Output> {
+) -> Result<std::process::ExitStatus> {
     let remote_refspec = format!("refs/heads/{branch}:refs/remotes/{remote}/{branch}");
     let mut args = vec!["fetch", remote];
     if quiet {
@@ -45,8 +43,27 @@ fn fetch_remote_tracking_branch(
     Command::new("git")
         .args(&args)
         .current_dir(git_cwd)
-        .output()
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .status()
         .with_context(|| format!("Failed to run git fetch {remote} {remote_refspec}"))
+}
+
+fn run_command_capture_stdout(
+    command: &mut Command,
+    spawn_context: &'static str,
+) -> Result<std::process::Output> {
+    let child = command
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .context(spawn_context)?;
+
+    child
+        .wait_with_output()
+        .context("Failed while waiting for command output")
 }
 
 fn git_branch_exists(repo_root: &Path, branch: &str) -> bool {
@@ -54,8 +71,7 @@ fn git_branch_exists(repo_root: &Path, branch: &str) -> bool {
         .args(["rev-parse", "--verify", &format!("refs/heads/{branch}")])
         .current_dir(repo_root)
         .output()
-        .map(|out| out.status.success())
-        .unwrap_or(false)
+        .is_ok_and(|out| out.status.success())
 }
 
 fn rename_branch_in_worktree(
@@ -133,7 +149,40 @@ pub fn list_worktrees(repo_root: &Path) -> Result<Vec<Worktree>> {
     let cwd = cwd.canonicalize().unwrap_or(cwd);
     let default_branch = get_default_branch(repo_root);
 
-    parse_worktree_porcelain(&stdout, &cwd, default_branch.as_deref())
+    Ok(parse_worktree_porcelain(
+        &stdout,
+        &cwd,
+        default_branch.as_deref(),
+    ))
+}
+
+pub fn git_common_dir(repo_root: &Path) -> Result<PathBuf> {
+    let git_cwd = resolve_git_cwd(repo_root);
+    let output = Command::new("git")
+        .args(["rev-parse", "--git-common-dir"])
+        .current_dir(&git_cwd)
+        .output()
+        .context("Failed to run git rev-parse --git-common-dir")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        anyhow::bail!(
+            "{}",
+            if stderr.is_empty() {
+                "git rev-parse --git-common-dir failed".to_string()
+            } else {
+                stderr
+            }
+        );
+    }
+
+    let common_dir = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let path = PathBuf::from(common_dir);
+    if path.is_absolute() {
+        Ok(path)
+    } else {
+        Ok(git_cwd.join(path))
+    }
 }
 
 fn effective_cwd(fallback: &Path) -> PathBuf {
@@ -174,19 +223,18 @@ fn get_default_branch(git_repo: &Path) -> Option<String> {
             .split('\t')
             .next()
             .and_then(|r| r.trim().strip_prefix("ref: refs/heads/"))
+            && !branch.is_empty()
         {
-            if !branch.is_empty() {
-                // symbolic-ref writes without requiring refs/remotes/origin/<branch> to exist locally
-                let _ = Command::new("git")
-                    .args([
-                        "symbolic-ref",
-                        "refs/remotes/origin/HEAD",
-                        &format!("refs/remotes/origin/{branch}"),
-                    ])
-                    .current_dir(git_repo)
-                    .output();
-                return Some(branch.to_string());
-            }
+            // symbolic-ref writes without requiring refs/remotes/origin/<branch> to exist locally
+            let _ = Command::new("git")
+                .args([
+                    "symbolic-ref",
+                    "refs/remotes/origin/HEAD",
+                    &format!("refs/remotes/origin/{branch}"),
+                ])
+                .current_dir(git_repo)
+                .output();
+            return Some(branch.to_string());
         }
     }
     None
@@ -228,11 +276,7 @@ pub fn current_branch(dir: &Path) -> Result<String> {
     Ok(branch)
 }
 
-fn parse_worktree_porcelain(
-    raw: &str,
-    cwd: &Path,
-    default_branch: Option<&str>,
-) -> Result<Vec<Worktree>> {
+fn parse_worktree_porcelain(raw: &str, cwd: &Path, default_branch: Option<&str>) -> Vec<Worktree> {
     let mut worktrees = Vec::new();
 
     for block in raw.trim().split("\n\n") {
@@ -244,7 +288,7 @@ fn parse_worktree_porcelain(
         let path_line = lines.iter().find(|l| l.starts_with("worktree "));
         let branch_line = lines.iter().find(|l| l.starts_with("branch "));
         let head_line = lines.iter().find(|l| l.starts_with("HEAD "));
-        let is_bare = lines.iter().any(|l| *l == "bare");
+        let is_bare = lines.contains(&"bare");
 
         let Some(path_str) = path_line.map(|l| l.trim_start_matches("worktree ")) else {
             continue;
@@ -263,11 +307,8 @@ fn parse_worktree_porcelain(
             .or_else(|| head_line.map(|l| l.trim_start_matches("HEAD ").to_string()))
             .unwrap_or_else(|| "HEAD".to_string());
 
-        let is_main = match default_branch {
-            Some(db) => branch == db,
-            None => worktrees.is_empty(),
-        };
-        let is_current = path.canonicalize().unwrap_or(path.clone()) == cwd;
+        let is_main = default_branch.map_or(worktrees.is_empty(), |db| branch == db);
+        let is_current = path.canonicalize().unwrap_or_else(|_| path.clone()) == cwd;
 
         worktrees.push(Worktree {
             path: path_str.to_string(),
@@ -279,7 +320,7 @@ fn parse_worktree_porcelain(
     }
 
     worktrees.sort_by_key(|w| !w.is_main);
-    Ok(worktrees)
+    worktrees
 }
 
 pub fn add_worktree(
@@ -481,8 +522,16 @@ pub fn rename_worktree(
 }
 
 #[allow(dead_code)]
+pub struct PrCheckout {
+    pub worktree_path: PathBuf,
+    pub branch: String,
+    pub base_branch: Option<String>,
+    pub created: bool,
+}
+
 pub fn checkout_pr_as_worktree(repo_root: &Path, pr_number: u32) -> Result<(Vec<String>, PathBuf)> {
-    checkout_pr_as_worktree_impl(repo_root, pr_number, None)
+    let (messages, checkout) = checkout_pr_as_worktree_impl(repo_root, pr_number, None)?;
+    Ok((messages, checkout.worktree_path))
 }
 
 pub fn start_checkout_pr_as_worktree(repo_root: PathBuf, pr_number: u32) -> Receiver<SyncPrEvent> {
@@ -490,8 +539,13 @@ pub fn start_checkout_pr_as_worktree(repo_root: PathBuf, pr_number: u32) -> Rece
 
     thread::spawn(
         move || match checkout_pr_as_worktree_impl(&repo_root, pr_number, Some(&tx)) {
-            Ok((_, worktree_path)) => {
-                let _ = tx.send(SyncPrEvent::Finished(worktree_path));
+            Ok((_, checkout)) => {
+                let _ = tx.send(SyncPrEvent::Finished {
+                    worktree_path: checkout.worktree_path,
+                    branch: checkout.branch,
+                    base_branch: checkout.base_branch,
+                    created: checkout.created,
+                });
             }
             Err(err) => {
                 let _ = tx.send(SyncPrEvent::Error(err.to_string()));
@@ -506,35 +560,41 @@ fn checkout_pr_as_worktree_impl(
     repo_root: &Path,
     pr_number: u32,
     tx: Option<&Sender<SyncPrEvent>>,
-) -> Result<(Vec<String>, PathBuf)> {
+) -> Result<(Vec<String>, PrCheckout)> {
     let mut messages = Vec::new();
     let git_cwd = resolve_git_cwd(repo_root);
 
     let pr_ref = format!("#{pr_number}");
     push_sync_pr_progress(tx, &mut messages, format!("$ gh pr view {pr_ref}"));
-    let pr_info = Command::new("gh")
+    let mut pr_info_cmd = Command::new("gh");
+    pr_info_cmd
         .args([
             "pr",
             "view",
             &pr_ref,
             "--json",
-            "headRefName",
+            "headRefName,baseRefName",
             "-q",
-            ".headRefName",
+            ".headRefName + \"\\n\" + .baseRefName",
         ])
-        .current_dir(&git_cwd)
-        .output()
-        .context("Failed to run gh pr view")?;
+        .current_dir(&git_cwd);
+    let pr_info = run_command_capture_stdout(&mut pr_info_cmd, "Failed to run gh pr view")?;
 
     if !pr_info.status.success() {
-        let stderr = String::from_utf8_lossy(&pr_info.stderr);
-        anyhow::bail!("{}", stderr.trim());
+        anyhow::bail!("gh pr view failed.");
     }
 
-    let branch_name = String::from_utf8_lossy(&pr_info.stdout).trim().to_string();
+    let stdout = String::from_utf8_lossy(&pr_info.stdout);
+    let mut lines = stdout.lines();
+    let branch_name = lines.next().unwrap_or_default().trim().to_string();
     if branch_name.is_empty() {
         anyhow::bail!("Could not resolve head branch for PR #{pr_number}");
     }
+    let base_branch = lines
+        .next()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
     push_sync_pr_progress(
         tx,
         &mut messages,
@@ -549,12 +609,11 @@ fn checkout_pr_as_worktree_impl(
     let fetch = fetch_remote_tracking_branch(&git_cwd, "origin", &branch_name, false);
 
     match fetch {
-        Ok(out) if !out.status.success() => {
-            let stderr = String::from_utf8_lossy(&out.stderr);
+        Ok(status) if !status.success() => {
             push_sync_pr_progress(
                 tx,
                 &mut messages,
-                format!("  (fetch note: {})", stderr.trim()),
+                "  (fetch note: git fetch failed)".to_string(),
             );
         }
         Err(e) => push_sync_pr_progress(tx, &mut messages, format!("  (fetch warn: {e})")),
@@ -579,7 +638,15 @@ fn checkout_pr_as_worktree_impl(
             format!("✓ Reusing existing worktree at {}", existing.path),
         );
         sync_existing_pr_worktree(repo_root, pr_number, &existing, tx, &mut messages)?;
-        return Ok((messages, existing_path));
+        return Ok((
+            messages,
+            PrCheckout {
+                worktree_path: existing_path,
+                branch: branch_name,
+                base_branch,
+                created: false,
+            },
+        ));
     }
     let dest_str = dest.to_string_lossy().to_string();
     ensure_parent_dirs(&dest)?;
@@ -627,7 +694,7 @@ fn checkout_pr_as_worktree_impl(
 
         if local_branch_exists {
             let new_worktree = Worktree {
-                path: dest_str.clone(),
+                path: dest_str,
                 branch: branch_name.clone(),
                 is_main: false,
                 is_current: false,
@@ -645,7 +712,15 @@ fn checkout_pr_as_worktree_impl(
         anyhow::bail!("{msg}");
     }
 
-    Ok((messages, dest))
+    Ok((
+        messages,
+        PrCheckout {
+            worktree_path: dest,
+            branch: branch_name,
+            base_branch,
+            created: true,
+        },
+    ))
 }
 
 fn resolve_existing_pr_worktree(
@@ -721,8 +796,8 @@ fn sync_existing_pr_worktree(
     );
     let fetch = fetch_remote_tracking_branch(&git_cwd, "origin", &wt.branch, true)?;
 
-    if !fetch.status.success() {
-        let err = command_failure_summary(&fetch, "Could not fetch remotes");
+    if !fetch.success() {
+        let err = "Could not fetch remotes.".to_string();
         push_sync_pr_progress(tx, messages, format!("✗ {err}"));
         anyhow::bail!("Could not sync PR #{pr_number}: {err}");
     }
@@ -737,8 +812,7 @@ fn sync_existing_pr_worktree(
         .args(["rev-parse", "--verify", &remote_ref])
         .current_dir(&wt.path)
         .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false);
+        .is_ok_and(|o| o.status.success());
 
     if !ref_exists {
         let err = format!("{remote_ref} was not found after fetch");
@@ -784,20 +858,6 @@ fn sync_existing_pr_worktree(
     let err = describe_pr_sync_failure(&String::from_utf8_lossy(&merge.stderr), &wt.branch);
     push_sync_pr_progress(tx, messages, format!("✗ {err}"));
     anyhow::bail!("{err}");
-}
-
-fn command_failure_summary(output: &std::process::Output, fallback: &str) -> String {
-    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-    if !stderr.is_empty() {
-        return stderr;
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if !stdout.is_empty() {
-        return stdout;
-    }
-
-    fallback.to_string()
 }
 
 fn describe_pr_sync_failure(stderr: &str, branch_name: &str) -> String {
@@ -862,23 +922,18 @@ fn push_sync_pr_progress(
     }
 }
 
-/// Fetch the tracked branch ref from origin, then fast-forward a single worktree to origin/<branch>.
-/// Returns (fetch_succeeded, SyncResult).
 pub fn sync_one_worktree(repo_root: &Path, wt: &Worktree) -> (bool, SyncResult) {
     let git_cwd = resolve_git_cwd(repo_root);
-    let fetch_ok = fetch_remote_tracking_branch(&git_cwd, "origin", &wt.branch, true)
-        .map(|out| out.status.success())
-        .unwrap_or(false);
+    let fetch_ok = fetch_remote_tracking_branch(&git_cwd, "origin", &wt.branch, false)
+        .is_ok_and(|status| status.success());
 
     let remote_ref = format!("origin/{}", wt.branch);
 
-    // Check that origin/<branch> exists before attempting the merge.
     let ref_exists = Command::new("git")
         .args(["rev-parse", "--verify", &remote_ref])
         .current_dir(&wt.path)
         .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false);
+        .is_ok_and(|o| o.status.success());
 
     if !ref_exists {
         return (
@@ -1001,14 +1056,13 @@ pub fn dest_from_url(source: &str, cwd: &Path) -> String {
 }
 
 pub fn clone_repo_with_layout(url: &str, dest: &Path) -> Result<PathBuf> {
-    let (tx, _rx) = mpsc::channel();
-    clone_repo_with_layout_inner(url, dest, &tx)
+    clone_repo_with_layout_inner(url, dest)
 }
 
 pub fn start_clone_repo_with_layout(url: String, dest: PathBuf) -> Receiver<CloneEvent> {
     let (tx, rx) = mpsc::channel();
 
-    thread::spawn(move || match clone_repo_with_layout_inner(&url, &dest, &tx) {
+    thread::spawn(move || match clone_repo_with_layout_inner(&url, &dest) {
         Ok(worktree_path) => {
             let _ = tx.send(CloneEvent::Finished(worktree_path));
         }
@@ -1020,7 +1074,7 @@ pub fn start_clone_repo_with_layout(url: String, dest: PathBuf) -> Receiver<Clon
     rx
 }
 
-fn clone_repo_with_layout_inner(url: &str, dest: &Path, tx: &Sender<CloneEvent>) -> Result<PathBuf> {
+fn clone_repo_with_layout_inner(url: &str, dest: &Path) -> Result<PathBuf> {
     let source = url.trim();
     fs::create_dir_all(dest).context("Failed to create destination directory")?;
     let tmp_dir = dest.join(format!(
@@ -1028,34 +1082,29 @@ fn clone_repo_with_layout_inner(url: &str, dest: &Path, tx: &Sender<CloneEvent>)
         std::process::id(),
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_millis())
-            .unwrap_or(0)
+            .map_or(0, |d| d.as_millis())
     ));
     let tmp_str = tmp_dir.to_string_lossy().to_string();
 
     if is_github_owner_repo(source) {
         if gh_available() {
-            match clone_with_gh(source, &tmp_str, tx) {
-                Ok(()) => {}
-                Err(_) => {
-                    if tmp_dir.exists() {
-                        let _ = fs::remove_dir_all(&tmp_dir);
-                    }
-                    let protocol = preferred_github_protocol();
-                    let repo_url = github_url_from_slug(source, &protocol);
-                    clone_with_git(&repo_url, &tmp_str, tx)?;
+            if clone_with_gh(source, &tmp_str).is_err() {
+                if tmp_dir.exists() {
+                    let _ = fs::remove_dir_all(&tmp_dir);
                 }
+                let protocol = preferred_github_protocol();
+                let repo_url = github_url_from_slug(source, &protocol);
+                clone_with_git(&repo_url, &tmp_str)?;
             }
         } else {
             let protocol = preferred_github_protocol();
             let repo_url = github_url_from_slug(source, &protocol);
-            clone_with_git(&repo_url, &tmp_str, tx)?;
+            clone_with_git(&repo_url, &tmp_str)?;
         }
     } else {
-        clone_with_git(source, &tmp_str, tx)?;
+        clone_with_git(source, &tmp_str)?;
     }
 
-    // Detect the default branch from the cloned checkout.
     let head = Command::new("git")
         .args(["symbolic-ref", "--short", "HEAD"])
         .current_dir(&tmp_dir)
@@ -1088,126 +1137,43 @@ fn clone_repo_with_layout_inner(url: &str, dest: &Path, tx: &Sender<CloneEvent>)
     Ok(worktree_path)
 }
 
-fn clone_with_gh(source: &str, dest: &str, tx: &Sender<CloneEvent>) -> Result<()> {
-    clone_with_command(
-        Command::new("gh"),
-        &["repo", "clone", source, dest, "--", "--progress"],
-        "Failed to run gh repo clone",
-        "gh repo clone failed",
-        tx,
-    )
-}
-
-fn clone_with_git(source: &str, dest: &str, tx: &Sender<CloneEvent>) -> Result<()> {
-    clone_with_command(
-        Command::new("git"),
-        &["clone", "--progress", source, dest],
-        "Failed to run git clone",
-        "git clone failed",
-        tx,
-    )
-}
-
-fn clone_with_command(
-    mut command: Command,
-    args: &[&str],
-    spawn_context: &'static str,
-    fallback_error: &'static str,
-    tx: &Sender<CloneEvent>,
-) -> Result<()> {
-    let mut child = command
-        .args(args)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .context(spawn_context)?;
-
-    let stdout = child
-        .stdout
-        .take()
-        .context("Failed to capture clone stdout")?;
-    let stderr = child
-        .stderr
-        .take()
-        .context("Failed to capture clone stderr")?;
-
-    let last_line = Arc::new(Mutex::new(None::<String>));
-    let stdout_handle = spawn_output_forwarder(stdout, tx.clone(), Arc::clone(&last_line));
-    let stderr_handle = spawn_output_forwarder(stderr, tx.clone(), Arc::clone(&last_line));
-
-    let status = child.wait().context("Failed to wait for clone process")?;
-
-    let _ = stdout_handle.join();
-    let _ = stderr_handle.join();
+fn clone_with_gh(source: &str, dest: &str) -> Result<()> {
+    let status = Command::new("gh")
+        .args(["repo", "clone", source, dest])
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .status()
+        .context("Failed to run gh repo clone")?;
 
     if status.success() {
         Ok(())
     } else {
-        let message = last_line
-            .lock()
-            .ok()
-            .and_then(|line| line.clone())
-            .filter(|line| !line.is_empty())
-            .unwrap_or_else(|| fallback_error.to_string());
-        Err(anyhow::anyhow!("{message}"))
+        anyhow::bail!("gh repo clone failed.")
     }
 }
 
-fn spawn_output_forwarder(
-    mut stream: impl Read + Send + 'static,
-    tx: Sender<CloneEvent>,
-    last_line: Arc<Mutex<Option<String>>>,
-) -> thread::JoinHandle<()> {
-    thread::spawn(move || {
-        let mut buf = [0u8; 4096];
-        let mut current = Vec::new();
-        loop {
-            match stream.read(&mut buf) {
-                Ok(0) => break,
-                Ok(read) => {
-                    for &byte in &buf[..read] {
-                        match byte {
-                            b'\r' => {
-                                emit_clone_output(&tx, &last_line, std::mem::take(&mut current));
-                            }
-                            b'\n' => {
-                                emit_clone_output(&tx, &last_line, std::mem::take(&mut current));
-                            }
-                            _ => current.push(byte),
-                        }
-                    }
-                }
-                Err(_) => break,
-            }
-        }
+fn clone_with_git(source: &str, dest: &str) -> Result<()> {
+    let status = Command::new("git")
+        .args(["clone", source, dest])
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .status()
+        .context("Failed to run git clone")?;
 
-        emit_clone_output(&tx, &last_line, current);
-    })
-}
-
-fn emit_clone_output(
-    tx: &Sender<CloneEvent>,
-    last_line: &Arc<Mutex<Option<String>>>,
-    bytes: Vec<u8>,
-) {
-    let line = String::from_utf8_lossy(&bytes).trim_end().to_string();
-    if line.is_empty() {
-        return;
+    if status.success() {
+        Ok(())
+    } else {
+        anyhow::bail!("git clone failed.")
     }
-
-    if let Ok(mut last) = last_line.lock() {
-        *last = Some(line.clone());
-    }
-
-    let _ = tx.send(CloneEvent::Progress { line });
 }
 
 fn gh_available() -> bool {
     Command::new("gh")
         .arg("--version")
         .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+        .is_ok_and(|o| o.status.success())
 }
 
 /// Returns a path suitable as `current_dir` for git commands.
@@ -1221,10 +1187,10 @@ fn resolve_git_cwd(repo_root: &Path) -> PathBuf {
         return repo_root.to_path_buf();
     }
 
-    if let Ok(repos) = collect_workspace_git_repos(repo_root) {
-        if let Some(path) = repos.into_iter().next() {
-            return path;
-        }
+    if let Ok(repos) = collect_workspace_git_repos(repo_root)
+        && let Some(path) = repos.into_iter().next()
+    {
+        return path;
     }
 
     repo_root.to_path_buf()
@@ -1235,8 +1201,7 @@ fn is_git_repo(dir: &Path) -> bool {
         .args(["rev-parse", "--git-dir"])
         .current_dir(dir)
         .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+        .is_ok_and(|o| o.status.success())
 }
 
 fn worktree_base_dir(repo_root: &Path) -> PathBuf {
@@ -1245,8 +1210,7 @@ fn worktree_base_dir(repo_root: &Path) -> PathBuf {
     if repo_root.join(".git").exists() {
         repo_root
             .parent()
-            .map(PathBuf::from)
-            .unwrap_or_else(|| repo_root.to_path_buf())
+            .map_or_else(|| repo_root.to_path_buf(), PathBuf::from)
     } else {
         // Bare repositories already use repo_root as the common directory.
         repo_root.to_path_buf()
@@ -1276,10 +1240,10 @@ fn collect_workspace_git_repos_recursive(
 
     let mut entries: Vec<_> = fs::read_dir(dir)
         .with_context(|| format!("Failed to read directory {}", dir.display()))?
-        .filter_map(|entry| entry.ok())
+        .filter_map(std::result::Result::ok)
         .filter(|entry| entry.path().is_dir())
         .collect();
-    entries.sort_by_key(|entry| entry.file_name());
+    entries.sort_by_key(std::fs::DirEntry::file_name);
 
     for entry in entries {
         let path = entry.path();
@@ -1362,7 +1326,7 @@ pub fn find_repo_root(start: &Path) -> Option<PathBuf> {
 
     // For a normal repo the git dir is <root>/.git — return the parent.
     // For a bare repo the git dir IS the root.
-    if git_dir.file_name().map(|n| n == ".git").unwrap_or(false) {
+    if git_dir.file_name().is_some_and(|n| n == ".git") {
         git_dir.parent().map(PathBuf::from)
     } else {
         Some(git_dir)
@@ -1397,14 +1361,13 @@ fn read_git_origin_from_config(git_config: &Path) -> Option<String> {
             in_origin = trimmed == r#"[remote "origin"]"#;
             continue;
         }
-        if in_origin {
-            if let Some(rest) = trimmed.strip_prefix("url") {
-                if let Some(url) = rest.trim_start().strip_prefix('=') {
-                    let url = url.trim().trim_end_matches(".git").to_lowercase();
-                    if !url.is_empty() {
-                        return Some(url);
-                    }
-                }
+        if in_origin
+            && let Some(rest) = trimmed.strip_prefix("url")
+            && let Some(url) = rest.trim_start().strip_prefix('=')
+        {
+            let url = url.trim().trim_end_matches(".git").to_lowercase();
+            if !url.is_empty() {
+                return Some(url);
             }
         }
     }
@@ -1414,9 +1377,8 @@ fn read_git_origin_from_config(git_config: &Path) -> Option<String> {
 pub fn detect_worktree_workspace(dir: &Path) -> bool {
     const MAX_SCAN: usize = 50;
 
-    let entries = match fs::read_dir(dir) {
-        Ok(e) => e,
-        Err(_) => return false,
+    let Ok(entries) = fs::read_dir(dir) else {
+        return false;
     };
 
     let mut origin: Option<String> = None;
@@ -1484,11 +1446,10 @@ pub fn list_workspace_worktrees(workspace_dir: &Path) -> Result<Vec<Worktree>> {
         };
 
         let path_str = path.to_string_lossy().to_string();
-        let is_main = match default_branch.as_deref() {
-            Some(db) => branch == db,
-            None => worktrees.is_empty(),
-        };
-        let is_current = path.canonicalize().unwrap_or(path.clone()) == cwd;
+        let is_main = default_branch
+            .as_deref()
+            .map_or(worktrees.is_empty(), |db| branch == db);
+        let is_current = path.canonicalize().unwrap_or_else(|_| path.clone()) == cwd;
 
         worktrees.push(Worktree {
             path: path_str,
@@ -1504,9 +1465,7 @@ pub fn list_workspace_worktrees(workspace_dir: &Path) -> Result<Vec<Worktree>> {
 }
 
 pub fn worktree_has_secrets(path: &Path) -> bool {
-    list_secret_files(path)
-        .map(|files| !files.is_empty())
-        .unwrap_or(false)
+    list_secret_files(path).is_ok_and(|files| !files.is_empty())
 }
 
 fn list_secret_files(root: &Path) -> Result<Vec<PathBuf>> {
@@ -1544,9 +1503,9 @@ fn collect_secret_files(
 ) -> Result<()> {
     let mut entries: Vec<_> = fs::read_dir(dir)
         .with_context(|| format!("Failed to read directory {}", dir.display()))?
-        .filter_map(|entry| entry.ok())
+        .filter_map(std::result::Result::ok)
         .collect();
-    entries.sort_by_key(|entry| entry.file_name());
+    entries.sort_by_key(std::fs::DirEntry::file_name);
 
     for entry in entries {
         let path = entry.path();
@@ -1626,17 +1585,13 @@ pub fn start_fetch_remote(repo_root: PathBuf, remote: String) -> Receiver<Result
         let out = Command::new("git")
             .args(["fetch", &remote])
             .current_dir(&git_cwd)
-            .output();
+            .stdin(Stdio::inherit())
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit())
+            .status();
         let result = match out {
-            Ok(o) if o.status.success() => Ok(()),
-            Ok(o) => {
-                let stderr = String::from_utf8_lossy(&o.stderr).trim().to_string();
-                Err(if stderr.is_empty() {
-                    format!("git fetch {remote} failed")
-                } else {
-                    stderr
-                })
-            }
+            Ok(status) if status.success() => Ok(()),
+            Ok(_) => Err(format!("git fetch {remote} failed")),
             Err(e) => Err(e.to_string()),
         };
         let _ = tx.send(result);
@@ -1659,7 +1614,7 @@ pub fn list_remote_branches(repo_root: &Path, remote: &str) -> Vec<String> {
         });
     String::from_utf8_lossy(&out.stdout)
         .lines()
-        .map(|l| l.trim())
+        .map(str::trim)
         .filter(|l| l.starts_with(&prefix) && !l.contains("HEAD"))
         .map(|l| l[prefix.len()..].to_string())
         .collect()
@@ -1710,8 +1665,7 @@ pub fn checkout_remote_branch(repo_root: &Path, remote: &str, branch: &str) -> R
         .args(["rev-parse", "--verify", &remote_ref])
         .current_dir(&git_cwd)
         .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false);
+        .is_ok_and(|o| o.status.success());
     if !ref_exists {
         anyhow::bail!("{remote}/{branch} not found after fetch");
     }
@@ -1724,8 +1678,7 @@ pub fn checkout_remote_branch(repo_root: &Path, remote: &str, branch: &str) -> R
         .args(["rev-parse", "--verify", branch])
         .current_dir(&git_cwd)
         .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false);
+        .is_ok_and(|o| o.status.success());
 
     let output = if local_exists {
         let upstream = Command::new("git")
@@ -2241,7 +2194,7 @@ mod tests {
         assert!(
             !worktrees
                 .iter()
-                .any(|wt| wt.path == ignored_repo.to_string_lossy().to_string())
+                .any(|wt| wt.path == ignored_repo.to_string_lossy())
         );
 
         let _ = fs::remove_dir_all(workspace);
