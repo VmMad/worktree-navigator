@@ -457,7 +457,8 @@ fn update_command_refreshes_zsh_wrapper_and_prints_restart_message() {
 
     let zshrc = fs::read_to_string(env.home.join(".zshrc")).expect("zshrc should exist");
     assert!(zshrc.contains("# worktree-navigator wt()"));
-    assert!(zshrc.contains("target=$(WT_CWD=\"$PWD\" command wt \"$@\")"));
+    assert!(zshrc.contains("WT_SHELL_WRAPPER=1 command wt \"$@\""));
+    assert!(zshrc.contains("WT_POST_CREATE="));
 
     let stderr = stderr(&output);
     assert!(stderr.contains("Updated wt to v9.9.9"), "stderr:\n{stderr}");

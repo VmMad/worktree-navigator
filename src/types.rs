@@ -18,8 +18,15 @@ pub enum ActiveAction {
     SyncTrees,
     Delete,
     CopySecrets,
+    Options,
     CloneRepo,
     CheckoutRemote,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OptionsPhase {
+    BrowsingScripts,
+    Editing,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -53,14 +60,20 @@ pub struct SyncResult {
 
 #[derive(Debug)]
 pub enum CloneEvent {
-    Progress { line: String },
     Finished(PathBuf),
     Error(String),
 }
 
 #[derive(Debug)]
 pub enum SyncPrEvent {
-    Progress { line: String },
-    Finished(PathBuf),
+    Progress {
+        line: String,
+    },
+    Finished {
+        worktree_path: PathBuf,
+        branch: String,
+        base_branch: Option<String>,
+        created: bool,
+    },
     Error(String),
 }

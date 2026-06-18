@@ -8,7 +8,7 @@ use ratatui::{
 
 use crate::{
     app::{App, COMMANDS},
-    types::{ActiveAction, CheckoutRemotePhase, CopySecretsPhase, SyncStatus},
+    types::{ActiveAction, CheckoutRemotePhase, CopySecretsPhase, OptionsPhase, SyncStatus},
     version,
 };
 
@@ -44,6 +44,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         ActiveAction::SyncTrees if show_sync_overlay => draw_sync_overlay(f, app, area),
         ActiveAction::Delete if show_delete_overlay => draw_delete_overlay(f, app, area),
         ActiveAction::CopySecrets if show_copy_overlay => draw_copy_secrets_overlay(f, app, area),
+        ActiveAction::Options => draw_options_overlay(f, app, area),
         ActiveAction::CloneRepo => draw_clone_overlay(f, app, area),
         ActiveAction::CheckoutRemote => draw_checkout_remote_overlay(f, app, area),
         _ => {}
@@ -590,9 +591,12 @@ fn draw_help(f: &mut Frame, app: &App, area: Rect) {
             Span::styled("  nav    ", Style::default().fg(Color::DarkGray)),
             Span::styled("Enter/click", Style::default().fg(Color::DarkGray)),
             Span::styled("  open    ", Style::default().fg(Color::DarkGray)),
-            Span::styled("b  m  p  d  s  c  r", Style::default().fg(Color::DarkGray)),
             Span::styled(
-                "  branch/rename/PR/delete/sync/copy/remote    ",
+                "b  m  p  d  s  c  o  r",
+                Style::default().fg(Color::DarkGray),
+            ),
+            Span::styled(
+                "  branch/rename/PR/delete/sync/copy/options/remote    ",
                 Style::default().fg(Color::DarkGray),
             ),
             Span::styled("q", Style::default().fg(Color::DarkGray)),
@@ -705,6 +709,175 @@ fn draw_copy_secrets_overlay(f: &mut Frame, app: &App, area: Rect) {
         ]),
         inner,
     );
+}
+
+fn draw_options_overlay(f: &mut Frame, app: &App, area: Rect) {
+    let has_err = app.overlay_error.is_some();
+    let is_editing = app.options_phase == OptionsPhase::Editing;
+    let item_count = app.repo_config.post_create_scripts.len();
+    let list_height = item_count.min(6) as u16;
+    let popup_height = if is_editing {
+        10 + u16::from(has_err) * 2
+    } else {
+        8 + list_height + u16::from(has_err) * 2
+    };
+    let popup = centered_rect(74, popup_height, area);
+    f.render_widget(Clear, popup);
+
+    let block = Block::default()
+        .title(" Options ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Yellow));
+    let inner = block.inner(popup).inner(Margin {
+        horizontal: 1,
+        vertical: 1,
+    });
+    f.render_widget(block, popup);
+
+    if is_editing {
+        let mut constraints = vec![
+            Constraint::Length(2),
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Length(1),
+        ];
+        if has_err {
+            constraints.push(Constraint::Length(1));
+            constraints.push(Constraint::Length(1));
+        }
+        let rows = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints(constraints)
+            .split(inner);
+
+        let editing_label = if app.options_edit_idx.is_some() {
+            "Edit a shell command to run after creating a worktree."
+        } else {
+            "Add a shell command to run after creating a worktree."
+        };
+        f.render_widget(
+            Paragraph::new(vec![
+                Line::from(Span::styled(
+                    "Post-create worktree scripts",
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                )),
+                Line::from(Span::styled(
+                    editing_label,
+                    Style::default().fg(Color::DarkGray),
+                )),
+            ]),
+            rows[0],
+        );
+
+        let (before, after) = app.input_parts();
+        f.render_widget(
+            Paragraph::new(input_line("Command: ", before, after, Color::Yellow)),
+            rows[1],
+        );
+        f.render_widget(
+            Paragraph::new(Span::styled(
+                "Enter to save  Esc to cancel",
+                Style::default().fg(Color::DarkGray),
+            )),
+            rows[3],
+        );
+
+        if let Some(err) = &app.overlay_error {
+            let err_row = rows.len() - 1;
+            f.render_widget(
+                Paragraph::new(Span::styled(
+                    format!("✗ {err}"),
+                    Style::default().fg(Color::Red),
+                )),
+                rows[err_row],
+            );
+        }
+        return;
+    }
+
+    let mut body_rows = vec![
+        Line::from(Span::styled(
+            "Enabled commands run automatically after a new worktree is created.",
+            Style::default().fg(Color::DarkGray),
+        )),
+        Line::from(Span::styled(
+            "Commands run inside the new worktree with WT_* paths available.",
+            Style::default().fg(Color::DarkGray),
+        )),
+        Line::from(vec![]),
+    ];
+
+    if app.repo_config.post_create_scripts.is_empty() {
+        body_rows.push(Line::from(Span::styled(
+            "No scripts configured yet. Press a to add one.",
+            Style::default().fg(Color::Yellow),
+        )));
+    } else {
+        let window_size = 6usize;
+        let total = app.repo_config.post_create_scripts.len();
+        let selected = app.options_selected_idx.min(total.saturating_sub(1));
+        let start = selected.saturating_sub(window_size.saturating_sub(1));
+        let end = (start + window_size).min(total);
+        let start = end.saturating_sub(window_size);
+
+        if start > 0 {
+            body_rows.push(Line::from(Span::styled(
+                format!("... {} earlier", start),
+                Style::default().fg(Color::DarkGray),
+            )));
+        }
+
+        for (idx, script) in app
+            .repo_config
+            .post_create_scripts
+            .iter()
+            .enumerate()
+            .skip(start)
+            .take(end - start)
+        {
+            let is_selected = idx == app.options_selected_idx;
+            let marker = if script.enabled { "[x]" } else { "[ ]" };
+            let style = if is_selected {
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD)
+            } else if script.enabled {
+                Style::default().fg(Color::White)
+            } else {
+                Style::default().fg(Color::DarkGray)
+            };
+            body_rows.push(Line::from(Span::styled(
+                format!("{marker} {}", script.command),
+                style,
+            )));
+        }
+
+        if end < total {
+            body_rows.push(Line::from(Span::styled(
+                format!("... {} more", total - end),
+                Style::default().fg(Color::DarkGray),
+            )));
+        }
+    }
+
+    body_rows.push(Line::from(vec![]));
+    body_rows.push(Line::from(Span::styled(
+        "a add  e/Enter edit  Space toggle  d delete  Esc close",
+        Style::default().fg(Color::DarkGray),
+    )));
+
+    if let Some(err) = &app.overlay_error {
+        body_rows.push(Line::from(vec![]));
+        body_rows.push(Line::from(Span::styled(
+            format!("✗ {err}"),
+            Style::default().fg(Color::Red),
+        )));
+    }
+
+    f.render_widget(Paragraph::new(body_rows).wrap(Wrap { trim: false }), inner);
 }
 
 // ─────────────────────────────── Overlays ───────────────────────────────────
@@ -1442,16 +1615,7 @@ fn draw_delete_overlay(f: &mut Frame, app: &App, area: Rect) {
             Line::from(vec![]),
         ];
 
-        if app.delete_warn_current {
-            body_lines.push(Line::from(Span::styled(
-                detail,
-                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
-            )));
-            body_lines.push(Line::from(Span::styled(
-                supporting_line,
-                Style::default().fg(Color::DarkGray),
-            )));
-        } else if branches.len() == 1 {
+        if app.delete_warn_current || branches.len() == 1 {
             body_lines.push(Line::from(Span::styled(
                 detail,
                 Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
@@ -1535,90 +1699,6 @@ fn draw_delete_overlay(f: &mut Frame, app: &App, area: Rect) {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use std::path::PathBuf;
-
-    use ratatui::{Terminal, backend::TestBackend};
-
-    use crate::{
-        app::App,
-        types::{ActiveAction, Worktree},
-    };
-
-    use super::{draw, draw_delete_overlay};
-
-    #[test]
-    fn delete_overlay_keeps_actions_visible_on_small_screens() {
-        let backend = TestBackend::new(40, 8);
-        let mut terminal = Terminal::new(backend).expect("test terminal should be created");
-        let mut app = App::new(PathBuf::from("/tmp/repo"));
-        app.worktrees = vec![
-            Worktree {
-                path: "/tmp/repo/main".to_string(),
-                branch: "main".to_string(),
-                is_main: true,
-                is_current: true,
-                has_secrets: false,
-            },
-            Worktree {
-                path: "/tmp/repo/feature-small".to_string(),
-                branch: "feature/small".to_string(),
-                is_main: false,
-                is_current: false,
-                has_secrets: false,
-            },
-        ];
-        app.active_action = ActiveAction::Delete;
-        app.delete_confirm_targets = vec![1];
-        app.delete_confirm_yes = true;
-
-        terminal
-            .draw(|frame| draw_delete_overlay(frame, &app, frame.area()))
-            .expect("delete overlay should render");
-
-        let buffer = terminal.backend().buffer();
-        let visible_text = buffer
-            .content()
-            .iter()
-            .map(|cell| cell.symbol())
-            .collect::<String>();
-
-        assert!(visible_text.contains("Yes"));
-        assert!(visible_text.contains("No"));
-    }
-
-    #[test]
-    fn full_ui_renders_without_overflow_on_small_screens() {
-        let backend = TestBackend::new(40, 8);
-        let mut terminal = Terminal::new(backend).expect("test terminal should be created");
-        let mut app = App::new(PathBuf::from("/tmp/repo"));
-        app.worktrees = vec![Worktree {
-            path: "/tmp/repo/main".to_string(),
-            branch: "main".to_string(),
-            is_main: true,
-            is_current: true,
-            has_secrets: false,
-        }];
-        app.worktrees_loading = false;
-
-        terminal
-            .draw(|frame| draw(frame, &mut app))
-            .expect("full ui should render on small screens");
-    }
-
-    #[test]
-    fn tiny_terminal_renders_fallback_without_panicking() {
-        let backend = TestBackend::new(12, 4);
-        let mut terminal = Terminal::new(backend).expect("test terminal should be created");
-        let mut app = App::new(PathBuf::from("/tmp/repo"));
-
-        terminal
-            .draw(|frame| draw(frame, &mut app))
-            .expect("tiny terminal should render fallback");
-    }
-}
-
 fn draw_clone_overlay(f: &mut Frame, app: &App, area: Rect) {
     let has_err = app.clone_error.is_some();
     let height = if app.clone_loading {
@@ -1645,11 +1725,7 @@ fn draw_clone_overlay(f: &mut Frame, app: &App, area: Rect) {
     if app.clone_loading {
         let rows = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(1),
-                Constraint::Length(1),
-                Constraint::Length(1),
-            ])
+            .constraints([Constraint::Length(1), Constraint::Length(1)])
             .split(inner);
 
         f.render_widget(
@@ -1668,16 +1744,6 @@ fn draw_clone_overlay(f: &mut Frame, app: &App, area: Rect) {
             )),
             rows[1],
         );
-
-        if let Some(line) = app.clone_output.last() {
-            f.render_widget(
-                Paragraph::new(Span::styled(
-                    format!("   {line}"),
-                    Style::default().fg(Color::DarkGray),
-                )),
-                rows[2],
-            );
-        }
         return;
     }
 
@@ -1876,7 +1942,7 @@ fn draw_checkout_remote_overlay(f: &mut Frame, app: &App, area: Rect) {
                 );
             } else {
                 let (before, after) = app.input_parts();
-                let ghost = app.checkout_remote_ghost().unwrap_or_else(String::new);
+                let ghost = app.checkout_remote_ghost().unwrap_or_default();
                 f.render_widget(
                     Paragraph::new(Line::from(vec![
                         Span::styled("Remote:  ", Style::default().fg(Color::Gray)),
@@ -1947,4 +2013,88 @@ fn summarize_clone_error(err: &str) -> String {
         .unwrap_or(lines[0]);
 
     selected.chars().take(80).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use ratatui::{Terminal, backend::TestBackend};
+
+    use crate::{
+        app::App,
+        types::{ActiveAction, Worktree},
+    };
+
+    use super::{draw, draw_delete_overlay};
+
+    #[test]
+    fn delete_overlay_keeps_actions_visible_on_small_screens() {
+        let backend = TestBackend::new(40, 8);
+        let mut terminal = Terminal::new(backend).expect("test terminal should be created");
+        let mut app = App::new(PathBuf::from("/tmp/repo"));
+        app.worktrees = vec![
+            Worktree {
+                path: "/tmp/repo/main".to_string(),
+                branch: "main".to_string(),
+                is_main: true,
+                is_current: true,
+                has_secrets: false,
+            },
+            Worktree {
+                path: "/tmp/repo/feature-small".to_string(),
+                branch: "feature/small".to_string(),
+                is_main: false,
+                is_current: false,
+                has_secrets: false,
+            },
+        ];
+        app.active_action = ActiveAction::Delete;
+        app.delete_confirm_targets = vec![1];
+        app.delete_confirm_yes = true;
+
+        terminal
+            .draw(|frame| draw_delete_overlay(frame, &app, frame.area()))
+            .expect("delete overlay should render");
+
+        let buffer = terminal.backend().buffer();
+        let visible_text = buffer
+            .content()
+            .iter()
+            .map(ratatui::buffer::Cell::symbol)
+            .collect::<String>();
+
+        assert!(visible_text.contains("Yes"));
+        assert!(visible_text.contains("No"));
+    }
+
+    #[test]
+    fn full_ui_renders_without_overflow_on_small_screens() {
+        let backend = TestBackend::new(40, 8);
+        let mut terminal = Terminal::new(backend).expect("test terminal should be created");
+        let mut app = App::new(PathBuf::from("/tmp/repo"));
+        app.worktrees = vec![Worktree {
+            path: "/tmp/repo/main".to_string(),
+            branch: "main".to_string(),
+            is_main: true,
+            is_current: true,
+            has_secrets: false,
+        }];
+        app.worktrees_loading = false;
+
+        terminal
+            .draw(|frame| draw(frame, &mut app))
+            .expect("full ui should render on small screens");
+    }
+
+    #[test]
+    fn tiny_terminal_renders_fallback_without_panicking() {
+        let backend = TestBackend::new(12, 4);
+        let mut terminal = Terminal::new(backend).expect("test terminal should be created");
+        let mut app = App::new(PathBuf::from("/tmp/repo"));
+
+        terminal
+            .draw(|frame| draw(frame, &mut app))
+            .expect("tiny terminal should render fallback");
+    }
 }

@@ -20,11 +20,22 @@ const SHELL_WRAPPER_MARKER: &str = "# worktree-navigator wt()";
 const SHELL_WRAPPER_BODY: &str = "\
 # worktree-navigator wt()\n\
 wt() {\n\
-  local target\n\
-  target=$(WT_CWD=\"$PWD\" command wt \"$@\")\n\
+  local wt_output target post_create_request line\n\
+  wt_output=$(WT_CWD=\"$PWD\" WT_SHELL_WRAPPER=1 command wt \"$@\")\n\
   local exit_code=$?\n\
+  while IFS= read -r line; do\n\
+    case \"$line\" in\n\
+      WT_PATH=*) target=\"${line#WT_PATH=}\" ;;\n\
+      WT_POST_CREATE=*) post_create_request=\"${line#WT_POST_CREATE=}\" ;;\n\
+      *) if [[ -z \"$target\" && -n \"$line\" ]]; then target=\"$line\"; fi ;;\n\
+    esac\n\
+  done <<< \"$wt_output\"\n\
   if [[ -n \"$target\" && -d \"$target\" ]]; then\n\
     cd \"$target\"\n\
+  fi\n\
+  if [[ $exit_code -eq 0 && -n \"$post_create_request\" && -f \"$post_create_request\" ]]; then\n\
+    WT_CWD=\"$PWD\" WT_SHELL_WRAPPER=1 command wt __run-post-create \"$post_create_request\"\n\
+    exit_code=$?\n\
   fi\n\
   return $exit_code\n\
 }\n";
@@ -431,7 +442,7 @@ fn parse_version_numbers(version: &str) -> Vec<u64> {
         .split('.')
         .map(|part| {
             part.chars()
-                .take_while(|c| c.is_ascii_digit())
+                .take_while(char::is_ascii_digit)
                 .collect::<String>()
         })
         .filter_map(|digits| digits.parse::<u64>().ok())
@@ -439,16 +450,16 @@ fn parse_version_numbers(version: &str) -> Vec<u64> {
 }
 
 fn select_asset_name(assets: &[String], preferred: Option<&str>) -> Option<String> {
-    if let Ok(explicit) = std::env::var("WT_UPDATE_ASSET") {
-        if let Some(found) = assets.iter().find(|a| a.as_str() == explicit.as_str()) {
-            return Some(found.clone());
-        }
+    if let Ok(explicit) = std::env::var("WT_UPDATE_ASSET")
+        && let Some(found) = assets.iter().find(|a| a.as_str() == explicit.as_str())
+    {
+        return Some(found.clone());
     }
 
-    if let Some(pref) = preferred {
-        if let Some(found) = assets.iter().find(|a| a.as_str() == pref) {
-            return Some(found.clone());
-        }
+    if let Some(pref) = preferred
+        && let Some(found) = assets.iter().find(|a| a.as_str() == pref)
+    {
+        return Some(found.clone());
     }
 
     let arch_tokens = current_arch_tokens();
@@ -476,10 +487,10 @@ fn select_asset_name(assets: &[String], preferred: Option<&str>) -> Option<Strin
         if lower.contains(&format!("{}{}", BINARY_NAME_PREFIX, arch_tokens[0])) {
             score += 3;
         }
-        if let Some(primary_env) = env_tokens.first() {
-            if lower.contains(primary_env) {
-                score += 1;
-            }
+        if let Some(primary_env) = env_tokens.first()
+            && lower.contains(primary_env)
+        {
+            score += 1;
         }
 
         match &best {
@@ -533,8 +544,7 @@ fn update_target_binary() -> Result<PathBuf> {
     if current
         .file_name()
         .and_then(|n| n.to_str())
-        .map(|n| n == "wt")
-        .unwrap_or(false)
+        .is_some_and(|n| n == "wt")
     {
         return Ok(current);
     }
@@ -588,8 +598,7 @@ fn update_cache_is_fresh(last_checked_unix: u64, now_unix: u64) -> bool {
 fn now_unix_seconds() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
+        .map_or(0, |d| d.as_secs())
 }
 
 #[cfg(test)]
@@ -640,7 +649,8 @@ mod tests {
         assert!(ensure_shell_wrapper(&rc_path).expect("first install should succeed"));
         let first = fs::read_to_string(&rc_path).expect("shell config should exist");
         assert!(first.contains(SHELL_WRAPPER_MARKER));
-        assert!(first.contains("target=$(WT_CWD=\"$PWD\" command wt \"$@\")"));
+        assert!(first.contains("WT_SHELL_WRAPPER=1 command wt \"$@\""));
+        assert!(first.contains("WT_POST_CREATE="));
 
         assert!(!ensure_shell_wrapper(&rc_path).expect("second install should be a no-op"));
         let second = fs::read_to_string(&rc_path).expect("shell config should still exist");

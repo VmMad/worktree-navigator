@@ -26,6 +26,9 @@ pub enum ParsedArgs {
         branch_name: Option<String>,
         yes: bool,
     },
+    RunPostCreate {
+        request_file: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -57,6 +60,7 @@ where
 
     let command = args.remove(0);
     match command.as_str() {
+        "__run-post-create" => parse_run_post_create(args),
         "clone" => parse_clone(args),
         "pr" | "checkout-pr" => parse_pr(args),
         "gco" | "checkout" => parse_checkout(args),
@@ -197,6 +201,16 @@ fn parse_delete(args: Vec<String>) -> Result<ParsedArgs> {
     Ok(ParsedArgs::Delete { branch_name, yes })
 }
 
+fn parse_run_post_create(args: Vec<String>) -> Result<ParsedArgs> {
+    if args.len() != 1 || args[0].trim().is_empty() {
+        bail!("Usage: wt __run-post-create <request-file>");
+    }
+
+    Ok(ParsedArgs::RunPostCreate {
+        request_file: args[0].trim().to_string(),
+    })
+}
+
 fn ensure_auto_base(base: &BranchBase, flag: &str) -> Result<()> {
     if !matches!(base, BranchBase::Auto) {
         bail!("Conflicting base options; cannot combine `{flag}` with another base selector.");
@@ -250,7 +264,7 @@ mod tests {
     use super::{BranchBase, ParsedArgs, help_text, parse_args};
 
     fn parse(input: &[&str]) -> ParsedArgs {
-        parse_args(input.iter().map(|value| value.to_string())).expect("args should parse")
+        parse_args(input.iter().map(std::string::ToString::to_string)).expect("args should parse")
     }
 
     #[test]

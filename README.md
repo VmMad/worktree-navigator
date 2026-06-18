@@ -61,6 +61,7 @@ wt
 | Delete Worktree | `d` | Select inline, then confirm with `Enter` or `y` |
 | Sync Worktree | `s` | Fast-forward a worktree from `origin/<branch>` |
 | Copy Secrets | `c` | Copy secret files into the selected worktree |
+| Options | `o` | Configure repo-local post-create commands for new worktrees |
 | Checkout Remote | `r` | Fetch a remote branch and create a worktree for it |
 
 #### Navigation
@@ -138,6 +139,8 @@ wt --mark-tree
 #### Notes
 
 - `wt b <branch>` defaults to the current branch when run inside a worktree; falls back to the repo default branch otherwise.
+- `o` opens repo-local options where you can add shell commands to run automatically after creating a new worktree.
+- Post-create commands run inside the new worktree and receive `WT_REPO_ROOT`, `WT_WORKTREE_PATH`, `WT_WORKTREE_BRANCH`, `WT_WORKTREE_BASE_BRANCH`, and `WT_DEFAULT_WORKTREE_PATH`.
 - `wt gco` with no argument goes to the default-branch worktree.
 - When `wt d` deletes the current worktree, the shell wrapper moves you back to the repo root.
 
