@@ -71,7 +71,14 @@ struct SupportedShell {
 struct ShellRefresh {
     shell: SupportedShell,
     rc_path: PathBuf,
-    wrote_wrapper: bool,
+    outcome: WrapperOutcome,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WrapperOutcome {
+    Unchanged,
+    Added,
+    Updated,
 }
 
 #[derive(Debug, Deserialize)]
@@ -176,24 +183,31 @@ fn run_update_internal(asset_name_hint: Option<&str>, latest_hint: Option<&str>)
 
     match refresh_shell_wrapper() {
         Ok(Some(refresh)) => {
-            if refresh.wrote_wrapper {
-                writeln!(
+            match refresh.outcome {
+                WrapperOutcome::Added => writeln!(
                     stderr,
                     "Added wt() to {} for {}",
                     refresh.rc_path.to_string_lossy(),
                     refresh.shell.name
-                )?;
-            } else {
+                )?,
+                WrapperOutcome::Updated => writeln!(
+                    stderr,
+                    "Updated the wt() wrapper in {} for {}",
+                    refresh.rc_path.to_string_lossy(),
+                    refresh.shell.name
+                )?,
+                WrapperOutcome::Unchanged => writeln!(
+                    stderr,
+                    "wt() already up to date in {}",
+                    refresh.rc_path.to_string_lossy()
+                )?,
+            }
+            if refresh.outcome != WrapperOutcome::Unchanged {
                 writeln!(
                     stderr,
-                    "wt() already present in {}",
-                    refresh.rc_path.to_string_lossy()
+                    "Restart your console to reload the wt shell wrapper."
                 )?;
             }
-            writeln!(
-                stderr,
-                "Restart your console to reload the wt shell wrapper."
-            )?;
         }
         Ok(None) => {}
         Err(err) => {
@@ -332,12 +346,12 @@ fn refresh_shell_wrapper() -> Result<Option<ShellRefresh>> {
 
     let home = std::env::var("HOME").context("HOME is not set")?;
     let rc_path = PathBuf::from(home).join(shell.rc_file_name);
-    let wrote_wrapper = ensure_shell_wrapper(&rc_path)?;
+    let outcome = ensure_shell_wrapper(&rc_path)?;
 
     Ok(Some(ShellRefresh {
         shell,
         rc_path,
-        wrote_wrapper,
+        outcome,
     }))
 }
 
@@ -357,7 +371,7 @@ fn detected_shell() -> Option<SupportedShell> {
     }
 }
 
-fn ensure_shell_wrapper(rc_path: &Path) -> Result<bool> {
+fn ensure_shell_wrapper(rc_path: &Path) -> Result<WrapperOutcome> {
     let existing = match fs::read_to_string(rc_path) {
         Ok(content) => content,
         Err(err) if err.kind() == io::ErrorKind::NotFound => String::new(),
@@ -372,7 +386,26 @@ fn ensure_shell_wrapper(rc_path: &Path) -> Result<bool> {
     };
 
     if existing.contains(SHELL_WRAPPER_MARKER) {
-        return Ok(false);
+        let (start, end) = wrapper_block_bounds(&existing).with_context(|| {
+            format!(
+                "Found the wt() wrapper marker but could not parse it in {}",
+                rc_path.to_string_lossy()
+            )
+        })?;
+        if &existing[start..end] == SHELL_WRAPPER_BODY {
+            return Ok(WrapperOutcome::Unchanged);
+        }
+        let mut updated = String::with_capacity(existing.len() + SHELL_WRAPPER_BODY.len());
+        updated.push_str(&existing[..start]);
+        updated.push_str(SHELL_WRAPPER_BODY);
+        updated.push_str(&existing[end..]);
+        fs::write(rc_path, updated).with_context(|| {
+            format!(
+                "Failed to update shell config at {}",
+                rc_path.to_string_lossy()
+            )
+        })?;
+        return Ok(WrapperOutcome::Updated);
     }
 
     if let Some(parent) = rc_path.parent() {
@@ -409,7 +442,19 @@ fn ensure_shell_wrapper(rc_path: &Path) -> Result<bool> {
             )
         })?;
 
-    Ok(true)
+    Ok(WrapperOutcome::Added)
+}
+
+/// Locate the `wt()` wrapper block (marker line through the function's closing brace)
+/// within an rc file so a stale wrapper can be replaced in place.
+fn wrapper_block_bounds(content: &str) -> Option<(usize, usize)> {
+    let marker = content.find(SHELL_WRAPPER_MARKER)?;
+    let start = content[..marker].rfind('\n').map_or(0, |idx| idx + 1);
+    let brace = marker + content[marker..].find("\n}")? + 1;
+    let end = content[brace..]
+        .find('\n')
+        .map_or(content.len(), |idx| brace + idx + 1);
+    Some((start, end))
 }
 
 fn normalize_version(raw: &str) -> String {
@@ -646,15 +691,70 @@ mod tests {
         fs::create_dir_all(&temp_dir).expect("temp dir should exist");
         let rc_path = temp_dir.join(".zshrc");
 
-        assert!(ensure_shell_wrapper(&rc_path).expect("first install should succeed"));
+        assert_eq!(
+            ensure_shell_wrapper(&rc_path).expect("first install should succeed"),
+            WrapperOutcome::Added
+        );
         let first = fs::read_to_string(&rc_path).expect("shell config should exist");
         assert!(first.contains(SHELL_WRAPPER_MARKER));
         assert!(first.contains("WT_SHELL_WRAPPER=1 command wt \"$@\""));
         assert!(first.contains("WT_POST_CREATE="));
 
-        assert!(!ensure_shell_wrapper(&rc_path).expect("second install should be a no-op"));
+        assert_eq!(
+            ensure_shell_wrapper(&rc_path).expect("second install should be a no-op"),
+            WrapperOutcome::Unchanged
+        );
         let second = fs::read_to_string(&rc_path).expect("shell config should still exist");
         assert_eq!(first, second);
+
+        let _ = fs::remove_dir_all(temp_dir);
+    }
+
+    #[test]
+    fn ensure_shell_wrapper_replaces_outdated_wrapper() {
+        let temp_dir =
+            std::env::temp_dir().join(format!("wt-shell-wrapper-stale-{}", now_unix_seconds()));
+        fs::create_dir_all(&temp_dir).expect("temp dir should exist");
+        let rc_path = temp_dir.join(".zshrc");
+
+        // A pre-#66 wrapper: captures stdout directly and never sets WT_SHELL_WRAPPER.
+        let legacy_wrapper = "\
+# worktree-navigator wt()
+wt() {
+  local target
+  target=$(WT_CWD=\"$PWD\" command wt \"$@\")
+  local exit_code=$?
+  if [[ -n \"$target\" && -d \"$target\" ]]; then
+    cd \"$target\"
+  fi
+  return $exit_code
+}
+";
+        let preserved_before = "export EDITOR=nvim\n\n";
+        let preserved_after = "\nalias gs='git status'\n";
+        fs::write(
+            &rc_path,
+            format!("{preserved_before}{legacy_wrapper}{preserved_after}"),
+        )
+        .expect("seed rc file");
+
+        assert_eq!(
+            ensure_shell_wrapper(&rc_path).expect("stale wrapper should be refreshed"),
+            WrapperOutcome::Updated
+        );
+
+        let updated = fs::read_to_string(&rc_path).expect("shell config should exist");
+        assert!(updated.contains("WT_SHELL_WRAPPER=1 command wt \"$@\""));
+        assert!(updated.contains("WT_POST_CREATE="));
+        assert!(!updated.contains("target=$(WT_CWD=\"$PWD\" command wt \"$@\")"));
+        assert!(updated.starts_with(preserved_before));
+        assert!(updated.ends_with(preserved_after));
+        assert_eq!(updated.matches(SHELL_WRAPPER_MARKER).count(), 1);
+
+        assert_eq!(
+            ensure_shell_wrapper(&rc_path).expect("refresh should be idempotent"),
+            WrapperOutcome::Unchanged
+        );
 
         let _ = fs::remove_dir_all(temp_dir);
     }
