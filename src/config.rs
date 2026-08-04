@@ -1,4 +1,5 @@
 use std::fs;
+use std::os::fd::AsFd;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -72,6 +73,16 @@ pub fn save_repo_config(repo_root: &Path, config: &RepoConfig) -> Result<()> {
     Ok(())
 }
 
+/// Setup steps write to stderr instead of stdout: the shell wrapper reads the worktree path to
+/// `cd` into from `wt`'s stdout, so anything else on that stream breaks navigation.
+fn stderr_as_stdout() -> Result<Stdio> {
+    let stderr = std::io::stderr()
+        .as_fd()
+        .try_clone_to_owned()
+        .context("Failed to redirect setup output to stderr")?;
+    Ok(Stdio::from(stderr))
+}
+
 pub fn run_post_create_scripts(
     repo_root: &Path,
     worktree_path: &Path,
@@ -105,13 +116,13 @@ pub fn run_post_create_scripts(
         let status = Command::new("sh")
             .args(["-lc", &script.command])
             .current_dir(worktree_path)
+            .stdout(stderr_as_stdout()?)
             .env("WT_REPO_ROOT", repo_root)
             .env("WT_WORKTREE_PATH", worktree_path)
             .env("WT_WORKTREE_BRANCH", branch)
             .env("WT_WORKTREE_BASE_BRANCH", base_branch.unwrap_or(""))
             .env("WT_DEFAULT_WORKTREE_PATH", &default_worktree_path)
             .stdin(Stdio::inherit())
-            .stdout(Stdio::inherit())
             .stderr(Stdio::inherit())
             .status()
             .with_context(|| format!("Failed to run setup command: {}", script.command))?;

@@ -15,7 +15,7 @@ curl -fsSL https://github.com/VmMad/worktree-navigator/releases/latest/download/
   -o ~/.local/bin/wt && chmod +x ~/.local/bin/wt
 ```
 
-Then add the `wt()` shell wrapper so navigating to a worktree changes your shell's directory:
+Then add the `wt()` shell wrapper so navigating to a worktree changes your shell's directory (the installers call the `wt` binary, so `~/.local/bin` must be on your `PATH`):
 
 **zsh**
 
@@ -38,6 +38,15 @@ wt --update
 ```
 
 If `wt` detects a zsh or bash shell, it also refreshes the `wt()` shell wrapper and prompts you to restart the console.
+
+### Refresh the shell wrapper
+
+```bash
+wt --install-shell        # detects zsh or bash from $SHELL
+wt --install-shell zsh
+```
+
+Adds the `wt()` wrapper if it is missing and replaces an outdated one. Run it after installing a locally built binary, since only `wt --update` refreshes the wrapper on its own.
 
 ---
 
@@ -140,7 +149,7 @@ wt --mark-tree
 
 - `wt b <branch>` defaults to the current branch when run inside a worktree; falls back to the repo default branch otherwise.
 - `o` opens repo-local options where you can add shell commands to run automatically after creating a new worktree.
-- Post-create commands run inside the new worktree and receive `WT_REPO_ROOT`, `WT_WORKTREE_PATH`, `WT_WORKTREE_BRANCH`, `WT_WORKTREE_BASE_BRANCH`, and `WT_DEFAULT_WORKTREE_PATH`.
+- Post-create commands run inside the new worktree and receive `WT_REPO_ROOT`, `WT_WORKTREE_PATH`, `WT_WORKTREE_BRANCH`, `WT_WORKTREE_BASE_BRANCH`, and `WT_DEFAULT_WORKTREE_PATH`. Their output goes to stderr so it never interferes with the directory the shell wrapper jumps to.
 - `wt gco` with no argument goes to the default-branch worktree.
 - When `wt d` deletes the current worktree, the shell wrapper moves you back to the repo root.
 
