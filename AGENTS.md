@@ -22,8 +22,8 @@ cargo test
 
 ```bash
 WT_CWD="$PWD" cargo run
-cargo build --release
-./install.sh
+cargo build --release && cp target/release/worktree-navigator ~/.local/bin/wt
+wt --install-shell
 source ~/.zshrc
 wt
 ```
@@ -54,13 +54,12 @@ Marks an existing directory as a worktree repo root so `wt` treats it as part of
 - In the background, `wt` checks for a newer release while the TUI is open and prints a notice to stderr at most once per day after exit.
 - Release builds carry the tagged version. Local (`-dev`) builds skip update notices.
 
-### Build from source
+### Shell wrapper (`wt()`)
 
-```bash
-cargo build --release && cp target/release/worktree-navigator ~/.local/bin/wt
-```
-
-Then run the shell wrapper installer for your shell (see README Install section).
+- The TUI renders to stderr. `wt`'s stdout is the navigation channel the `wt()` shell function reads, so no child process may write to it: give commands `Stdio::piped()` or redirect their stdout to stderr.
+- Under the wrapper (`WT_SHELL_WRAPPER=1`) `wt` prints `WT_PATH=<dir>` plus an optional `WT_POST_CREATE=<request-file>`; without it, it prints the bare path.
+- Post-create steps then run from the wrapper via `wt __run-post-create <request-file>`, after the `cd`, so a long setup never blocks navigation.
+- `wt --install-shell [zsh|bash]` writes the wrapper into the rc file and replaces an outdated block. `SHELL_WRAPPER_BODY` in `src/update.rs` is the only copy of the wrapper; `scripts/*-install.sh` delegate to the binary.
 
 ## Key files
 
@@ -68,5 +67,8 @@ Then run the shell wrapper installer for your shell (see README Install section)
 - `src/app.rs`: app state and command list.
 - `src/ui.rs`: ratatui rendering and overlays.
 - `src/git.rs`: git/gh integration.
+- `src/cli.rs`: argument parsing and help output.
+- `src/config.rs`: repo-local config and post-create setup steps.
+- `src/update.rs`: self-update and shell wrapper installation.
 - `src/types.rs`: shared domain types.
-- `install.sh`: install + shell wrapper wiring.
+- `scripts/zsh-install.sh`, `scripts/bash-install.sh`: shell wrapper installers.

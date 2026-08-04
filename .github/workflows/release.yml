@@ -86,7 +86,7 @@ jobs:
             |------|--------|
             | `worktree-navigator-x86_64-linux-gnu` | Linux x86_64 (glibc, most Ubuntu/Debian systems) |
 
-            After installing, add the `wt()` shell wrapper by running the installer that matches your shell:
+            After installing, add the `wt()` shell wrapper by running the installer that matches your shell (it calls the `wt` binary, so `~/.local/bin` must be on your `PATH`):
 
             **zsh**
 

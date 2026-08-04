@@ -468,6 +468,69 @@ fn update_command_refreshes_zsh_wrapper_and_prints_restart_message() {
 }
 
 #[test]
+fn install_shell_command_replaces_an_outdated_wrapper() {
+    let env = TestEnv::new("install-shell");
+    let zshrc = env.home.join(".zshrc");
+    fs::write(
+        &zshrc,
+        "# worktree-navigator wt()\nwt() {\n  local target\n  target=$(WT_CWD=\"$PWD\" command wt \"$@\")\n  cd \"$target\"\n}\n",
+    )
+    .expect("zshrc should be seeded");
+
+    let output = Command::new(binary_path())
+        .args(["--install-shell", "zsh"])
+        .current_dir(&env.repo)
+        .env("HOME", &env.home)
+        .env("SHELL", "/bin/bash")
+        .output()
+        .expect("install-shell should run");
+
+    assert!(output.status.success(), "stderr:\n{}", stderr(&output));
+    assert!(stdout(&output).is_empty());
+
+    let updated = fs::read_to_string(&zshrc).expect("zshrc should exist");
+    assert!(updated.contains("WT_SHELL_WRAPPER=1 command wt \"$@\""));
+    assert!(updated.contains("WT_POST_CREATE="));
+
+    let stderr = stderr(&output);
+    assert!(
+        stderr.contains("Updated the wt() wrapper in"),
+        "stderr:\n{stderr}"
+    );
+}
+
+#[test]
+fn post_create_setup_output_stays_off_stdout() {
+    let env = TestEnv::new("post-create-output");
+    let worktree = env.create_worktree_from_base("feature/setup", "main");
+    let request_path = env.root.join("post-create.json");
+    let request = format!(
+        "{{\"repo_root\":\"{}\",\"worktree_path\":\"{}\",\"branch\":\"feature/setup\",\"base_branch\":\"main\",\"scripts\":[{{\"command\":\"echo submodule-progress\",\"enabled\":true}}]}}",
+        env.repo.display(),
+        worktree.display()
+    );
+    fs::write(&request_path, request).expect("request file should be written");
+
+    let output = run_wt_wrapped(
+        &env,
+        &env.repo,
+        &["__run-post-create", request_path.to_string_lossy().as_ref()],
+    );
+
+    assert!(output.status.success(), "stderr:\n{}", stderr(&output));
+    assert!(
+        stdout(&output).is_empty(),
+        "setup output leaked to stdout:\n{}",
+        stdout(&output)
+    );
+    assert!(
+        stderr(&output).contains("submodule-progress"),
+        "stderr:\n{}",
+        stderr(&output)
+    );
+}
+
+#[test]
 fn mark_tree_creates_workspace_marker() {
     if Command::new("script").arg("-V").output().is_err() {
         return;

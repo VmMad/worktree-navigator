@@ -1,27 +1,11 @@
 #!/usr/bin/env bash
 set -e
 
-ZSHRC="$HOME/.zshrc"
-MARKER="# worktree-navigator wt()"
-
-if grep -qF "$MARKER" "$ZSHRC" 2>/dev/null; then
-  echo "✓ wt() already present in $ZSHRC — nothing to do."
-  exit 0
+if ! command -v wt >/dev/null 2>&1; then
+  echo "✗ wt was not found on PATH. Install the wt binary first, then re-run this script." >&2
+  exit 1
 fi
 
-cat >> "$ZSHRC" << 'EOF'
+wt --install-shell zsh
 
-# worktree-navigator wt()
-wt() {
-  local target
-  target=$(WT_CWD="$PWD" command wt "$@")
-  local exit_code=$?
-  if [[ -n "$target" && -d "$target" ]]; then
-    cd "$target"
-  fi
-  return $exit_code
-}
-EOF
-
-echo "✓ Added wt() to $ZSHRC"
 echo "  Run: source ~/.zshrc  (or open a new terminal)"

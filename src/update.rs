@@ -182,33 +182,7 @@ fn run_update_internal(asset_name_hint: Option<&str>, latest_hint: Option<&str>)
     }
 
     match refresh_shell_wrapper() {
-        Ok(Some(refresh)) => {
-            match refresh.outcome {
-                WrapperOutcome::Added => writeln!(
-                    stderr,
-                    "Added wt() to {} for {}",
-                    refresh.rc_path.to_string_lossy(),
-                    refresh.shell.name
-                )?,
-                WrapperOutcome::Updated => writeln!(
-                    stderr,
-                    "Updated the wt() wrapper in {} for {}",
-                    refresh.rc_path.to_string_lossy(),
-                    refresh.shell.name
-                )?,
-                WrapperOutcome::Unchanged => writeln!(
-                    stderr,
-                    "wt() already up to date in {}",
-                    refresh.rc_path.to_string_lossy()
-                )?,
-            }
-            if refresh.outcome != WrapperOutcome::Unchanged {
-                writeln!(
-                    stderr,
-                    "Restart your console to reload the wt shell wrapper."
-                )?;
-            }
-        }
+        Ok(Some(refresh)) => report_shell_refresh(&mut stderr, &refresh)?,
         Ok(None) => {}
         Err(err) => {
             writeln!(
@@ -339,26 +313,76 @@ fn preferred_asset_name() -> Option<String> {
     read_install_state().and_then(|s| s.preferred_asset_name)
 }
 
+pub fn install_shell_wrapper(shell_name: Option<&str>) -> Result<()> {
+    let shell = match shell_name {
+        Some(name) => supported_shell(name)
+            .with_context(|| format!("Unsupported shell '{name}'; expected zsh or bash."))?,
+        None => detected_shell()
+            .context("Could not detect a supported shell. Run `wt --install-shell zsh` or `wt --install-shell bash`.")?,
+    };
+
+    let refresh = refresh_wrapper_for_shell(shell)?;
+    report_shell_refresh(&mut io::stderr(), &refresh)
+}
+
+fn report_shell_refresh(stderr: &mut impl Write, refresh: &ShellRefresh) -> Result<()> {
+    match refresh.outcome {
+        WrapperOutcome::Added => writeln!(
+            stderr,
+            "Added wt() to {} for {}",
+            refresh.rc_path.to_string_lossy(),
+            refresh.shell.name
+        )?,
+        WrapperOutcome::Updated => writeln!(
+            stderr,
+            "Updated the wt() wrapper in {} for {}",
+            refresh.rc_path.to_string_lossy(),
+            refresh.shell.name
+        )?,
+        WrapperOutcome::Unchanged => writeln!(
+            stderr,
+            "wt() already up to date in {}",
+            refresh.rc_path.to_string_lossy()
+        )?,
+    }
+
+    if refresh.outcome != WrapperOutcome::Unchanged {
+        writeln!(
+            stderr,
+            "Restart your console to reload the wt shell wrapper."
+        )?;
+    }
+
+    Ok(())
+}
+
 fn refresh_shell_wrapper() -> Result<Option<ShellRefresh>> {
     let Some(shell) = detected_shell() else {
         return Ok(None);
     };
 
+    refresh_wrapper_for_shell(shell).map(Some)
+}
+
+fn refresh_wrapper_for_shell(shell: SupportedShell) -> Result<ShellRefresh> {
     let home = std::env::var("HOME").context("HOME is not set")?;
     let rc_path = PathBuf::from(home).join(shell.rc_file_name);
     let outcome = ensure_shell_wrapper(&rc_path)?;
 
-    Ok(Some(ShellRefresh {
+    Ok(ShellRefresh {
         shell,
         rc_path,
         outcome,
-    }))
+    })
 }
 
 fn detected_shell() -> Option<SupportedShell> {
     let shell = std::env::var("SHELL").ok()?;
-    let shell_name = Path::new(&shell).file_name()?.to_str()?;
-    match shell_name {
+    supported_shell(Path::new(&shell).file_name()?.to_str()?)
+}
+
+fn supported_shell(name: &str) -> Option<SupportedShell> {
+    match name {
         "zsh" => Some(SupportedShell {
             name: "zsh",
             rc_file_name: ".zshrc",

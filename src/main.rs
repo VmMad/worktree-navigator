@@ -74,6 +74,7 @@ fn main() -> Result<()> {
         }
 
         ParsedArgs::Update => update::run_manual_update(),
+        ParsedArgs::InstallShell { shell } => update::install_shell_wrapper(shell.as_deref()),
         ParsedArgs::Help => {
             cli::print_help();
             Ok(())
@@ -760,7 +761,11 @@ fn run_cli_command(cwd: &Path, command: ParsedArgs) -> Result<()> {
             eprintln!();
             eprintln!("[wt] Setup complete.");
         }
-        ParsedArgs::Tui { .. } | ParsedArgs::Version | ParsedArgs::Update | ParsedArgs::Help => {
+        ParsedArgs::Tui { .. }
+        | ParsedArgs::Version
+        | ParsedArgs::Update
+        | ParsedArgs::InstallShell { .. }
+        | ParsedArgs::Help => {
             unreachable!("handled before CLI execution")
         }
     }
