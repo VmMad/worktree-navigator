@@ -69,6 +69,7 @@ Marks an existing directory as a worktree repo root so `wt` treats it as part of
 - `src/git.rs`: git/gh integration.
 - `src/cli.rs`: argument parsing and help output.
 - `src/config.rs`: repo-local config and post-create setup steps.
+- `src/store.rs`: persisted state (projects, per-repo worktree cache) in `state.json`.
 - `src/update.rs`: self-update and shell wrapper installation.
 - `src/types.rs`: shared domain types.
 - `scripts/zsh-install.sh`, `scripts/bash-install.sh`: shell wrapper installers.

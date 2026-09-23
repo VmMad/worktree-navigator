@@ -2,13 +2,15 @@ mod app;
 mod cli;
 mod config;
 mod git;
+mod projects;
+mod store;
 mod text_input;
 mod types;
 mod ui;
 mod update;
 mod version;
 
-use std::io::{Write, stderr};
+use std::io::{IsTerminal, Write, stderr};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::TryRecvError;
@@ -63,7 +65,8 @@ fn main() -> Result<()> {
     let cwd = resolve_cwd();
 
     match args {
-        ParsedArgs::Tui { mark_tree } => run_tui(&cwd, mark_tree),
+        ParsedArgs::Tui { mark_tree } => run_tui(&cwd, mark_tree, false),
+        ParsedArgs::Project { name: None } if stderr().is_terminal() => run_tui(&cwd, false, true),
         ParsedArgs::Version => {
             if std::env::var_os("WT_CWD").is_some() {
                 eprintln!("wt v{}", version::current_version());
@@ -308,6 +311,7 @@ struct RepoContext {
     cwd: PathBuf,
     repo_root: PathBuf,
     is_workspace: bool,
+    is_projects_container: bool,
     no_repo: bool,
 }
 
@@ -333,6 +337,18 @@ fn display_path_with_home(path: &Path) -> String {
 }
 
 fn resolve_repo_context(cwd: &Path) -> RepoContext {
+    let child_projects = git::list_child_projects(cwd);
+    if !child_projects.is_empty() {
+        projects::register_all(&child_projects);
+        return RepoContext {
+            cwd: cwd.to_path_buf(),
+            repo_root: cwd.to_path_buf(),
+            is_workspace: false,
+            is_projects_container: true,
+            no_repo: true,
+        };
+    }
+
     let workspace_root_opt = git::find_workspace_root(cwd).or_else(|| {
         if git::detect_worktree_workspace(cwd) {
             let _ = git::create_workspace_marker(cwd);
@@ -347,6 +363,10 @@ fn resolve_repo_context(cwd: &Path) -> RepoContext {
         git::find_repo_root(cwd)
     };
 
+    if let Some(workspace_root) = workspace_root_opt.as_ref() {
+        projects::register(workspace_root);
+    }
+
     let no_repo = repo_root_opt.is_none() && workspace_root_opt.is_none();
     let repo_root = repo_root_opt
         .or_else(|| workspace_root_opt.clone())
@@ -356,19 +376,12 @@ fn resolve_repo_context(cwd: &Path) -> RepoContext {
         cwd: cwd.to_path_buf(),
         repo_root,
         is_workspace: workspace_root_opt.is_some(),
+        is_projects_container: false,
         no_repo,
     }
 }
 
-fn list_context_worktrees(context: &RepoContext) -> Result<Vec<Worktree>> {
-    if context.is_workspace {
-        git::list_workspace_worktrees(&context.repo_root)
-    } else {
-        git::list_worktrees(&context.repo_root)
-    }
-}
-
-fn run_tui(cwd: &Path, mark_tree: bool) -> Result<()> {
+fn run_tui(cwd: &Path, mark_tree: bool, projects_only: bool) -> Result<()> {
     let mut update_notice_rx = (!mark_tree).then(update::start_background_update_check);
     let mut update_notice = None;
 
@@ -376,7 +389,17 @@ fn run_tui(cwd: &Path, mark_tree: bool) -> Result<()> {
         git::create_workspace_marker(cwd)?;
     }
 
-    let context = resolve_repo_context(cwd);
+    let context = if projects_only {
+        RepoContext {
+            cwd: cwd.to_path_buf(),
+            repo_root: cwd.to_path_buf(),
+            is_workspace: false,
+            is_projects_container: false,
+            no_repo: true,
+        }
+    } else {
+        resolve_repo_context(cwd)
+    };
     let no_repo = context.no_repo;
     let repo_root = context.repo_root.clone();
 
@@ -398,42 +421,27 @@ fn run_tui(cwd: &Path, mark_tree: bool) -> Result<()> {
     if no_repo {
         app.no_repo = true;
         app.worktrees_loading = false;
-        app.active_action = ActiveAction::CloneRepo;
+        app.projects = projects::list_projects();
+        app.active_action = if app.projects.is_empty() {
+            ActiveAction::CloneRepo
+        } else {
+            ActiveAction::Projects
+        };
     } else if let Err(err) = config::load_repo_config(&repo_root).map(|config| {
         app.repo_config = config;
     }) {
         app.overlay_error = Some(format!("Failed to load options: {err}"));
     }
 
-    if !no_repo && context.is_workspace {
-        app.is_workspace = true;
-        match git::list_workspace_worktrees(&repo_root) {
-            Ok(wts) => {
-                let current_idx = wts.iter().position(|w| w.is_current).unwrap_or(0);
-                app.worktrees = wts;
-                app.worktrees_loading = false;
-                app.selected_index = app::COMMANDS.len() + current_idx;
-            }
-            Err(e) => {
-                app.worktrees_loading = false;
-                app.worktrees_error = Some(e.to_string());
-            }
+    if !no_repo {
+        app.is_workspace = context.is_workspace;
+        let cwd = cwd.canonicalize().unwrap_or_else(|_| cwd.to_path_buf());
+        if let Some(worktrees) = store::cached_worktrees(&repo_root, &cwd) {
+            app.worktrees = worktrees;
+            app.worktrees_loading = false;
+            select_current_worktree(&mut app);
         }
-    } else if !no_repo {
-        match git::list_worktrees(&repo_root) {
-            Ok(wts) => {
-                let current_idx = wts.iter().position(|w| w.is_current).unwrap_or(0);
-                app.worktrees = wts;
-                app.worktrees_loading = false;
-                if !app.worktrees.is_empty() {
-                    app.selected_index = app::COMMANDS.len() + current_idx;
-                }
-            }
-            Err(e) => {
-                app.worktrees_loading = false;
-                app.worktrees_error = Some(e.to_string());
-            }
-        }
+        start_worktrees_refresh(&mut app);
     }
 
     let run_result = catch_unwind(AssertUnwindSafe(|| -> Result<()> {
@@ -449,6 +457,7 @@ fn run_tui(cwd: &Path, mark_tree: bool) -> Result<()> {
                 }
             }
 
+            poll_worktrees_refresh(&mut app);
             poll_clone_updates(&mut app);
             poll_sync_pr_updates(&mut app);
             poll_sync_updates(&mut app);
@@ -552,7 +561,7 @@ fn run_tui(cwd: &Path, mark_tree: bool) -> Result<()> {
             if let Some(paths) = app.delete_pending.take() {
                 let root = app.repo_root.clone();
                 match git::remove_worktrees(&root, &paths, app.is_workspace) {
-                    Ok(_) => {
+                    Ok(()) => {
                         app.delete_loading = false;
                         app.active_action = ActiveAction::None;
                         app.delete_warn_current = false;
@@ -724,6 +733,17 @@ fn run_cli_command(cwd: &Path, command: ParsedArgs) -> Result<()> {
         ParsedArgs::Clone { repo_source, dest } => {
             let dest = resolve_cli_clone_dest(cwd, &repo_source, dest.as_deref());
             let worktree_path = git::clone_repo_with_layout(&repo_source, &dest)?;
+            projects::register(&dest);
+            println!("{}", worktree_path.display());
+        }
+        ParsedArgs::Project { name } => {
+            projects::register_all(&git::list_child_projects(cwd));
+            let Some(name) = name else {
+                print_projects();
+                return Ok(());
+            };
+            let project = projects::find_project(&name)?;
+            let worktree_path = projects::default_worktree_path(&project)?;
             println!("{}", worktree_path.display());
         }
         ParsedArgs::CheckoutPr { pr_number } => {
@@ -741,7 +761,7 @@ fn run_cli_command(cwd: &Path, command: ParsedArgs) -> Result<()> {
             let base_branch = resolve_cli_branch_base(&context, &base)?;
             let (_, dest) =
                 git::add_worktree(&context.repo_root, &branch_name, Some(&base_branch))?;
-            println!("{}", dest.display());
+            finish_cli_worktree_creation(&context.repo_root, &branch_name, base_branch, &dest)?;
         }
         ParsedArgs::Delete { branch_name, yes } => {
             let context = require_repo_context(cwd)?;
@@ -773,8 +793,65 @@ fn run_cli_command(cwd: &Path, command: ParsedArgs) -> Result<()> {
     Ok(())
 }
 
+fn finish_cli_worktree_creation(
+    repo_root: &Path,
+    branch: &str,
+    base_branch: String,
+    dest: &Path,
+) -> Result<()> {
+    let scripts = config::load_repo_config(repo_root)?.enabled_post_create_scripts();
+    if scripts.is_empty() {
+        println!("{}", dest.display());
+        return Ok(());
+    }
+
+    if std::env::var_os("WT_SHELL_WRAPPER").is_some() {
+        let request = config::write_post_create_request(&PostCreateRequest {
+            repo_root: repo_root.to_path_buf(),
+            worktree_path: dest.to_path_buf(),
+            branch: branch.to_string(),
+            base_branch: Some(base_branch),
+            scripts,
+        })?;
+        println!("WT_PATH={}", dest.display());
+        println!("WT_POST_CREATE={}", request.display());
+        return Ok(());
+    }
+
+    eprintln!(
+        "[wt] Running {} post-create setup step(s) for {branch}",
+        scripts.len()
+    );
+    config::run_post_create_scripts(repo_root, dest, branch, Some(&base_branch), &scripts)?;
+    println!("{}", dest.display());
+    Ok(())
+}
+
+fn print_projects() {
+    let projects = projects::list_projects();
+    let text = if projects.is_empty() {
+        "No projects yet. Run `wt clone <repo>` to create one.".to_string()
+    } else {
+        format!(
+            "Projects:\n{}",
+            projects::format_project_list(projects.iter())
+        )
+    };
+
+    if std::env::var_os("WT_CWD").is_some() {
+        eprintln!("{text}");
+    } else {
+        println!("{text}");
+    }
+}
+
 fn require_repo_context(cwd: &Path) -> Result<RepoContext> {
     let context = resolve_repo_context(cwd);
+    if context.is_projects_container {
+        anyhow::bail!(
+            "This directory holds several projects. Run `wt p <project>` to jump into one, or `wt` with no args to pick one."
+        );
+    }
     if context.no_repo {
         anyhow::bail!(
             "No git repository found here. Run `wt clone <repo>` or `wt` with no args to start the clone flow."
@@ -810,7 +887,7 @@ fn resolve_cli_branch_base(context: &RepoContext, base: &BranchBase) -> Result<S
 }
 
 fn resolve_checkout_target(context: &RepoContext, branch_name: Option<&str>) -> Result<Worktree> {
-    let worktrees = list_context_worktrees(context)?;
+    let worktrees = git::list_any_worktrees(&context.repo_root, context.is_workspace)?;
     match branch_name {
         Some(branch_name) => resolve_worktree_by_branch_in(worktrees, branch_name),
         None => resolve_default_worktree_in(worktrees),
@@ -832,7 +909,7 @@ fn resolve_default_worktree_in(worktrees: Vec<Worktree>) -> Result<Worktree> {
 }
 
 fn resolve_delete_target(context: &RepoContext, branch_name: Option<&str>) -> Result<Worktree> {
-    let worktrees = list_context_worktrees(context)?;
+    let worktrees = git::list_any_worktrees(&context.repo_root, context.is_workspace)?;
     let target = if let Some(branch_name) = branch_name {
         resolve_worktree_by_branch_in(worktrees, branch_name)?
     } else {
@@ -893,6 +970,7 @@ fn handle_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
         ActiveAction::CopySecrets => handle_copy_secrets_key(app, code),
         ActiveAction::Options => handle_options_key(app, code, modifiers),
         ActiveAction::CloneRepo => handle_clone_key(app, code, modifiers),
+        ActiveAction::Projects => handle_projects_key(app, code),
         ActiveAction::CheckoutRemote => handle_checkout_remote_key(app, code, modifiers),
         ActiveAction::None => handle_nav_key(app, code, modifiers),
     }
@@ -920,6 +998,11 @@ fn handle_mouse(app: &mut App, kind: MouseEventKind, column: u16, row: u16) {
         && app.copy_secrets_phase == CopySecretsPhase::ConfirmOverwrite
     {
         handle_copy_secrets_confirm_click(app, column, row);
+        return;
+    }
+
+    if app.active_action == ActiveAction::Projects {
+        handle_projects_mouse(app, kind, row);
         return;
     }
 
@@ -1017,6 +1100,74 @@ fn handle_mouse(app: &mut App, kind: MouseEventKind, column: u16, row: u16) {
             }
         }
         _ => {}
+    }
+}
+
+fn handle_projects_mouse(app: &mut App, kind: MouseEventKind, row: u16) {
+    match kind {
+        MouseEventKind::Moved => {
+            app.hovered_row = app.row_to_item(row).map(|_| row);
+        }
+        MouseEventKind::Down(MouseButton::Left) => {
+            if let Some(idx) = app.row_to_item(row) {
+                app.projects_selected_idx = idx;
+                open_selected_project(app);
+            }
+        }
+        MouseEventKind::ScrollUp => {
+            app.projects_selected_idx = app.projects_selected_idx.saturating_sub(1);
+        }
+        MouseEventKind::ScrollDown => {
+            let max = app.projects.len().saturating_sub(1);
+            app.projects_selected_idx = (app.projects_selected_idx + 1).min(max);
+        }
+        _ => {}
+    }
+}
+
+fn handle_projects_key(app: &mut App, code: KeyCode) {
+    match code {
+        KeyCode::Char('q') | KeyCode::Esc => app.should_quit = true,
+        KeyCode::Up | KeyCode::Char('k') => {
+            if app.projects_selected_idx == 0 {
+                app.projects_selected_idx = app.projects.len().saturating_sub(1);
+            } else {
+                app.projects_selected_idx -= 1;
+            }
+        }
+        KeyCode::Down | KeyCode::Char('j') => {
+            let max = app.projects.len().saturating_sub(1);
+            if app.projects_selected_idx >= max {
+                app.projects_selected_idx = 0;
+            } else {
+                app.projects_selected_idx += 1;
+            }
+        }
+        KeyCode::Char('c') => open_clone_from_projects(app),
+        KeyCode::Enter => open_selected_project(app),
+        _ => {}
+    }
+}
+
+fn open_clone_from_projects(app: &mut App) {
+    app.active_action = ActiveAction::CloneRepo;
+    app.clone_step = 0;
+    app.clone_error = None;
+    app.overlay_error = None;
+    app.clear_input();
+}
+
+fn open_selected_project(app: &mut App) {
+    let Some(project) = app.projects.get(app.projects_selected_idx) else {
+        return;
+    };
+
+    match projects::default_worktree_path(project) {
+        Ok(path) => {
+            app.exit_path = Some(path.to_string_lossy().into_owned());
+            app.should_quit = true;
+        }
+        Err(err) => app.overlay_error = Some(err.to_string()),
     }
 }
 
@@ -1189,14 +1340,17 @@ fn open_action(app: &mut App, action: ActiveAction) {
     app.active_action = action;
 }
 
+/// Relists synchronously so callers can select what they just changed. The secrets
+/// flags carry over until the background refresh rescans them.
 fn refresh_worktrees(app: &mut App) {
-    let result = if app.is_workspace {
-        git::list_workspace_worktrees(&app.repo_root)
-    } else {
-        git::list_worktrees(&app.repo_root)
-    };
-    match result {
-        Ok(wts) => {
+    match git::list_any_worktrees(&app.repo_root, app.is_workspace) {
+        Ok(mut wts) => {
+            for wt in &mut wts {
+                wt.has_secrets = app
+                    .worktrees
+                    .iter()
+                    .any(|known| known.path == wt.path && known.has_secrets);
+            }
             app.worktrees = wts;
             app.worktrees_error = None;
         }
@@ -1204,6 +1358,84 @@ fn refresh_worktrees(app: &mut App) {
             app.worktrees_error = Some(e.to_string());
         }
     }
+    start_worktrees_refresh(app);
+}
+
+fn start_worktrees_refresh(app: &mut App) {
+    app.worktrees_receiver = Some(git::start_list_worktrees(
+        app.repo_root.clone(),
+        app.is_workspace,
+    ));
+}
+
+fn poll_worktrees_refresh(app: &mut App) {
+    if let Some(receiver) = app.worktrees_receiver.as_ref() {
+        let result = match receiver.try_recv() {
+            Ok(result) => Some(result),
+            Err(TryRecvError::Empty) => None,
+            Err(TryRecvError::Disconnected) => {
+                Some(Err("Worktree refresh ended unexpectedly.".to_string()))
+            }
+        };
+        match result {
+            Some(Ok(wts)) => {
+                app.worktrees_receiver = None;
+                store::save_worktrees(&app.repo_root, &wts);
+                app.worktrees_pending = Some(wts);
+            }
+            Some(Err(err)) => {
+                app.worktrees_receiver = None;
+                app.worktrees_loading = false;
+                app.worktrees_error = Some(err);
+            }
+            None => {}
+        }
+    }
+
+    let Some(wts) = app.worktrees_pending.take() else {
+        return;
+    };
+    let same_order = wts.len() == app.worktrees.len()
+        && wts
+            .iter()
+            .zip(&app.worktrees)
+            .all(|(a, b)| a.path == b.path);
+    // Open actions hold indexes into the list, so a reordered list waits until they close.
+    if !same_order && app.active_action != ActiveAction::None && !app.worktrees_loading {
+        app.worktrees_pending = Some(wts);
+        return;
+    }
+
+    let selected_path = app
+        .selected_index
+        .checked_sub(app::COMMANDS.len())
+        .and_then(|idx| app.worktrees.get(idx))
+        .map(|wt| wt.path.clone());
+    let was_loading = app.worktrees_loading;
+    app.worktrees = wts;
+    app.worktrees_loading = false;
+    app.worktrees_error = None;
+    if was_loading {
+        select_current_worktree(app);
+        return;
+    }
+    if same_order {
+        return;
+    }
+    match selected_path.and_then(|path| app.worktrees.iter().position(|wt| wt.path == path)) {
+        Some(idx) => app.selected_index = app::COMMANDS.len() + idx,
+        None => {
+            app.selected_index = app.selected_index.min(app.total_items().saturating_sub(1));
+        }
+    }
+}
+
+fn select_current_worktree(app: &mut App) {
+    if app.worktrees.is_empty() {
+        return;
+    }
+    let idx = app.worktrees.iter().position(|w| w.is_current).unwrap_or(0);
+    app.selected_index = app::COMMANDS.len() + idx;
 }
 
 // ────────────────────────── Overlay key handlers ────────────────────────────
@@ -2097,6 +2329,9 @@ fn poll_clone_updates(app: &mut App) {
         match event {
             CloneEvent::Finished(worktree_path) => {
                 app.clone_loading = false;
+                if let Some(workspace_root) = worktree_path.parent() {
+                    projects::register(workspace_root);
+                }
                 if app.console_handoff_active {
                     let display_path = display_path_with_home(&worktree_path);
                     eprintln!();

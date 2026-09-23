@@ -83,6 +83,10 @@ wt
 | `Esc` | Cancel current mode |
 | `q` | Quit |
 
+#### Projects screen
+
+Running `wt` outside any repo or workspace lists the projects it knows about. `Enter` or a click opens the selected project's default-branch worktree, and `c` starts a clone.
+
 ---
 
 ### CLI commands
@@ -93,6 +97,13 @@ Clone a repo into a worktree workspace:
 wt clone owner/repo
 wt clone git@github.com:owner/repo.git
 wt clone https://github.com/owner/repo.git ~/src/repo
+```
+
+Jump to a project's default branch worktree:
+
+```bash
+wt p acme-api
+wt p            # pick a project from anywhere
 ```
 
 Check out a PR:
@@ -136,6 +147,7 @@ wt --mark-tree
 | Command | Aliases | Description |
 |---|---|---|
 | `wt clone <repo> [dest]` | | Clone into a worktree workspace, print the default-branch path |
+| `wt p [project]` | `project` | Jump to a project's default-branch worktree, or open the project picker |
 | `wt pr <number>` | `checkout-pr` | Fetch the PR head branch, create/select its worktree |
 | `wt gco [branch]` | `checkout` | Jump to an existing worktree; defaults to the default branch |
 | `wt b <branch>` | `branch` | Create a new branch worktree |
@@ -151,6 +163,8 @@ wt --mark-tree
 - `o` opens repo-local options where you can add shell commands to run automatically after creating a new worktree.
 - Post-create commands run inside the new worktree and receive `WT_REPO_ROOT`, `WT_WORKTREE_PATH`, `WT_WORKTREE_BRANCH`, `WT_WORKTREE_BASE_BRANCH`, and `WT_DEFAULT_WORKTREE_PATH`. Their output goes to stderr so it never interferes with the directory the shell wrapper jumps to.
 - `wt gco` with no argument goes to the default-branch worktree.
+- Projects are the repositories and worktree workspaces `wt` knows about, recorded, together with a cache of each repo's worktrees, in `~/.config/worktree-navigator/state.json`. Clones register themselves, and opening `wt` in a directory that holds several unrelated repositories (like `~/Projects`) registers each of them.
+- A directory holding several unrelated repositories is treated as a container of projects, not as one project's workspace, so `wt` lists its projects instead of mixing every repository's worktrees into one list.
 - When `wt d` deletes the current worktree, the shell wrapper moves you back to the repo root.
 
 ---

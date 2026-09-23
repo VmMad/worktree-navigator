@@ -1,10 +1,13 @@
 use std::path::PathBuf;
 
-#[derive(Debug, Clone)]
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Worktree {
     pub path: String,
     pub branch: String,
     pub is_main: bool,
+    #[serde(skip)]
     pub is_current: bool,
     pub has_secrets: bool,
 }
@@ -21,6 +24,7 @@ pub enum ActiveAction {
     Options,
     CloneRepo,
     CheckoutRemote,
+    Projects,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
