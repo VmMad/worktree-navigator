@@ -829,12 +829,21 @@ fn finish_cli_worktree_creation(
 
 fn print_projects() {
     let projects = projects::list_projects();
+    let (favorites, others): (Vec<_>, Vec<_>) = projects
+        .iter()
+        .partition(|project| project.favorite_rank.is_some());
     let text = if projects.is_empty() {
         "No projects yet. Run `wt clone <repo>` to create one.".to_string()
-    } else {
+    } else if favorites.is_empty() {
         format!(
             "Projects:\n{}",
-            projects::format_project_list(projects.iter())
+            projects::format_project_list(others.into_iter())
+        )
+    } else {
+        format!(
+            "Favorite projects:\n{}\n\nProjects:\n{}",
+            projects::format_project_list(favorites.into_iter()),
+            projects::format_project_list(others.into_iter())
         )
     };
 
@@ -1144,6 +1153,7 @@ fn handle_projects_key(app: &mut App, code: KeyCode) {
             }
         }
         KeyCode::Char('c') => open_clone_from_projects(app),
+        KeyCode::Char('f') => toggle_selected_favorite(app),
         KeyCode::Enter => open_selected_project(app),
         _ => {}
     }
@@ -1155,6 +1165,28 @@ fn open_clone_from_projects(app: &mut App) {
     app.clone_error = None;
     app.overlay_error = None;
     app.clear_input();
+}
+
+fn toggle_selected_favorite(app: &mut App) {
+    let Some(path) = app
+        .projects
+        .get(app.projects_selected_idx)
+        .map(|project| project.path.clone())
+    else {
+        return;
+    };
+
+    match projects::toggle_favorite(&path) {
+        Ok(()) => {
+            app.projects = projects::list_projects();
+            app.projects_selected_idx = app
+                .projects
+                .iter()
+                .position(|project| project.path == path)
+                .unwrap_or(0);
+        }
+        Err(err) => app.overlay_error = Some(format!("Failed to update favorites: {err}")),
+    }
 }
 
 fn open_selected_project(app: &mut App) {
