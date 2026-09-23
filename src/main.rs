@@ -761,7 +761,7 @@ fn run_cli_command(cwd: &Path, command: ParsedArgs) -> Result<()> {
             let base_branch = resolve_cli_branch_base(&context, &base)?;
             let (_, dest) =
                 git::add_worktree(&context.repo_root, &branch_name, Some(&base_branch))?;
-            println!("{}", dest.display());
+            finish_cli_worktree_creation(&context.repo_root, &branch_name, base_branch, &dest)?;
         }
         ParsedArgs::Delete { branch_name, yes } => {
             let context = require_repo_context(cwd)?;
@@ -790,6 +790,40 @@ fn run_cli_command(cwd: &Path, command: ParsedArgs) -> Result<()> {
         }
     }
 
+    Ok(())
+}
+
+fn finish_cli_worktree_creation(
+    repo_root: &Path,
+    branch: &str,
+    base_branch: String,
+    dest: &Path,
+) -> Result<()> {
+    let scripts = config::load_repo_config(repo_root)?.enabled_post_create_scripts();
+    if scripts.is_empty() {
+        println!("{}", dest.display());
+        return Ok(());
+    }
+
+    if std::env::var_os("WT_SHELL_WRAPPER").is_some() {
+        let request = config::write_post_create_request(&PostCreateRequest {
+            repo_root: repo_root.to_path_buf(),
+            worktree_path: dest.to_path_buf(),
+            branch: branch.to_string(),
+            base_branch: Some(base_branch),
+            scripts,
+        })?;
+        println!("WT_PATH={}", dest.display());
+        println!("WT_POST_CREATE={}", request.display());
+        return Ok(());
+    }
+
+    eprintln!(
+        "[wt] Running {} post-create setup step(s) for {branch}",
+        scripts.len()
+    );
+    config::run_post_create_scripts(repo_root, dest, branch, Some(&base_branch), &scripts)?;
+    println!("{}", dest.display());
     Ok(())
 }
 

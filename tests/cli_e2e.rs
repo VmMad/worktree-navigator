@@ -531,6 +531,45 @@ fn post_create_setup_output_stays_off_stdout() {
 }
 
 #[test]
+fn branch_command_runs_post_create_setup() {
+    let env = TestEnv::new("branch-post-create");
+    fs::write(
+        env.repo.join(".git").join("worktree-navigator.json"),
+        r#"{"post_create_scripts":[{"command":"touch setup-ran","enabled":true}]}"#,
+    )
+    .expect("repo config should be written");
+
+    let direct = run_wt_wrapped(&env, &env.repo, &["b", "feature/setup-direct"]);
+    assert!(direct.status.success(), "stderr:\n{}", stderr(&direct));
+    assert!(PathBuf::from(stdout(&direct)).join("setup-ran").exists());
+
+    let wrapped = Command::new(binary_path())
+        .args(["b", "feature/setup-wrapped"])
+        .current_dir(&env.repo)
+        .env("HOME", &env.home)
+        .env("WT_CWD", &env.repo)
+        .env("WT_SHELL_WRAPPER", "1")
+        .output()
+        .expect("wt should run");
+    assert!(wrapped.status.success(), "stderr:\n{}", stderr(&wrapped));
+    let wrapped_stdout = stdout(&wrapped);
+    let worktree = wrapped_stdout
+        .lines()
+        .find_map(|line| line.strip_prefix("WT_PATH="))
+        .map(PathBuf::from)
+        .expect("wrapper output should carry the worktree path");
+    let request = wrapped_stdout
+        .lines()
+        .find_map(|line| line.strip_prefix("WT_POST_CREATE="))
+        .expect("wrapper output should carry the setup request");
+    assert!(!worktree.join("setup-ran").exists());
+
+    let setup = run_wt_wrapped(&env, &worktree, &["__run-post-create", request]);
+    assert!(setup.status.success(), "stderr:\n{}", stderr(&setup));
+    assert!(worktree.join("setup-ran").exists());
+}
+
+#[test]
 fn mark_tree_creates_workspace_marker() {
     if Command::new("script").arg("-V").output().is_err() {
         return;
