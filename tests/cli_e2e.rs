@@ -568,3 +568,54 @@ fn mark_tree_creates_workspace_marker() {
     assert!(status.success());
     assert!(workspace.join(".wt-workspace").exists());
 }
+
+#[test]
+fn project_commands_jump_to_the_default_branch_worktree() {
+    let env = TestEnv::new("project-jump");
+    let source = env.origin.to_string_lossy().into_owned();
+    let workspaces = env.root.join("workspaces");
+    fs::create_dir_all(&workspaces).expect("workspaces dir should be created");
+
+    let clone = run_wt_wrapped(&env, &workspaces, &["clone", source.as_str(), "acme-api"]);
+    assert!(clone.status.success(), "stderr:\n{}", stderr(&clone));
+
+    let outside = env.root.join("outside");
+    fs::create_dir_all(&outside).expect("outside dir should be created");
+
+    let jump = run_wt_wrapped(&env, &outside, &["p", "acme-api"]);
+    assert!(jump.status.success(), "stderr:\n{}", stderr(&jump));
+    assert_eq!(
+        stdout(&jump),
+        workspaces.join("acme-api").join("main").to_string_lossy()
+    );
+
+    let by_alias_and_partial_name = run_wt_wrapped(&env, &outside, &["project", "acme"]);
+    assert!(by_alias_and_partial_name.status.success());
+    assert_eq!(stdout(&by_alias_and_partial_name), stdout(&jump));
+
+    for (name, origin) in [
+        ("plain-a", "git@github.com:acme/plain-a.git"),
+        ("plain-b", "git@github.com:acme/plain-b.git"),
+    ] {
+        let repo = workspaces.join(name);
+        fs::create_dir_all(&repo).expect("plain repo dir should be created");
+        git(&repo, &["init"]);
+        git(&repo, &["remote", "add", "origin", origin]);
+    }
+    let scan = run_wt_wrapped(&env, &workspaces, &["p", "acme-api"]);
+    assert!(scan.status.success(), "stderr:\n{}", stderr(&scan));
+
+    let listing = run_wt_wrapped(&env, &outside, &["p"]);
+    assert!(listing.status.success());
+    assert!(stdout(&listing).is_empty());
+    assert!(stderr(&listing).contains("acme-api"));
+    assert!(
+        !stderr(&listing).contains("plain-"),
+        "repositories without a wt workspace must not be listed:\n{}",
+        stderr(&listing)
+    );
+
+    let missing = run_wt_wrapped(&env, &outside, &["p", "nope"]);
+    assert!(!missing.status.success());
+    assert!(stderr(&missing).contains("No project named 'nope'"));
+}

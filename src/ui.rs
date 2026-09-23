@@ -27,6 +27,11 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         return;
     }
 
+    if app.active_action == ActiveAction::Projects {
+        draw_projects(f, app, area);
+        return;
+    }
+
     draw_panel(f, app, area);
 
     let show_sync_overlay = app.active_action == ActiveAction::SyncTrees
@@ -96,6 +101,140 @@ fn draw_too_small(f: &mut Frame, area: Rect) {
         .wrap(Wrap { trim: false }),
         area,
     );
+}
+
+// ─────────────────────────────── Projects panel ─────────────────────────────
+
+fn draw_projects(f: &mut Frame, app: &mut App, area: Rect) {
+    let block = Block::default()
+        .title(" ⎇  Worktree Navigator — Projects ")
+        .title_alignment(Alignment::Center)
+        .title_bottom(
+            Line::from(Span::styled(
+                format!(" v{} ", version::current_version()),
+                Style::default().fg(Color::DarkGray),
+            ))
+            .alignment(Alignment::Right),
+        )
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan));
+
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+
+    let mut constraints = vec![Constraint::Min(3)];
+    if app.overlay_error.is_some() {
+        constraints.push(Constraint::Length(1));
+    }
+    constraints.push(Constraint::Length(1));
+
+    let sections = Layout::default()
+        .direction(Direction::Vertical)
+        .margin(1)
+        .constraints(constraints)
+        .split(inner);
+
+    draw_projects_list(f, app, sections[0]);
+
+    if let Some(err) = &app.overlay_error {
+        f.render_widget(
+            Paragraph::new(Span::styled(
+                format!(" ✗ {err} "),
+                Style::default().fg(Color::White).bg(Color::Red),
+            )),
+            sections[1],
+        );
+    }
+
+    f.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled("↑↓/jk/scroll", Style::default().fg(Color::DarkGray)),
+            Span::styled("  nav    ", Style::default().fg(Color::DarkGray)),
+            Span::styled("Enter/click", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                "  open default branch    ",
+                Style::default().fg(Color::DarkGray),
+            ),
+            Span::styled("c", Style::default().fg(Color::DarkGray)),
+            Span::styled("  clone    ", Style::default().fg(Color::DarkGray)),
+            Span::styled("q", Style::default().fg(Color::DarkGray)),
+            Span::styled("  quit", Style::default().fg(Color::DarkGray)),
+        ])),
+        sections[sections.len() - 1],
+    );
+}
+
+fn draw_projects_list(f: &mut Frame, app: &mut App, area: Rect) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+
+    f.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            "PROJECTS",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ))),
+        Rect { height: 1, ..area },
+    );
+
+    let visible_rows = area.height.saturating_sub(1) as usize;
+    if visible_rows == 0 {
+        return;
+    }
+
+    let offset = app
+        .projects_selected_idx
+        .saturating_sub(visible_rows.saturating_sub(1));
+
+    for (row_idx, (idx, project)) in app
+        .projects
+        .iter()
+        .enumerate()
+        .skip(offset)
+        .take(visible_rows)
+        .enumerate()
+    {
+        let row = area.y + 1 + row_idx as u16;
+        let selected = app.projects_selected_idx == idx;
+        let hovered = !selected && app.hovered_row == Some(row);
+
+        let name_style = if selected {
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD)
+        } else if hovered {
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::White)
+        };
+
+        f.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled(if selected { "❯ " } else { "  " }, name_style),
+                Span::styled(project.name.clone(), name_style),
+                Span::styled(
+                    format!("  {}", crate::display_path_with_home(&project.path)),
+                    Style::default().fg(Color::DarkGray),
+                ),
+            ])),
+            Rect {
+                x: area.x,
+                y: row,
+                width: area.width,
+                height: 1,
+            },
+        );
+
+        app.item_rows.push((row, idx));
+    }
 }
 
 // ─────────────────────────────── Main panel ─────────────────────────────────
@@ -2021,6 +2160,7 @@ mod tests {
 
     use crate::{
         app::App,
+        projects::Project,
         types::{ActiveAction, Worktree},
     };
 
@@ -2083,6 +2223,43 @@ mod tests {
         terminal
             .draw(|frame| draw(frame, &mut app))
             .expect("full ui should render on small screens");
+    }
+
+    #[test]
+    fn projects_screen_lists_projects_and_maps_rows_for_clicks() {
+        let backend = TestBackend::new(60, 10);
+        let mut terminal = Terminal::new(backend).expect("test terminal should be created");
+        let mut app = App::new(PathBuf::from("/tmp"));
+        app.no_repo = true;
+        app.worktrees_loading = false;
+        app.active_action = ActiveAction::Projects;
+        app.projects = vec![
+            Project {
+                name: "acme-api".to_string(),
+                path: PathBuf::from("/tmp/workspaces/acme-api"),
+            },
+            Project {
+                name: "acme-web".to_string(),
+                path: PathBuf::from("/tmp/workspaces/acme-web"),
+            },
+        ];
+        app.projects_selected_idx = 1;
+
+        terminal
+            .draw(|frame| draw(frame, &mut app))
+            .expect("projects screen should render");
+
+        let buffer = terminal.backend().buffer();
+        let visible_text = buffer
+            .content()
+            .iter()
+            .map(ratatui::buffer::Cell::symbol)
+            .collect::<String>();
+
+        assert!(visible_text.contains("acme-api"));
+        assert!(visible_text.contains("acme-web"));
+        assert_eq!(app.item_rows.len(), 2);
+        assert_eq!(app.row_to_item(app.item_rows[1].0), Some(1));
     }
 
     #[test]

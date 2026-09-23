@@ -19,6 +19,7 @@ const BINARY_NAME_PREFIX: &str = "worktree-navigator-";
 const SHELL_WRAPPER_MARKER: &str = "# worktree-navigator wt()";
 const SHELL_WRAPPER_BODY: &str = "\
 # worktree-navigator wt()\n\
+wtp() { wt p \"$@\"; }\n\
 wt() {\n\
   local wt_output target post_create_request line\n\
   wt_output=$(WT_CWD=\"$PWD\" WT_SHELL_WRAPPER=1 command wt \"$@\")\n\

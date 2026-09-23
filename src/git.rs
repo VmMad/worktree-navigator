@@ -315,7 +315,7 @@ fn parse_worktree_porcelain(raw: &str, cwd: &Path, default_branch: Option<&str>)
             branch,
             is_main,
             is_current,
-            has_secrets: worktree_has_secrets(&path),
+            has_secrets: false,
         });
     }
 
@@ -410,52 +410,53 @@ pub fn branch_exists(repo_root: &Path, branch_name: &str) -> Result<bool> {
     Ok(output.status.success())
 }
 
-pub fn remove_worktree(
-    repo_root: &Path,
-    worktree_path: &str,
-    is_workspace: bool,
-) -> Result<Vec<String>> {
-    let mut messages = Vec::new();
-    if is_workspace {
-        messages.push(format!("$ rm -rf {worktree_path}"));
-        fs::remove_dir_all(worktree_path)
-            .with_context(|| format!("Failed to remove workspace repo {worktree_path}"))?;
-        messages.push(format!("✓ Removed workspace repo at {worktree_path}"));
-    } else {
-        let git_cwd = resolve_git_cwd(repo_root);
-        messages.push(format!("$ git worktree remove --force {worktree_path}"));
-
-        let output = Command::new("git")
-            .args(["worktree", "remove", "--force", worktree_path])
-            .current_dir(&git_cwd)
-            .output()
-            .context("Failed to run git worktree remove")?;
-
-        if output.status.success() {
-            messages.push(format!("✓ Removed worktree at {worktree_path}"));
-        } else {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            let err = stderr.trim().to_string();
-            messages.push(format!("✗ {err}"));
-            anyhow::bail!("{err}");
-        }
-    }
-
-    Ok(messages)
+pub fn remove_worktree(repo_root: &Path, worktree_path: &str, is_workspace: bool) -> Result<()> {
+    remove_worktrees(repo_root, &[worktree_path.to_string()], is_workspace)
 }
 
+/// Deletes in parallel and prunes git's records once, instead of one
+/// `git worktree remove --force` per worktree.
 pub fn remove_worktrees(
     repo_root: &Path,
     worktree_paths: &[String],
     is_workspace: bool,
-) -> Result<Vec<String>> {
-    let mut messages = Vec::new();
-
-    for worktree_path in worktree_paths {
-        messages.extend(remove_worktree(repo_root, worktree_path, is_workspace)?);
+) -> Result<()> {
+    if !is_workspace
+        && let Some(path) = worktree_paths
+            .iter()
+            .find(|path| Path::new(path).join(".git").is_dir())
+    {
+        anyhow::bail!("'{path}' is the main worktree and cannot be removed.");
     }
 
-    Ok(messages)
+    let failures: Vec<String> = std::thread::scope(|scope| {
+        let handles: Vec<_> = worktree_paths
+            .iter()
+            .map(|path| {
+                scope.spawn(move || {
+                    fs::remove_dir_all(path)
+                        .err()
+                        .map(|err| format!("Failed to remove {path}: {err}"))
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .filter_map(|handle| handle.join().expect("worktree removal thread panicked"))
+            .collect()
+    });
+
+    if !is_workspace {
+        let _ = Command::new("git")
+            .args(["worktree", "prune"])
+            .current_dir(resolve_git_cwd(repo_root))
+            .output();
+    }
+
+    if !failures.is_empty() {
+        anyhow::bail!("{}", failures.join("\n"));
+    }
+    Ok(())
 }
 
 pub fn rename_worktree(
@@ -1229,7 +1230,7 @@ fn collect_workspace_git_repos_recursive(
     remaining_depth: usize,
     repos: &mut Vec<PathBuf>,
 ) -> Result<()> {
-    if is_git_repo(dir) {
+    if dir.join(".git").exists() {
         repos.push(dir.to_path_buf());
         return Ok(());
     }
@@ -1333,17 +1334,22 @@ pub fn find_repo_root(start: &Path) -> Option<PathBuf> {
     }
 }
 
+pub fn is_managed_workspace(dir: &Path) -> bool {
+    dir.join(".wt-workspace").is_file()
+}
+
 pub fn create_workspace_marker(dir: &Path) -> Result<()> {
     let marker = dir.join(".wt-workspace");
     fs::write(&marker, "").context("Failed to create .wt-workspace")?;
     Ok(())
 }
 
-/// Walk up from `start` looking for a `.wt-workspace` marker file.
+/// Walk up from `start` looking for a `.wt-workspace` marker file. A marker on a folder
+/// that now holds unrelated projects is ignored, so each project keeps its own workspace.
 pub fn find_workspace_root(start: &Path) -> Option<PathBuf> {
     let mut current = start.to_path_buf();
     loop {
-        if current.join(".wt-workspace").exists() {
+        if current.join(".wt-workspace").exists() && !is_projects_container(&current) {
             return Some(current);
         }
         if !current.pop() {
@@ -1409,6 +1415,67 @@ pub fn detect_worktree_workspace(dir: &Path) -> bool {
     (linked_count > 0 && main_count > 0) || main_count >= 2
 }
 
+/// Subdirectories holding a project, when `dir` gathers unrelated repositories. Empty
+/// otherwise, so a folder of sibling projects is never taken for a worktree workspace.
+pub fn list_child_projects(dir: &Path) -> Vec<PathBuf> {
+    const MAX_SCAN: usize = 200;
+
+    let Ok(entries) = fs::read_dir(dir) else {
+        return Vec::new();
+    };
+
+    let mut children = Vec::new();
+    let mut origins = HashSet::new();
+
+    for entry in entries.flatten().take(MAX_SCAN) {
+        let path = entry.path();
+        if !path.is_dir() || should_skip_dir(&path) {
+            continue;
+        }
+        let Some(origin) = project_origin(&path) else {
+            continue;
+        };
+        origins.insert(origin);
+        children.push(path);
+    }
+
+    if origins.len() < 2 {
+        return Vec::new();
+    }
+
+    children.sort();
+    children
+}
+
+pub fn is_projects_container(dir: &Path) -> bool {
+    !list_child_projects(dir).is_empty()
+}
+
+/// Linked worktrees have no `.git/config`, so they never match and the worktrees of one
+/// repository count as a single project.
+fn project_origin(project_dir: &Path) -> Option<String> {
+    const MAX_ORIGIN_SCAN_DEPTH: usize = 2;
+
+    fn origin_within(dir: &Path, remaining_depth: usize) -> Option<String> {
+        let git_path = dir.join(".git");
+        if git_path.is_dir() {
+            return read_git_origin_from_config(&git_path.join("config"));
+        }
+        if remaining_depth == 0 {
+            return None;
+        }
+
+        fs::read_dir(dir)
+            .ok()?
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|path| path.is_dir() && !should_skip_dir(path))
+            .find_map(|path| origin_within(&path, remaining_depth - 1))
+    }
+
+    origin_within(project_dir, MAX_ORIGIN_SCAN_DEPTH)
+}
+
 /// Recursively scan `workspace_dir` up to 3 directory levels and return nested git repos as worktrees.
 pub fn list_workspace_worktrees(workspace_dir: &Path) -> Result<Vec<Worktree>> {
     let cwd = effective_cwd(workspace_dir);
@@ -1456,12 +1523,46 @@ pub fn list_workspace_worktrees(workspace_dir: &Path) -> Result<Vec<Worktree>> {
             branch,
             is_main,
             is_current,
-            has_secrets: worktree_has_secrets(&path),
+            has_secrets: false,
         });
     }
 
     worktrees.sort_by_key(|w| !w.is_main);
     Ok(worktrees)
+}
+
+pub fn list_any_worktrees(repo_root: &Path, is_workspace: bool) -> Result<Vec<Worktree>> {
+    if is_workspace {
+        list_workspace_worktrees(repo_root)
+    } else {
+        list_worktrees(repo_root)
+    }
+}
+
+pub fn start_list_worktrees(
+    repo_root: PathBuf,
+    is_workspace: bool,
+) -> Receiver<Result<Vec<Worktree>, String>> {
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(
+            list_any_worktrees(&repo_root, is_workspace)
+                .map(|mut worktrees| {
+                    scan_secrets(&mut worktrees);
+                    worktrees
+                })
+                .map_err(|err| err.to_string()),
+        );
+    });
+    rx
+}
+
+pub fn scan_secrets(worktrees: &mut [Worktree]) {
+    std::thread::scope(|scope| {
+        for worktree in worktrees.iter_mut() {
+            scope.spawn(|| worktree.has_secrets = worktree_has_secrets(Path::new(&worktree.path)));
+        }
+    });
 }
 
 pub fn worktree_has_secrets(path: &Path) -> bool {
@@ -1734,10 +1835,10 @@ pub fn checkout_remote_branch(repo_root: &Path, remote: &str, branch: &str) -> R
 mod tests {
     use super::{
         add_worktree, add_worktree_from_existing, branch_exists, current_branch, default_branch,
-        describe_pr_sync_failure, detect_worktree_workspace, list_secret_files,
-        list_workspace_worktrees, normalize_checkout_remote_branch_input,
-        read_git_origin_from_config, remove_worktree, rename_worktree,
-        resolve_existing_pr_worktree, resolve_git_cwd,
+        describe_pr_sync_failure, detect_worktree_workspace, find_workspace_root,
+        list_child_projects, list_secret_files, list_workspace_worktrees,
+        normalize_checkout_remote_branch_input, read_git_origin_from_config, remove_worktree,
+        remove_worktrees, rename_worktree, resolve_existing_pr_worktree, resolve_git_cwd,
     };
     use crate::types::Worktree;
     use std::fs;
@@ -2067,6 +2168,42 @@ mod tests {
     }
 
     #[test]
+    fn remove_worktrees_deletes_linked_worktrees_and_prunes_their_records() {
+        let root = make_temp_dir("bulk-delete");
+        let repo = root.join("main");
+        fs::create_dir_all(&repo).expect("repo dir should be created");
+        init_repo(&repo);
+        let linked: Vec<String> = ["feat-a", "feat-b"]
+            .iter()
+            .map(|branch| {
+                let path = root.join(branch);
+                git(
+                    &repo,
+                    &["worktree", "add", "-b", branch, path.to_str().unwrap()],
+                );
+                path.to_string_lossy().into_owned()
+            })
+            .collect();
+
+        remove_worktrees(&repo, &linked, false).expect("linked worktrees should be removed");
+
+        assert!(linked.iter().all(|path| !Path::new(path).exists()));
+        let listed = Command::new("git")
+            .args(["worktree", "list", "--porcelain"])
+            .current_dir(&repo)
+            .output()
+            .expect("git worktree list should run");
+        let listed = String::from_utf8_lossy(&listed.stdout);
+        assert!(!listed.contains("feat-a") && !listed.contains("feat-b"));
+        assert!(
+            remove_worktrees(&repo, &[repo.to_string_lossy().into_owned()], false).is_err(),
+            "the main worktree must never be removed"
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn remove_worktree_deletes_workspace_repo_directly() {
         let workspace = make_temp_dir("workspace-delete");
         fs::write(workspace.join(".wt-workspace"), "").expect("workspace marker should be written");
@@ -2198,6 +2335,59 @@ mod tests {
         );
 
         let _ = fs::remove_dir_all(workspace);
+    }
+
+    fn init_repo_with_origin(dir: &Path, origin: &str) {
+        fs::create_dir_all(dir).expect("repo dir should be created");
+        init_repo(dir);
+        git(dir, &["remote", "add", "origin", origin]);
+    }
+
+    #[test]
+    fn lists_child_projects_only_when_repositories_are_unrelated() {
+        let container = make_temp_dir("child-projects");
+        let api = container.join("api");
+        let web = container.join("web");
+        init_repo_with_origin(&api, "git@github.com:acme/api.git");
+        init_repo_with_origin(&web, "git@github.com:acme/web.git");
+
+        assert_eq!(list_child_projects(&container), vec![api, web]);
+
+        let workspace = make_temp_dir("child-projects-workspace");
+        let main = workspace.join("main");
+        init_repo_with_origin(&main, "git@github.com:acme/api.git");
+        add_worktree(&main, "feature/login", Some("main")).expect("worktree should be created");
+
+        assert!(list_child_projects(&workspace).is_empty());
+
+        let _ = fs::remove_dir_all(container);
+        let _ = fs::remove_dir_all(workspace);
+    }
+
+    #[test]
+    fn child_projects_reach_repositories_nested_in_their_workspaces() {
+        let container = make_temp_dir("child-projects-nested");
+        let api = container.join("api");
+        let web = container.join("web");
+        init_repo_with_origin(&api.join("main"), "git@github.com:acme/api.git");
+        init_repo_with_origin(&web.join("main"), "git@github.com:acme/web.git");
+
+        assert_eq!(list_child_projects(&container), vec![api, web]);
+
+        let _ = fs::remove_dir_all(container);
+    }
+
+    #[test]
+    fn workspace_marker_on_a_projects_container_is_ignored() {
+        let container = make_temp_dir("stale-marker");
+        fs::write(container.join(".wt-workspace"), "").expect("marker should be written");
+        let api = container.join("api");
+        init_repo_with_origin(&api, "git@github.com:acme/api.git");
+        init_repo_with_origin(&container.join("web"), "git@github.com:acme/web.git");
+
+        assert_eq!(find_workspace_root(&api), None);
+
+        let _ = fs::remove_dir_all(container);
     }
 
     #[test]

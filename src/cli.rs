@@ -18,6 +18,9 @@ pub enum ParsedArgs {
     CheckoutPr {
         pr_number: u32,
     },
+    Project {
+        name: Option<String>,
+    },
     Checkout {
         branch_name: Option<String>,
     },
@@ -67,6 +70,7 @@ where
         "--install-shell" => parse_install_shell(&args),
         "clone" => parse_clone(&args),
         "pr" | "checkout-pr" => parse_pr(&args),
+        "p" | "project" => parse_project(&args),
         "gco" | "checkout" => parse_checkout(&args),
         "b" | "branch" => parse_branch(args),
         "d" | "delete" => parse_delete(args),
@@ -117,6 +121,24 @@ fn parse_pr(args: &[String]) -> Result<ParsedArgs> {
     }
 
     Ok(ParsedArgs::CheckoutPr { pr_number })
+}
+
+fn parse_project(args: &[String]) -> Result<ParsedArgs> {
+    if args.len() > 1 {
+        bail!("Usage: wt p [project]");
+    }
+
+    let name = args
+        .first()
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+
+    if args.len() == 1 && name.is_none() {
+        bail!("Project name cannot be empty.");
+    }
+
+    Ok(ParsedArgs::Project { name })
 }
 
 fn parse_checkout(args: &[String]) -> Result<ParsedArgs> {
@@ -253,6 +275,8 @@ Available commands:
  clone <repo> [dest]            Clone a repo into a worktree workspace
  pr <number>                    Checkout a pull request worktree
  checkout-pr <number>           Alias for `pr`
+ p [project]                    Jump to a project, or pick one (shell: wtp)
+ project [project]              Alias for `p`
  gco [branch]                   Jump to an existing worktree
  checkout [branch]              Alias for `gco`
  b <branch> [base options]      Create a branch worktree
@@ -335,6 +359,24 @@ mod tests {
             parse(&["checkout-pr", "#42"]),
             ParsedArgs::CheckoutPr { pr_number: 42 }
         );
+    }
+
+    #[test]
+    fn parses_project_aliases_with_optional_name() {
+        assert_eq!(
+            parse(&["p", "worktree-navigator"]),
+            ParsedArgs::Project {
+                name: Some("worktree-navigator".to_string()),
+            }
+        );
+        assert_eq!(
+            parse(&["project", "api"]),
+            ParsedArgs::Project {
+                name: Some("api".to_string()),
+            }
+        );
+        assert_eq!(parse(&["p"]), ParsedArgs::Project { name: None });
+        assert!(parse_args(["p", "one", "two"].map(str::to_string)).is_err());
     }
 
     #[test]
@@ -462,6 +504,8 @@ mod tests {
             "clone <repo> [dest]",
             "pr <number>",
             "checkout-pr <number>",
+            "p [project]",
+            "project [project]",
             "gco [branch]",
             "checkout [branch]",
             "b <branch> [base options]",

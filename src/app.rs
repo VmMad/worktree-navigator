@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use std::sync::mpsc::Receiver;
 
 use crate::config::RepoConfig;
+use crate::projects::Project;
 use crate::types::{
     ActiveAction, CheckoutRemotePhase, CloneEvent, CopySecretsPhase, OptionsPhase, SyncResult,
     Worktree,
@@ -73,6 +74,8 @@ pub struct App {
     pub worktrees: Vec<Worktree>,
     pub worktrees_loading: bool,
     pub worktrees_error: Option<String>,
+    pub worktrees_receiver: Option<Receiver<Result<Vec<Worktree>, String>>>,
+    pub worktrees_pending: Option<Vec<Worktree>>,
 
     pub sync_selected_idx: usize,
     pub sync_pr_loading: bool,
@@ -108,6 +111,9 @@ pub struct App {
     pub pending_console_operation: Option<PendingConsoleOperation>,
     pub console_handoff_active: bool,
     pub console_handoff_needs_resume: bool,
+
+    pub projects: Vec<Project>,
+    pub projects_selected_idx: usize,
 
     pub selected_index: usize,
     pub active_action: ActiveAction,
@@ -160,6 +166,8 @@ impl App {
             worktrees: vec![],
             worktrees_loading: true,
             worktrees_error: None,
+            worktrees_receiver: None,
+            worktrees_pending: None,
             sync_selected_idx: 0,
             sync_pr_loading: false,
             sync_pr_receiver: None,
@@ -190,6 +198,8 @@ impl App {
             pending_console_operation: None,
             console_handoff_active: false,
             console_handoff_needs_resume: false,
+            projects: vec![],
+            projects_selected_idx: 0,
             selected_index: 0,
             active_action: ActiveAction::None,
             input_buffer: String::new(),
