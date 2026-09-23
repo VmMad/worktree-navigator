@@ -18,6 +18,8 @@ pub struct State {
     #[serde(default)]
     pub projects: Vec<Project>,
     #[serde(default)]
+    pub favorites: Vec<PathBuf>,
+    #[serde(default)]
     pub worktrees: BTreeMap<PathBuf, Vec<Worktree>>,
 }
 

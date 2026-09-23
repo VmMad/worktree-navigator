@@ -9,18 +9,45 @@ use crate::{git, store};
 pub struct Project {
     pub name: String,
     pub path: PathBuf,
+    #[serde(skip)]
+    pub favorite_rank: Option<usize>,
 }
 
+/// Favorites first, in the order they were added, then the rest by name.
 pub fn list_projects() -> Vec<Project> {
-    let mut projects: Vec<Project> = store::load()
-        .unwrap_or_default()
+    let state = store::load().unwrap_or_default();
+    let mut projects: Vec<Project> = state
         .projects
         .into_iter()
         .filter(|project| git::is_managed_workspace(&project.path))
+        .map(|mut project| {
+            project.favorite_rank = state
+                .favorites
+                .iter()
+                .position(|favorite| *favorite == project.path);
+            project
+        })
         .collect();
 
-    projects.sort_by(|a, b| a.name.cmp(&b.name).then_with(|| a.path.cmp(&b.path)));
+    projects.sort_by(|a, b| {
+        (a.favorite_rank.is_none(), a.favorite_rank, &a.name, &a.path).cmp(&(
+            b.favorite_rank.is_none(),
+            b.favorite_rank,
+            &b.name,
+            &b.path,
+        ))
+    });
     projects
+}
+
+pub fn toggle_favorite(path: &Path) -> Result<()> {
+    let mut state = store::load().unwrap_or_default();
+    if let Some(idx) = state.favorites.iter().position(|favorite| favorite == path) {
+        state.favorites.remove(idx);
+    } else {
+        state.favorites.push(path.to_path_buf());
+    }
+    store::save(&state)
 }
 
 pub fn register(workspace_root: &Path) {
@@ -54,7 +81,11 @@ fn register_paths(workspace_roots: &[PathBuf]) {
         })
         .filter_map(|path| {
             let name = path.file_name()?.to_str()?.to_string();
-            Some(Project { name, path })
+            Some(Project {
+                name,
+                path,
+                favorite_rank: None,
+            })
         })
         .collect();
 
@@ -158,6 +189,7 @@ mod tests {
         Project {
             name: name.to_string(),
             path: PathBuf::from("/tmp").join(name),
+            favorite_rank: None,
         }
     }
 

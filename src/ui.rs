@@ -8,6 +8,7 @@ use ratatui::{
 
 use crate::{
     app::{App, COMMANDS},
+    projects::Project,
     types::{ActiveAction, CheckoutRemotePhase, CopySecretsPhase, OptionsPhase, SyncStatus},
     version,
 };
@@ -159,6 +160,8 @@ fn draw_projects(f: &mut Frame, app: &mut App, area: Rect) {
                 "  open default branch    ",
                 Style::default().fg(Color::DarkGray),
             ),
+            Span::styled("f", Style::default().fg(Color::DarkGray)),
+            Span::styled("  favorite    ", Style::default().fg(Color::DarkGray)),
             Span::styled("c", Style::default().fg(Color::DarkGray)),
             Span::styled("  clone    ", Style::default().fg(Color::DarkGray)),
             Span::styled("q", Style::default().fg(Color::DarkGray)),
@@ -168,41 +171,68 @@ fn draw_projects(f: &mut Frame, app: &mut App, area: Rect) {
     );
 }
 
+enum ProjectRow {
+    Header(&'static str),
+    Project(usize),
+}
+
+fn project_rows(projects: &[Project]) -> Vec<ProjectRow> {
+    let favorites = projects
+        .iter()
+        .take_while(|project| project.favorite_rank.is_some())
+        .count();
+    let mut rows = Vec::with_capacity(projects.len() + 3);
+    if favorites > 0 {
+        rows.push(ProjectRow::Header("FAVORITE PROJECTS"));
+        rows.extend((0..favorites).map(ProjectRow::Project));
+        rows.push(ProjectRow::Header(""));
+    }
+    rows.push(ProjectRow::Header("PROJECTS"));
+    rows.extend((favorites..projects.len()).map(ProjectRow::Project));
+    rows
+}
+
 fn draw_projects_list(f: &mut Frame, app: &mut App, area: Rect) {
     if area.width == 0 || area.height == 0 {
         return;
     }
 
-    f.render_widget(
-        Paragraph::new(Line::from(Span::styled(
-            "PROJECTS",
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD),
-        ))),
-        Rect { height: 1, ..area },
-    );
-
-    let visible_rows = area.height.saturating_sub(1) as usize;
-    if visible_rows == 0 {
-        return;
-    }
-
-    let offset = app
-        .projects_selected_idx
-        .saturating_sub(visible_rows.saturating_sub(1));
-
-    for (row_idx, (idx, project)) in app
-        .projects
+    let rows = project_rows(&app.projects);
+    let visible_rows = area.height as usize;
+    let selected_row = rows
         .iter()
-        .enumerate()
-        .skip(offset)
-        .take(visible_rows)
-        .enumerate()
-    {
-        let row = area.y + 1 + row_idx as u16;
+        .position(
+            |row| matches!(row, ProjectRow::Project(idx) if *idx == app.projects_selected_idx),
+        )
+        .unwrap_or(0);
+    let offset = selected_row.saturating_sub(visible_rows.saturating_sub(1));
+
+    for (row_idx, row) in rows.iter().skip(offset).take(visible_rows).enumerate() {
+        let y = area.y + row_idx as u16;
+        let rect = Rect {
+            x: area.x,
+            y,
+            width: area.width,
+            height: 1,
+        };
+        let idx = match row {
+            ProjectRow::Header(label) => {
+                f.render_widget(
+                    Paragraph::new(Line::from(Span::styled(
+                        *label,
+                        Style::default()
+                            .fg(Color::Yellow)
+                            .add_modifier(Modifier::BOLD),
+                    ))),
+                    rect,
+                );
+                continue;
+            }
+            ProjectRow::Project(idx) => *idx,
+        };
+        let project = &app.projects[idx];
         let selected = app.projects_selected_idx == idx;
-        let hovered = !selected && app.hovered_row == Some(row);
+        let hovered = !selected && app.hovered_row == Some(y);
 
         let name_style = if selected {
             Style::default()
@@ -225,15 +255,10 @@ fn draw_projects_list(f: &mut Frame, app: &mut App, area: Rect) {
                     Style::default().fg(Color::DarkGray),
                 ),
             ])),
-            Rect {
-                x: area.x,
-                y: row,
-                width: area.width,
-                height: 1,
-            },
+            rect,
         );
 
-        app.item_rows.push((row, idx));
+        app.item_rows.push((y, idx));
     }
 }
 
@@ -2237,10 +2262,12 @@ mod tests {
             Project {
                 name: "acme-api".to_string(),
                 path: PathBuf::from("/tmp/workspaces/acme-api"),
+                favorite_rank: Some(0),
             },
             Project {
                 name: "acme-web".to_string(),
                 path: PathBuf::from("/tmp/workspaces/acme-web"),
+                favorite_rank: None,
             },
         ];
         app.projects_selected_idx = 1;
@@ -2256,6 +2283,7 @@ mod tests {
             .map(ratatui::buffer::Cell::symbol)
             .collect::<String>();
 
+        assert!(visible_text.contains("FAVORITE PROJECTS"));
         assert!(visible_text.contains("acme-api"));
         assert!(visible_text.contains("acme-web"));
         assert_eq!(app.item_rows.len(), 2);
