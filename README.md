@@ -103,7 +103,7 @@ Jump to a project's default branch worktree:
 
 ```bash
 wt p acme-api
-wtp            # pick a project from anywhere (same as `wt p`)
+wt p            # pick a project from anywhere
 ```
 
 Check out a PR:
@@ -147,7 +147,7 @@ wt --mark-tree
 | Command | Aliases | Description |
 |---|---|---|
 | `wt clone <repo> [dest]` | | Clone into a worktree workspace, print the default-branch path |
-| `wt p [project]` | `project`, `wtp` | Jump to a project's default-branch worktree, or open the project picker |
+| `wt p [project]` | `project` | Jump to a project's default-branch worktree, or open the project picker |
 | `wt pr <number>` | `checkout-pr` | Fetch the PR head branch, create/select its worktree |
 | `wt gco [branch]` | `checkout` | Jump to an existing worktree; defaults to the default branch |
 | `wt b <branch>` | `branch` | Create a new branch worktree |

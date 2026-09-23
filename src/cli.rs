@@ -275,7 +275,7 @@ Available commands:
  clone <repo> [dest]            Clone a repo into a worktree workspace
  pr <number>                    Checkout a pull request worktree
  checkout-pr <number>           Alias for `pr`
- p [project]                    Jump to a project, or pick one (shell: wtp)
+ p [project]                    Jump to a project, or pick one
  project [project]              Alias for `p`
  gco [branch]                   Jump to an existing worktree
  checkout [branch]              Alias for `gco`
