@@ -463,8 +463,21 @@ fn draw_worktrees(f: &mut Frame, app: &mut App, area: Rect) {
     let header_style = Style::default()
         .fg(Color::Yellow)
         .add_modifier(Modifier::BOLD);
+    let header = if app.filtering {
+        let (before, after) = app.input_parts();
+        let mut line = input_line("  / ", before, after, Color::Cyan);
+        line.spans
+            .insert(0, Span::styled("WORKTREES", header_style));
+        line
+    } else {
+        Line::from(vec![
+            Span::styled("WORKTREES", header_style),
+            Span::raw("  Filter"),
+            Span::styled(" [/]", Style::default().fg(Color::DarkGray)),
+        ])
+    };
     f.render_widget(
-        Paragraph::new(Line::from(Span::styled("WORKTREES", header_style))),
+        Paragraph::new(header),
         Rect {
             x: area.x,
             y: area.y,
@@ -512,6 +525,18 @@ fn draw_worktrees(f: &mut Frame, app: &mut App, area: Rect) {
         return;
     }
 
+    let visible = app.visible_worktree_indices();
+    if visible.is_empty() {
+        f.render_widget(
+            Paragraph::new(Span::styled(
+                "  No matching worktrees",
+                Style::default().fg(Color::DarkGray),
+            )),
+            list_area,
+        );
+        return;
+    }
+
     let max_rows = list_area.height as usize;
     let cmd_len = COMMANDS.len();
 
@@ -549,22 +574,18 @@ fn draw_worktrees(f: &mut Frame, app: &mut App, area: Rect) {
     }
     .map(|idx| idx.min(app.worktrees.len().saturating_sub(1)));
 
-    let start_idx = if app.worktrees.len() > max_rows {
-        let sel = selected_wt_idx.unwrap_or(0);
+    let start_idx = if visible.len() > max_rows {
+        let sel = selected_wt_idx
+            .and_then(|idx| visible.iter().position(|&v| v == idx))
+            .unwrap_or(0);
         sel.saturating_sub(max_rows.saturating_sub(1))
-            .min(app.worktrees.len() - max_rows)
+            .min(visible.len() - max_rows)
     } else {
         0
     };
 
-    for (visible_i, (i, wt)) in app
-        .worktrees
-        .iter()
-        .enumerate()
-        .skip(start_idx)
-        .take(max_rows)
-        .enumerate()
-    {
+    for (visible_i, &i) in visible.iter().skip(start_idx).take(max_rows).enumerate() {
+        let wt = &app.worktrees[i];
         let idx = cmd_len + i;
         let row = list_area.y + visible_i as u16;
         app.item_rows.push((row, idx));
@@ -749,22 +770,26 @@ fn draw_help(f: &mut Frame, app: &App, area: Rect) {
             Span::styled("Esc", Style::default().fg(Color::DarkGray)),
             Span::styled("  back/cancel", Style::default().fg(Color::DarkGray)),
         ])
+    } else if app.filtering {
+        Line::from(vec![
+            Span::styled("type", Style::default().fg(Color::Cyan)),
+            Span::styled(
+                "  filter branches    ",
+                Style::default().fg(Color::DarkGray),
+            ),
+            Span::styled("↑↓/scroll", Style::default().fg(Color::Cyan)),
+            Span::styled("  nav    ", Style::default().fg(Color::DarkGray)),
+            Span::styled("Enter/click", Style::default().fg(Color::Cyan)),
+            Span::styled("  open    ", Style::default().fg(Color::DarkGray)),
+            Span::styled("Esc", Style::default().fg(Color::DarkGray)),
+            Span::styled("  clear filter", Style::default().fg(Color::DarkGray)),
+        ])
     } else {
         Line::from(vec![
-            Span::styled("↑↓/jk/scroll", Style::default().fg(Color::DarkGray)),
-            Span::styled("  nav    ", Style::default().fg(Color::DarkGray)),
-            Span::styled("Enter/click", Style::default().fg(Color::DarkGray)),
-            Span::styled("  open    ", Style::default().fg(Color::DarkGray)),
-            Span::styled(
-                "b  m  p  d  s  c  o  r",
-                Style::default().fg(Color::DarkGray),
-            ),
-            Span::styled(
-                "  branch/rename/PR/delete/sync/copy/options/remote    ",
-                Style::default().fg(Color::DarkGray),
-            ),
-            Span::styled("q", Style::default().fg(Color::DarkGray)),
-            Span::styled("  quit", Style::default().fg(Color::DarkGray)),
+            Span::styled("↑↓/jk/scroll", Style::default().fg(Color::Cyan)),
+            Span::styled(" navigate    ", Style::default().fg(Color::DarkGray)),
+            Span::styled("Enter/click", Style::default().fg(Color::Cyan)),
+            Span::styled(" open", Style::default().fg(Color::DarkGray)),
         ])
     };
     f.render_widget(Paragraph::new(text), area);
