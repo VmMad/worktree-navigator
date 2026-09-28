@@ -381,6 +381,24 @@ fn resolve_repo_context(cwd: &Path) -> RepoContext {
     }
 }
 
+fn load_repo(app: &mut App, context: &RepoContext) {
+    match config::load_repo_config(&context.repo_root) {
+        Ok(config) => app.repo_config = config,
+        Err(err) => app.overlay_error = Some(format!("Failed to load options: {err}")),
+    }
+    app.is_workspace = context.is_workspace;
+    let cwd = context
+        .cwd
+        .canonicalize()
+        .unwrap_or_else(|_| context.cwd.clone());
+    if let Some(worktrees) = store::cached_worktrees(&context.repo_root, &cwd) {
+        app.worktrees = worktrees;
+        app.worktrees_loading = false;
+        select_current_worktree(app);
+    }
+    start_worktrees_refresh(app);
+}
+
 fn run_tui(cwd: &Path, mark_tree: bool, projects_only: bool) -> Result<()> {
     let mut update_notice_rx = (!mark_tree).then(update::start_background_update_check);
     let mut update_notice = None;
@@ -427,21 +445,8 @@ fn run_tui(cwd: &Path, mark_tree: bool, projects_only: bool) -> Result<()> {
         } else {
             ActiveAction::Projects
         };
-    } else if let Err(err) = config::load_repo_config(&repo_root).map(|config| {
-        app.repo_config = config;
-    }) {
-        app.overlay_error = Some(format!("Failed to load options: {err}"));
-    }
-
-    if !no_repo {
-        app.is_workspace = context.is_workspace;
-        let cwd = cwd.canonicalize().unwrap_or_else(|_| cwd.to_path_buf());
-        if let Some(worktrees) = store::cached_worktrees(&repo_root, &cwd) {
-            app.worktrees = worktrees;
-            app.worktrees_loading = false;
-            select_current_worktree(&mut app);
-        }
-        start_worktrees_refresh(&mut app);
+    } else {
+        load_repo(&mut app, &context);
     }
 
     let run_result = catch_unwind(AssertUnwindSafe(|| -> Result<()> {
@@ -981,6 +986,7 @@ fn handle_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
         ActiveAction::CloneRepo => handle_clone_key(app, code, modifiers),
         ActiveAction::Projects => handle_projects_key(app, code),
         ActiveAction::CheckoutRemote => handle_checkout_remote_key(app, code, modifiers),
+        ActiveAction::None if app.filtering => handle_filter_key(app, code, modifiers),
         ActiveAction::None => handle_nav_key(app, code, modifiers),
     }
 }
@@ -1082,6 +1088,8 @@ fn handle_mouse(app: &mut App, kind: MouseEventKind, column: u16, row: u16) {
                 app.overlay_index = app
                     .previous_deletable_worktree_idx(current)
                     .unwrap_or(current);
+            } else if app.filtering {
+                step_filtered_selection(app, false);
             } else if app.selected_index == 0 {
                 app.selected_index = app.total_items().saturating_sub(1);
             } else {
@@ -1099,6 +1107,8 @@ fn handle_mouse(app: &mut App, kind: MouseEventKind, column: u16, row: u16) {
             } else if delete_select {
                 let current = delete_cursor_idx(app);
                 app.overlay_index = app.next_deletable_worktree_idx(current).unwrap_or(current);
+            } else if app.filtering {
+                step_filtered_selection(app, true);
             } else {
                 let max = app.total_items().saturating_sub(1);
                 if app.selected_index >= max {
@@ -1194,13 +1204,17 @@ fn open_selected_project(app: &mut App) {
         return;
     };
 
-    match projects::default_worktree_path(project) {
-        Ok(path) => {
-            app.exit_path = Some(path.to_string_lossy().into_owned());
-            app.should_quit = true;
-        }
-        Err(err) => app.overlay_error = Some(err.to_string()),
+    let context = resolve_repo_context(&project.path);
+    if context.no_repo {
+        app.overlay_error = Some(format!(
+            "Project '{}' is not a repository ({}).",
+            project.name,
+            project.path.display()
+        ));
+        return;
     }
+    *app = App::new(context.repo_root.clone());
+    load_repo(app, &context);
 }
 
 fn handle_nav_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
@@ -1228,6 +1242,11 @@ fn handle_nav_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
                 app.selected_index += 1;
             }
         }
+        KeyCode::Char('/') => {
+            app.filtering = true;
+            app.clear_input();
+            select_first_filtered_worktree(app);
+        }
         KeyCode::Char(c) => {
             if let Some(action) = App::command_action_for_shortcut(c) {
                 open_action(app, action);
@@ -1236,6 +1255,56 @@ fn handle_nav_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
         KeyCode::Enter => activate(app),
         _ => {}
     }
+}
+
+fn handle_filter_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
+    match code {
+        KeyCode::Up => step_filtered_selection(app, false),
+        KeyCode::Down => step_filtered_selection(app, true),
+        _ => {
+            let previous_filter = app.input_buffer.clone();
+            match text_input::handle_key(app, code, modifiers) {
+                TextInputKeyResult::Cancel => {
+                    app.filtering = false;
+                    app.clear_input();
+                }
+                TextInputKeyResult::Submit => {
+                    if app
+                        .selected_worktree_idx()
+                        .is_some_and(|idx| app.visible_worktree_indices().contains(&idx))
+                    {
+                        activate(app);
+                    }
+                }
+                TextInputKeyResult::Updated if app.input_buffer != previous_filter => {
+                    select_first_filtered_worktree(app);
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
+fn select_first_filtered_worktree(app: &mut App) {
+    if let Some(&idx) = app.visible_worktree_indices().first() {
+        app.selected_index = app::COMMANDS.len() + idx;
+    }
+}
+
+fn step_filtered_selection(app: &mut App, forward: bool) {
+    let visible = app.visible_worktree_indices();
+    if visible.is_empty() {
+        return;
+    }
+    let position = app
+        .selected_worktree_idx()
+        .and_then(|idx| visible.iter().position(|&v| v == idx));
+    let next = match (position, forward) {
+        (None, _) => 0,
+        (Some(pos), true) => (pos + 1) % visible.len(),
+        (Some(pos), false) => (pos + visible.len() - 1) % visible.len(),
+    };
+    app.selected_index = app::COMMANDS.len() + visible[next];
 }
 
 fn activate(app: &mut App) {
@@ -1255,6 +1324,7 @@ fn activate(app: &mut App) {
 
 fn open_action(app: &mut App, action: ActiveAction) {
     app.overlay_index = 0;
+    app.filtering = false;
     app.clear_input();
     app.new_branch_use_existing = false;
     app.new_branch_confirm_existing = None;
@@ -1466,7 +1536,12 @@ fn select_current_worktree(app: &mut App) {
     if app.worktrees.is_empty() {
         return;
     }
-    let idx = app.worktrees.iter().position(|w| w.is_current).unwrap_or(0);
+    let idx = app
+        .worktrees
+        .iter()
+        .position(|w| w.is_current)
+        .or_else(|| app.worktrees.iter().position(|w| w.is_main))
+        .unwrap_or(0);
     app.selected_index = app::COMMANDS.len() + idx;
 }
 
@@ -2503,6 +2578,11 @@ fn poll_checkout_remote_fetch(app: &mut App) {
 }
 
 fn handle_paste(app: &mut App, text: &str) {
+    if app.active_action == ActiveAction::None && app.filtering {
+        app.input_str(text.trim_end_matches(['\r', '\n']));
+        select_first_filtered_worktree(app);
+        return;
+    }
     let _ = text_input::handle_paste(app, text);
 }
 
@@ -2510,7 +2590,9 @@ fn handle_paste(app: &mut App, text: &str) {
 mod tests {
     use std::path::PathBuf;
 
-    use super::{handle_paste, open_action, resolve_worktree_by_branch_in};
+    use crossterm::event::{KeyCode, KeyModifiers};
+
+    use super::{handle_key, handle_paste, open_action, resolve_worktree_by_branch_in};
     use crate::{
         app::App,
         text_input,
@@ -2707,5 +2789,50 @@ mod tests {
         open_action(&mut app, ActiveAction::NewBranch);
 
         assert_eq!(app.new_branch_base.as_deref(), Some("feature/test"));
+    }
+
+    #[test]
+    fn filter_narrows_worktrees_and_opens_the_highlighted_match() {
+        let mut app = test_app();
+        app.worktrees = ["main", "feat/login", "fix/crash", "feat/search"]
+            .into_iter()
+            .map(|branch| Worktree {
+                path: format!("/repo/{branch}"),
+                branch: branch.to_string(),
+                is_main: branch == "main",
+                is_current: false,
+                has_secrets: false,
+            })
+            .collect();
+
+        for code in [
+            KeyCode::Char('/'),
+            KeyCode::Char('F'),
+            KeyCode::Char('e'),
+            KeyCode::Char('a'),
+        ] {
+            handle_key(&mut app, code, KeyModifiers::NONE);
+        }
+        assert_eq!(app.visible_worktree_indices(), vec![1, 3]);
+        assert_eq!(app.selected_worktree_idx(), Some(1));
+
+        handle_key(&mut app, KeyCode::Down, KeyModifiers::NONE);
+        handle_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        assert_eq!(app.exit_path.as_deref(), Some("/repo/feat/search"));
+    }
+
+    #[test]
+    fn escape_clears_filter_and_restores_command_shortcuts() {
+        let mut app = test_app();
+
+        handle_key(&mut app, KeyCode::Char('/'), KeyModifiers::NONE);
+        handle_key(&mut app, KeyCode::Char('d'), KeyModifiers::NONE);
+        assert_eq!(app.active_action, ActiveAction::None);
+        assert_eq!(app.input_buffer, "d");
+
+        handle_key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+        assert!(!app.filtering);
+        assert!(app.input_buffer.is_empty());
+        assert!(!app.should_quit);
     }
 }

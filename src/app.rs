@@ -117,6 +117,7 @@ pub struct App {
 
     pub selected_index: usize,
     pub active_action: ActiveAction,
+    pub filtering: bool,
 
     pub input_buffer: String,
     pub input_cursor: usize,
@@ -202,6 +203,7 @@ impl App {
             projects_selected_idx: 0,
             selected_index: 0,
             active_action: ActiveAction::None,
+            filtering: false,
             input_buffer: String::new(),
             input_cursor: 0,
             new_branch_base: None,
@@ -323,6 +325,17 @@ impl App {
         } else {
             None
         }
+    }
+
+    /// While filtering, the worktree list shows only branches containing `input_buffer`.
+    pub fn visible_worktree_indices(&self) -> Vec<usize> {
+        let query = self.input_buffer.to_lowercase();
+        self.worktrees
+            .iter()
+            .enumerate()
+            .filter(|(_, wt)| !self.filtering || wt.branch.to_lowercase().contains(&query))
+            .map(|(idx, _)| idx)
+            .collect()
     }
 
     pub fn next_copy_target_idx(&self, from: usize) -> Option<usize> {
