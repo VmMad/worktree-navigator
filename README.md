@@ -70,7 +70,7 @@ wt
 | Delete Worktree | `d` | Select inline, then confirm with `Enter` or `y` |
 | Sync Worktree | `s` | Fast-forward a worktree from `origin/<branch>` |
 | Copy Secrets | `c` | Copy secret files into the selected worktree |
-| Options | `o` | Configure repo-local post-create commands for new worktrees |
+| Options | `o` | Configure repo-local post-install and post-delete scripts |
 | Checkout Remote | `r` | Fetch a remote branch and create a worktree for it |
 
 #### Navigation
@@ -160,8 +160,9 @@ wt --mark-tree
 #### Notes
 
 - `wt b <branch>` defaults to the current branch when run inside a worktree; falls back to the repo default branch otherwise.
-- `o` opens repo-local options where you can add shell commands to run automatically after creating a new worktree.
+- `o` opens repo-local options for post-install and post-delete scripts. Post-install scripts run only after a worktree is newly created or downloaded; an option can copy secrets from the default branch first.
 - Post-create commands run inside the new worktree and receive `WT_REPO_ROOT`, `WT_WORKTREE_PATH`, `WT_WORKTREE_BRANCH`, `WT_WORKTREE_BASE_BRANCH`, and `WT_DEFAULT_WORKTREE_PATH`. Their output goes to stderr so it never interferes with the directory the shell wrapper jumps to.
+- Post-delete scripts run from the default-branch worktree after a successful deletion, with the deleted worktree's path and branch in `WT_WORKTREE_PATH` and `WT_WORKTREE_BRANCH`.
 - `wt gco` with no argument goes to the default-branch worktree.
 - Projects are the repositories and worktree workspaces `wt` knows about, recorded, together with a cache of each repo's worktrees, in `~/.config/worktree-navigator/state.json`. Clones register themselves, and opening `wt` in a directory that holds several unrelated repositories (like `~/Projects`) registers each of them.
 - Press `f` in the project picker to add or remove a favorite. Favorites sit on top, in the order you added them.

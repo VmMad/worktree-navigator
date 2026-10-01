@@ -9,7 +9,10 @@ use ratatui::{
 use crate::{
     app::{App, COMMANDS},
     projects::Project,
-    types::{ActiveAction, CheckoutRemotePhase, CopySecretsPhase, OptionsPhase, SyncStatus},
+    types::{
+        ActiveAction, CheckoutRemotePhase, CopySecretsPhase, OptionsPhase, PostScriptKind,
+        SyncStatus,
+    },
     version,
 };
 
@@ -42,6 +45,21 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     let show_copy_overlay = app.active_action == ActiveAction::CopySecrets
         && (app.copy_secrets_phase == CopySecretsPhase::ConfirmOverwrite
             || app.copy_secrets_loading);
+    let show_blocking_overlay = matches!(
+        app.active_action,
+        ActiveAction::NewBranch
+            | ActiveAction::Rename
+            | ActiveAction::SyncPr
+            | ActiveAction::Options
+            | ActiveAction::CloneRepo
+            | ActiveAction::CheckoutRemote
+    ) || show_sync_overlay
+        || show_delete_overlay
+        || show_copy_overlay;
+
+    if show_blocking_overlay {
+        dim_background(f, area);
+    }
 
     match app.active_action {
         ActiveAction::NewBranch => draw_new_branch_overlay(f, app, area),
@@ -74,6 +92,21 @@ pub fn draw(f: &mut Frame, app: &mut App) {
             )),
             err_area,
         );
+    }
+}
+
+fn dim_background(f: &mut Frame, area: Rect) {
+    let buffer = f.buffer_mut();
+    for y in area.y..area.bottom() {
+        for x in area.x..area.right() {
+            if let Some(cell) = buffer.cell_mut((x, y)) {
+                cell.set_style(
+                    Style::default()
+                        .fg(Color::Rgb(80, 80, 80))
+                        .bg(Color::Rgb(16, 16, 16)),
+                );
+            }
+        }
     }
 }
 
@@ -801,6 +834,7 @@ fn draw_copy_secrets_overlay(f: &mut Frame, app: &App, area: Rect) {
         f.render_widget(Clear, popup);
         let block = Block::default()
             .title(" Copy Secrets ")
+            .title_alignment(Alignment::Center)
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Color::Green));
         let inner = block.inner(popup).inner(Margin {
@@ -831,6 +865,7 @@ fn draw_copy_secrets_overlay(f: &mut Frame, app: &App, area: Rect) {
 
     let block = Block::default()
         .title(" Copy Secrets ")
+        .title_alignment(Alignment::Center)
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Green));
 
@@ -903,18 +938,37 @@ fn draw_copy_secrets_overlay(f: &mut Frame, app: &App, area: Rect) {
 fn draw_options_overlay(f: &mut Frame, app: &App, area: Rect) {
     let has_err = app.overlay_error.is_some();
     let is_editing = app.options_phase == OptionsPhase::Editing;
-    let item_count = app.repo_config.post_create_scripts.len();
-    let list_height = item_count.min(6) as u16;
+    let scripts = match app.options_script_kind {
+        PostScriptKind::Install => &app.repo_config.post_create_scripts,
+        PostScriptKind::Delete => &app.repo_config.post_delete_scripts,
+    };
+    let is_categories = app.options_phase == OptionsPhase::BrowsingCategories;
     let popup_height = if is_editing {
         10 + u16::from(has_err) * 2
+    } else if is_categories {
+        9 + u16::from(has_err) * 2
     } else {
-        8 + list_height + u16::from(has_err) * 2
+        10 + scripts.len().min(6) as u16 + u16::from(has_err) * 2
     };
     let popup = centered_rect(74, popup_height, area);
     f.render_widget(Clear, popup);
 
+    let title = if is_categories {
+        " Options "
+    } else if is_editing {
+        match app.options_script_kind {
+            PostScriptKind::Install => " Edit Post Install Script ",
+            PostScriptKind::Delete => " Edit Post Delete Script ",
+        }
+    } else {
+        match app.options_script_kind {
+            PostScriptKind::Install => " Post Install Scripts ",
+            PostScriptKind::Delete => " Post Delete Scripts ",
+        }
+    };
     let block = Block::default()
-        .title(" Options ")
+        .title(title)
+        .title_alignment(Alignment::Center)
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Yellow));
     let inner = block.inner(popup).inner(Margin {
@@ -939,15 +993,20 @@ fn draw_options_overlay(f: &mut Frame, app: &App, area: Rect) {
             .constraints(constraints)
             .split(inner);
 
-        let editing_label = if app.options_edit_idx.is_some() {
-            "Edit a shell command to run after creating a worktree."
-        } else {
-            "Add a shell command to run after creating a worktree."
+        let editing_label = match app.options_script_kind {
+            PostScriptKind::Install if app.options_edit_idx.is_some() => {
+                "Edit a command that runs after a worktree is created."
+            }
+            PostScriptKind::Install => "Add a command that runs after a worktree is created.",
+            PostScriptKind::Delete if app.options_edit_idx.is_some() => {
+                "Edit a command that runs after a worktree is deleted."
+            }
+            PostScriptKind::Delete => "Add a command that runs after a worktree is deleted.",
         };
         f.render_widget(
             Paragraph::new(vec![
                 Line::from(Span::styled(
-                    "Post-create worktree scripts",
+                    "Shell command",
                     Style::default()
                         .fg(Color::Yellow)
                         .add_modifier(Modifier::BOLD),
@@ -967,8 +1026,8 @@ fn draw_options_overlay(f: &mut Frame, app: &App, area: Rect) {
         );
         f.render_widget(
             Paragraph::new(Span::styled(
-                "Enter to save  Esc to cancel",
-                Style::default().fg(Color::DarkGray),
+                "Enter save  Esc cancel",
+                Style::default().fg(Color::Gray),
             )),
             rows[3],
         );
@@ -986,77 +1045,71 @@ fn draw_options_overlay(f: &mut Frame, app: &App, area: Rect) {
         return;
     }
 
-    let mut body_rows = vec![
-        Line::from(Span::styled(
-            "Enabled commands run automatically after a new worktree is created.",
-            Style::default().fg(Color::DarkGray),
-        )),
-        Line::from(Span::styled(
-            "Commands run inside the new worktree with WT_* paths available.",
-            Style::default().fg(Color::DarkGray),
-        )),
-        Line::from(vec![]),
-    ];
-
-    if app.repo_config.post_create_scripts.is_empty() {
-        body_rows.push(Line::from(Span::styled(
-            "No scripts configured yet. Press a to add one.",
-            Style::default().fg(Color::Yellow),
-        )));
-    } else {
-        let window_size = 6usize;
-        let total = app.repo_config.post_create_scripts.len();
-        let selected = app.options_selected_idx.min(total.saturating_sub(1));
-        let start = selected.saturating_sub(window_size.saturating_sub(1));
-        let end = (start + window_size).min(total);
-        let start = end.saturating_sub(window_size);
-
-        if start > 0 {
-            body_rows.push(Line::from(Span::styled(
-                format!("... {start} earlier"),
-                Style::default().fg(Color::DarkGray),
-            )));
-        }
-
-        for (idx, script) in app
-            .repo_config
-            .post_create_scripts
-            .iter()
+    let mut body_rows = Vec::new();
+    if is_categories {
+        for (idx, label) in ["Post Install Scripts", "Post Delete Scripts"]
+            .into_iter()
             .enumerate()
-            .skip(start)
-            .take(end - start)
         {
-            let is_selected = idx == app.options_selected_idx;
-            let marker = if script.enabled { "[x]" } else { "[ ]" };
-            let style = if is_selected {
-                Style::default()
-                    .fg(Color::Black)
-                    .bg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD)
-            } else if script.enabled {
-                Style::default().fg(Color::White)
-            } else {
-                Style::default().fg(Color::DarkGray)
-            };
-            body_rows.push(Line::from(Span::styled(
-                format!("{marker} {}", script.command),
-                style,
-            )));
+            body_rows.push(option_row(
+                idx == app.options_category_selected_idx,
+                label,
+                true,
+            ));
+        }
+    } else {
+        let offset = usize::from(app.options_script_kind == PostScriptKind::Install);
+        let selected = app.options_selected_idx;
+        body_rows.push(Line::from(Span::styled(
+            match app.options_script_kind {
+                PostScriptKind::Install => "After a new worktree is created.",
+                PostScriptKind::Delete => "After deletion from the default worktree.",
+            },
+            Style::default().fg(Color::DarkGray),
+        )));
+
+        if app.options_script_kind == PostScriptKind::Install {
+            body_rows.push(option_row(
+                selected == 0,
+                &format!(
+                    "[{}] Copy secrets from default branch",
+                    if app.repo_config.copy_secrets_from_default_branch {
+                        "x"
+                    } else {
+                        " "
+                    }
+                ),
+                true,
+            ));
         }
 
-        if end < total {
+        if scripts.is_empty() {
             body_rows.push(Line::from(Span::styled(
-                format!("... {} more", total - end),
-                Style::default().fg(Color::DarkGray),
+                "No scripts yet. Press a to add one.",
+                Style::default().fg(Color::Yellow),
             )));
+        } else {
+            let script_selected = selected.saturating_sub(offset);
+            let window_size = 6usize;
+            let start = script_selected.saturating_sub(window_size.saturating_sub(1));
+            let end = (start + window_size).min(scripts.len());
+            let start = end.saturating_sub(window_size);
+            for (idx, script) in scripts.iter().enumerate().skip(start).take(end - start) {
+                let marker = if script.enabled { "[x]" } else { "[ ]" };
+                body_rows.push(option_row(
+                    idx + offset == selected,
+                    &format!("{marker} {}", script.command),
+                    script.enabled,
+                ));
+            }
+            if end < scripts.len() {
+                body_rows.push(Line::from(Span::styled(
+                    format!("... {} more", scripts.len() - end),
+                    Style::default().fg(Color::DarkGray),
+                )));
+            }
         }
     }
-
-    body_rows.push(Line::from(vec![]));
-    body_rows.push(Line::from(Span::styled(
-        "a add  e/Enter edit  Space toggle  d delete  Esc close",
-        Style::default().fg(Color::DarkGray),
-    )));
 
     if let Some(err) = &app.overlay_error {
         body_rows.push(Line::from(vec![]));
@@ -1066,7 +1119,65 @@ fn draw_options_overlay(f: &mut Frame, app: &App, area: Rect) {
         )));
     }
 
-    f.render_widget(Paragraph::new(body_rows).wrap(Wrap { trim: false }), inner);
+    let footer_height = if is_categories {
+        1
+    } else if inner.width < 55 {
+        3
+    } else {
+        2
+    };
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(0), Constraint::Length(footer_height)])
+        .split(inner);
+    f.render_widget(Paragraph::new(body_rows), rows[0]);
+    let footer = if is_categories {
+        vec![Line::from(Span::styled(
+            "↑/↓ select  Enter open  Esc close",
+            Style::default().fg(Color::Gray),
+        ))]
+    } else if inner.width < 55 {
+        vec![
+            Line::from(Span::styled(
+                "↑/↓ select  a add  e edit",
+                Style::default().fg(Color::Gray),
+            )),
+            Line::from(Span::styled(
+                "Space toggle  d delete",
+                Style::default().fg(Color::Gray),
+            )),
+            Line::from(Span::styled(
+                "Esc back  ·  changes auto-save",
+                Style::default().fg(Color::Gray),
+            )),
+        ]
+    } else {
+        vec![
+            Line::from(Span::styled(
+                "↑/↓ select  a add  e edit  Space toggle  d delete",
+                Style::default().fg(Color::Gray),
+            )),
+            Line::from(Span::styled(
+                "Esc back  ·  changes save automatically",
+                Style::default().fg(Color::Gray),
+            )),
+        ]
+    };
+    f.render_widget(Paragraph::new(footer), rows[1]);
+}
+
+fn option_row(selected: bool, label: &str, enabled: bool) -> Line<'static> {
+    let style = if selected {
+        Style::default()
+            .fg(Color::Black)
+            .bg(Color::Yellow)
+            .add_modifier(Modifier::BOLD)
+    } else if enabled {
+        Style::default().fg(Color::White)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
+    Line::from(Span::styled(label.to_string(), style))
 }
 
 // ─────────────────────────────── Overlays ───────────────────────────────────
@@ -1106,6 +1217,7 @@ fn draw_new_branch_overlay(f: &mut Frame, app: &App, area: Rect) {
         f.render_widget(Clear, popup);
         let block = Block::default()
             .title(" New Branch / Worktree ")
+            .title_alignment(Alignment::Center)
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Color::Yellow));
         let inner = block.inner(popup).inner(Margin {
@@ -1154,6 +1266,7 @@ fn draw_new_branch_overlay(f: &mut Frame, app: &App, area: Rect) {
 
         let block = Block::default()
             .title(" Existing Branch ")
+            .title_alignment(Alignment::Center)
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Color::Yellow));
 
@@ -1237,6 +1350,7 @@ fn draw_new_branch_overlay(f: &mut Frame, app: &App, area: Rect) {
 
     let block = Block::default()
         .title(" New Branch / Worktree ")
+        .title_alignment(Alignment::Center)
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Yellow));
 
@@ -1312,6 +1426,7 @@ fn draw_rename_overlay(f: &mut Frame, app: &App, area: Rect) {
         f.render_widget(Clear, popup);
         let block = Block::default()
             .title(" Rename Worktree ")
+            .title_alignment(Alignment::Center)
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Color::Blue));
         let inner = block.inner(popup).inner(Margin {
@@ -1354,6 +1469,7 @@ fn draw_rename_overlay(f: &mut Frame, app: &App, area: Rect) {
 
     let block = Block::default()
         .title(" Rename Worktree ")
+        .title_alignment(Alignment::Center)
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Blue));
 
@@ -1427,6 +1543,7 @@ fn draw_sync_pr_overlay(f: &mut Frame, app: &App, area: Rect) {
         f.render_widget(Clear, popup);
         let block = Block::default()
             .title(" Sync GitHub PR as Worktree ")
+            .title_alignment(Alignment::Center)
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Color::Magenta));
         let inner = block.inner(popup).inner(Margin {
@@ -1479,6 +1596,7 @@ fn draw_sync_pr_overlay(f: &mut Frame, app: &App, area: Rect) {
 
     let block = Block::default()
         .title(" Sync GitHub PR as Worktree ")
+        .title_alignment(Alignment::Center)
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Magenta));
 
@@ -1535,6 +1653,7 @@ fn draw_sync_overlay(f: &mut Frame, app: &App, area: Rect) {
         f.render_widget(Clear, popup);
         let block = Block::default()
             .title(" Sync Tree ")
+            .title_alignment(Alignment::Center)
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Color::Cyan));
         let inner = block.inner(popup).inner(Margin {
@@ -1577,6 +1696,7 @@ fn draw_sync_overlay(f: &mut Frame, app: &App, area: Rect) {
         };
         let block = Block::default()
             .title(format!(" Sync Result  {fetch_label} "))
+            .title_alignment(Alignment::Center)
             .title_style(Style::default().fg(fetch_color))
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Color::Cyan));
@@ -1649,6 +1769,7 @@ fn draw_delete_overlay(f: &mut Frame, app: &App, area: Rect) {
         f.render_widget(Clear, popup);
         let block = Block::default()
             .title(" Delete Worktree ")
+            .title_alignment(Alignment::Center)
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Color::Red));
         let inner = block.inner(popup).inner(Margin {
@@ -1711,6 +1832,7 @@ fn draw_delete_overlay(f: &mut Frame, app: &App, area: Rect) {
         };
         let block = Block::default()
             .title(block_title)
+            .title_alignment(Alignment::Center)
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Color::Red));
 
@@ -1902,6 +2024,7 @@ fn draw_clone_overlay(f: &mut Frame, app: &App, area: Rect) {
 
     let block = Block::default()
         .title(" Clone Repository ")
+        .title_alignment(Alignment::Center)
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Green));
 
@@ -2015,6 +2138,7 @@ fn draw_checkout_remote_overlay(f: &mut Frame, app: &App, area: Rect) {
             f.render_widget(Clear, popup);
             let block = Block::default()
                 .title(" Checkout Remote Branch ")
+                .title_alignment(Alignment::Center)
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(COLOR));
             let inner = block.inner(popup).inner(Margin {
@@ -2057,6 +2181,7 @@ fn draw_checkout_remote_overlay(f: &mut Frame, app: &App, area: Rect) {
             f.render_widget(Clear, popup);
             let block = Block::default()
                 .title(" Checkout Remote Branch ")
+                .title_alignment(Alignment::Center)
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(COLOR));
             let inner = block.inner(popup).inner(Margin {
@@ -2085,6 +2210,7 @@ fn draw_checkout_remote_overlay(f: &mut Frame, app: &App, area: Rect) {
             f.render_widget(Clear, popup);
             let block = Block::default()
                 .title(" Checkout Remote Branch ")
+                .title_alignment(Alignment::Center)
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(COLOR));
             let inner = block.inner(popup).inner(Margin {
@@ -2206,15 +2332,91 @@ fn summarize_clone_error(err: &str) -> String {
 mod tests {
     use std::path::PathBuf;
 
-    use ratatui::{Terminal, backend::TestBackend};
+    use ratatui::{Terminal, backend::TestBackend, style::Color};
 
     use crate::{
         app::App,
+        config::PostCreateScript,
         projects::Project,
-        types::{ActiveAction, Worktree},
+        types::{ActiveAction, OptionsPhase, PostScriptKind, Worktree},
     };
 
     use super::{draw, draw_delete_overlay};
+
+    #[test]
+    fn options_scripts_keep_controls_visible_and_modal_centered_on_small_screens() {
+        for (width, height) in [(80, 24), (60, 16)] {
+            let backend = TestBackend::new(width, height);
+            let mut terminal = Terminal::new(backend).expect("test terminal should be created");
+            let mut app = App::new(PathBuf::from("/tmp/repo"));
+            app.worktrees_loading = false;
+            app.active_action = ActiveAction::Options;
+            app.options_phase = OptionsPhase::BrowsingScripts;
+            app.options_script_kind = PostScriptKind::Install;
+            app.options_selected_idx = 1;
+            app.repo_config.post_create_scripts = vec![PostCreateScript {
+                command: "echo this intentionally long command must stay on one row and never hide the controls".to_string(),
+                enabled: true,
+            }];
+
+            terminal
+                .draw(|frame| draw(frame, &mut app))
+                .expect("options screen should render");
+
+            let buffer = terminal.backend().buffer();
+            let rows: Vec<String> = (0..height)
+                .map(|y| {
+                    (0..width)
+                        .map(|x| {
+                            buffer
+                                .cell((x, y))
+                                .map_or(" ", ratatui::buffer::Cell::symbol)
+                        })
+                        .collect()
+                })
+                .collect();
+            let title = "Post Install Scripts";
+            let title_row = rows
+                .iter()
+                .position(|row| row.contains(title))
+                .expect("script modal title should be visible");
+            let title_byte_start = rows[title_row]
+                .find(title)
+                .expect("script modal title should have a position");
+            let title_start = rows[title_row][..title_byte_start].chars().count();
+            assert!(
+                (title_start + title.len() / 2).abs_diff(usize::from(width) / 2) <= 2,
+                "title should be centered at {width}x{height}; row={:?}, start={title_start}",
+                rows[title_row]
+            );
+
+            let visible = rows.join("\n");
+            assert!(visible.contains("Space toggle  d delete"));
+            assert!(visible.contains("Esc back"));
+            assert!(visible.contains("save"));
+            assert!(
+                visible.contains("this intentionally long command"),
+                "command should remain on the content row"
+            );
+
+            let footer_y = rows
+                .iter()
+                .position(|row| row.contains("Esc back"))
+                .expect("footer should be visible");
+            let footer_byte_x = rows[footer_y]
+                .find("Esc back")
+                .expect("footer should have a position");
+            let footer_x = rows[footer_y][..footer_byte_x].chars().count() as u16;
+            assert_eq!(
+                buffer.cell((footer_x, footer_y as u16)).unwrap().fg,
+                Color::Gray,
+                "footer controls should have readable contrast"
+            );
+            let background = buffer.cell((0, 0)).expect("background cell should exist");
+            assert_eq!(background.fg, Color::Rgb(80, 80, 80));
+            assert_eq!(background.bg, Color::Rgb(16, 16, 16));
+        }
+    }
 
     #[test]
     fn delete_overlay_keeps_actions_visible_on_small_screens() {

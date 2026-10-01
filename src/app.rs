@@ -5,8 +5,8 @@ use std::sync::mpsc::Receiver;
 use crate::config::RepoConfig;
 use crate::projects::Project;
 use crate::types::{
-    ActiveAction, CheckoutRemotePhase, CloneEvent, CopySecretsPhase, OptionsPhase, SyncResult,
-    Worktree,
+    ActiveAction, CheckoutRemotePhase, CloneEvent, CopySecretsPhase, OptionsPhase, PostScriptKind,
+    SyncResult, Worktree,
 };
 
 #[derive(Debug, Clone)]
@@ -132,7 +132,9 @@ pub struct App {
     pub overlay_error: Option<String>,
     pub repo_config: RepoConfig,
     pub options_phase: OptionsPhase,
+    pub options_category_selected_idx: usize,
     pub options_selected_idx: usize,
+    pub options_script_kind: PostScriptKind,
     pub options_edit_idx: Option<usize>,
     pub copy_secrets_phase: CopySecretsPhase,
     pub copy_secrets_source_idx: Option<usize>,
@@ -216,8 +218,10 @@ impl App {
             delete_checked: BTreeSet::new(),
             overlay_error: None,
             repo_config: RepoConfig::default(),
-            options_phase: OptionsPhase::BrowsingScripts,
+            options_phase: OptionsPhase::BrowsingCategories,
+            options_category_selected_idx: 0,
             options_selected_idx: 0,
+            options_script_kind: PostScriptKind::Install,
             options_edit_idx: None,
             copy_secrets_phase: CopySecretsPhase::SelectSource,
             copy_secrets_source_idx: None,

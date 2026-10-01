@@ -8,6 +8,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::git;
+use crate::types::Worktree;
 
 const REPO_CONFIG_FILE: &str = "worktree-navigator.json";
 
@@ -15,6 +16,10 @@ const REPO_CONFIG_FILE: &str = "worktree-navigator.json";
 pub struct RepoConfig {
     #[serde(default)]
     pub post_create_scripts: Vec<PostCreateScript>,
+    #[serde(default)]
+    pub copy_secrets_from_default_branch: bool,
+    #[serde(default)]
+    pub post_delete_scripts: Vec<PostCreateScript>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -40,6 +45,14 @@ const fn default_true() -> bool {
 impl RepoConfig {
     pub fn enabled_post_create_scripts(&self) -> Vec<PostCreateScript> {
         self.post_create_scripts
+            .iter()
+            .filter(|script| script.enabled && !script.command.trim().is_empty())
+            .cloned()
+            .collect()
+    }
+
+    pub fn enabled_post_delete_scripts(&self) -> Vec<PostCreateScript> {
+        self.post_delete_scripts
             .iter()
             .filter(|script| script.enabled && !script.command.trim().is_empty())
             .cloned()
@@ -90,6 +103,87 @@ pub fn run_post_create_scripts(
     base_branch: Option<&str>,
     scripts: &[PostCreateScript],
 ) -> Result<()> {
+    run_scripts(
+        repo_root,
+        worktree_path,
+        worktree_path,
+        branch,
+        base_branch,
+        "setup",
+        scripts,
+    )
+}
+
+pub fn copy_default_secrets(repo_root: &Path, worktree_path: &Path) -> Result<usize> {
+    let Some(default_worktree) = list_repo_worktrees(repo_root)?
+        .into_iter()
+        .find(|worktree| worktree.is_main)
+    else {
+        anyhow::bail!("Could not find the default worktree to copy secrets from.");
+    };
+
+    let destination = Worktree {
+        path: worktree_path.to_string_lossy().into_owned(),
+        branch: String::new(),
+        is_main: false,
+        is_current: false,
+        has_secrets: false,
+    };
+    if !git::worktree_has_secrets(Path::new(&default_worktree.path))
+        || git::worktree_has_secrets(worktree_path)
+    {
+        return Ok(0);
+    }
+
+    git::copy_secret_files(&default_worktree, &destination, false)
+}
+
+fn list_repo_worktrees(repo_root: &Path) -> Result<Vec<Worktree>> {
+    git::list_any_worktrees(repo_root, git::is_managed_workspace(repo_root))
+}
+
+pub fn run_post_delete_scripts(
+    repo_root: &Path,
+    worktree_path: &Path,
+    branch: &str,
+    base_branch: &str,
+    scripts: &[PostCreateScript],
+) -> Result<()> {
+    if scripts
+        .iter()
+        .all(|script| !script.enabled || script.command.trim().is_empty())
+    {
+        return Ok(());
+    }
+
+    let default_worktree_path = list_repo_worktrees(repo_root)?
+        .into_iter()
+        .find(|worktree| worktree.is_main)
+        .map_or_else(
+            || repo_root.to_path_buf(),
+            |worktree| PathBuf::from(worktree.path),
+        );
+
+    run_scripts(
+        repo_root,
+        &default_worktree_path,
+        worktree_path,
+        branch,
+        Some(base_branch),
+        "post-delete",
+        scripts,
+    )
+}
+
+fn run_scripts(
+    repo_root: &Path,
+    cwd: &Path,
+    worktree_path: &Path,
+    branch: &str,
+    base_branch: Option<&str>,
+    action: &str,
+    scripts: &[PostCreateScript],
+) -> Result<()> {
     let enabled_scripts: Vec<&PostCreateScript> = scripts
         .iter()
         .filter(|script| script.enabled && !script.command.trim().is_empty())
@@ -98,7 +192,7 @@ pub fn run_post_create_scripts(
         return Ok(());
     }
 
-    let default_worktree_path = git::list_worktrees(repo_root)?
+    let default_worktree_path = list_repo_worktrees(repo_root)?
         .into_iter()
         .find(|wt| wt.is_main)
         .map(|wt| wt.path)
@@ -107,7 +201,7 @@ pub fn run_post_create_scripts(
     for (index, script) in enabled_scripts.iter().enumerate() {
         eprintln!();
         eprintln!(
-            "[wt] Running setup step {}/{}",
+            "[wt] Running {action} step {}/{}",
             index + 1,
             enabled_scripts.len()
         );
@@ -115,7 +209,7 @@ pub fn run_post_create_scripts(
 
         let status = Command::new("sh")
             .args(["-lc", &script.command])
-            .current_dir(worktree_path)
+            .current_dir(cwd)
             .stdout(stderr_as_stdout()?)
             .env("WT_REPO_ROOT", repo_root)
             .env("WT_WORKTREE_PATH", worktree_path)
@@ -125,10 +219,10 @@ pub fn run_post_create_scripts(
             .stdin(Stdio::inherit())
             .stderr(Stdio::inherit())
             .status()
-            .with_context(|| format!("Failed to run setup command: {}", script.command))?;
+            .with_context(|| format!("Failed to run {action} command: {}", script.command))?;
 
         if !status.success() {
-            anyhow::bail!("Setup command failed: {}", script.command);
+            anyhow::bail!("{action} command failed: {}", script.command);
         }
     }
 
@@ -184,9 +278,9 @@ pub fn repo_config_path(repo_root: &Path) -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::{
-        PostCreateRequest, PostCreateScript, RepoConfig, load_repo_config, repo_config_path,
-        run_post_create_scripts, run_post_create_scripts_from_request, save_repo_config,
-        write_post_create_request,
+        PostCreateRequest, PostCreateScript, RepoConfig, copy_default_secrets, load_repo_config,
+        repo_config_path, run_post_create_scripts, run_post_create_scripts_from_request,
+        run_post_delete_scripts, save_repo_config, write_post_create_request,
     };
     use std::fs;
     use std::path::{Path, PathBuf};
@@ -237,6 +331,8 @@ mod tests {
         let config = load_repo_config(&repo).expect("missing config should load");
 
         assert!(config.post_create_scripts.is_empty());
+        assert!(!config.copy_secrets_from_default_branch);
+        assert!(config.post_delete_scripts.is_empty());
 
         let _ = fs::remove_dir_all(workspace);
     }
@@ -259,6 +355,11 @@ mod tests {
                     enabled: false,
                 },
             ],
+            copy_secrets_from_default_branch: true,
+            post_delete_scripts: vec![PostCreateScript {
+                command: "cleanup".to_string(),
+                enabled: false,
+            }],
         };
 
         save_repo_config(&repo, &config).expect("config should save");
@@ -294,6 +395,139 @@ mod tests {
         assert_eq!(
             fs::read_to_string(worktree.join("hook.out")).expect("hook output should exist"),
             format!("feature/test|main|{}", repo.display())
+        );
+
+        let _ = fs::remove_dir_all(workspace);
+    }
+
+    #[test]
+    fn default_secrets_copy_is_optional_and_skips_existing_secrets() {
+        let workspace = make_temp_dir("copy-secrets");
+        let repo = workspace.join("repo");
+        fs::create_dir_all(&repo).expect("repo dir should be created");
+        init_repo(&repo);
+        let worktree = workspace.join("feature");
+        git(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "feature",
+                worktree.to_str().unwrap(),
+            ],
+        );
+
+        assert_eq!(
+            copy_default_secrets(&repo, &worktree).expect("empty default secrets should be fine"),
+            0
+        );
+        fs::write(repo.join(".env.local"), "TOKEN=source\n").expect("secret should be written");
+        assert_eq!(
+            copy_default_secrets(&repo, &worktree).expect("secrets should copy"),
+            1
+        );
+        assert_eq!(
+            fs::read_to_string(worktree.join(".env.local")).expect("secret should be copied"),
+            "TOKEN=source\n"
+        );
+
+        fs::write(repo.join(".env.private"), "OTHER=source\n").expect("secret should be written");
+        assert_eq!(
+            copy_default_secrets(&repo, &worktree)
+                .expect("existing destination secrets should be left alone"),
+            0
+        );
+        assert!(!worktree.join(".env.private").exists());
+
+        let _ = fs::remove_dir_all(workspace);
+    }
+
+    #[test]
+    fn workspace_root_copies_secrets_and_sets_default_worktree_environment() {
+        let workspace = make_temp_dir("workspace-copy-secrets");
+        fs::write(workspace.join(".wt-workspace"), "").expect("workspace marker should exist");
+        let default_worktree = workspace.join("a-main");
+        fs::create_dir_all(&default_worktree).expect("default worktree dir should exist");
+        init_repo(&default_worktree);
+        fs::write(default_worktree.join(".env.local"), "TOKEN=source\n")
+            .expect("secret should be written");
+
+        let feature_worktree = workspace.join("z-feature");
+        git(
+            &default_worktree,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "feature",
+                feature_worktree.to_str().unwrap(),
+            ],
+        );
+
+        assert_eq!(
+            copy_default_secrets(&workspace, &feature_worktree)
+                .expect("workspace secrets should copy"),
+            1
+        );
+        assert_eq!(
+            fs::read_to_string(feature_worktree.join(".env.local"))
+                .expect("secret should be copied"),
+            "TOKEN=source\n"
+        );
+
+        run_post_create_scripts(
+            &workspace,
+            &feature_worktree,
+            "feature",
+            Some("main"),
+            &[PostCreateScript {
+                command: "printf '%s' \"$WT_DEFAULT_WORKTREE_PATH\" > default-path.txt".into(),
+                enabled: true,
+            }],
+        )
+        .expect("workspace post-create script should run");
+        assert_eq!(
+            fs::read_to_string(feature_worktree.join("default-path.txt"))
+                .expect("default path should be exposed"),
+            default_worktree.to_string_lossy()
+        );
+
+        let _ = fs::remove_dir_all(workspace);
+    }
+
+    #[test]
+    fn post_delete_scripts_use_surviving_default_worktree_and_removed_context() {
+        let workspace = make_temp_dir("post-delete");
+        let repo = workspace.join("repo");
+        fs::create_dir_all(&repo).expect("repo dir should be created");
+        init_repo(&repo);
+        let removed_worktree = workspace.join("feature");
+        let output = workspace.join("post-delete.txt");
+        let command = format!(
+            "printf '%s|%s|%s|%s' \"$WT_WORKTREE_BRANCH\" \"$WT_WORKTREE_PATH\" \"$WT_WORKTREE_BASE_BRANCH\" \"$PWD\" > '{}'",
+            output.display()
+        );
+
+        run_post_delete_scripts(
+            &repo,
+            &removed_worktree,
+            "feature/gone",
+            "main",
+            &[PostCreateScript {
+                command,
+                enabled: true,
+            }],
+        )
+        .expect("post-delete script should run");
+
+        assert_eq!(
+            fs::read_to_string(output).expect("script output should exist"),
+            format!(
+                "feature/gone|{}|main|{}",
+                removed_worktree.display(),
+                repo.display()
+            )
         );
 
         let _ = fs::remove_dir_all(workspace);
