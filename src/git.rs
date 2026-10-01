@@ -421,6 +421,18 @@ pub fn remove_worktrees(
     worktree_paths: &[String],
     is_workspace: bool,
 ) -> Result<()> {
+    let (_, failures) = remove_worktrees_partial(repo_root, worktree_paths, is_workspace)?;
+    if !failures.is_empty() {
+        anyhow::bail!("{}", failures.join("\n"));
+    }
+    Ok(())
+}
+
+pub fn remove_worktrees_partial(
+    repo_root: &Path,
+    worktree_paths: &[String],
+    is_workspace: bool,
+) -> Result<(Vec<String>, Vec<String>)> {
     if !is_workspace
         && let Some(path) = worktree_paths
             .iter()
@@ -429,22 +441,32 @@ pub fn remove_worktrees(
         anyhow::bail!("'{path}' is the main worktree and cannot be removed.");
     }
 
-    let failures: Vec<String> = std::thread::scope(|scope| {
+    let results = std::thread::scope(|scope| {
         let handles: Vec<_> = worktree_paths
             .iter()
             .map(|path| {
                 scope.spawn(move || {
-                    fs::remove_dir_all(path)
-                        .err()
-                        .map(|err| format!("Failed to remove {path}: {err}"))
+                    fs::remove_dir_all(path).map_or_else(
+                        |err| Err(format!("Failed to remove {path}: {err}")),
+                        |()| Ok(path.clone()),
+                    )
                 })
             })
             .collect();
-        handles
+        let results: Vec<_> = handles
             .into_iter()
-            .filter_map(|handle| handle.join().expect("worktree removal thread panicked"))
-            .collect()
+            .map(|handle| handle.join().expect("worktree removal thread panicked"))
+            .collect();
+        results
     });
+    let mut removed = Vec::new();
+    let mut failures = Vec::new();
+    for result in results {
+        match result {
+            Ok(path) => removed.push(path),
+            Err(err) => failures.push(err),
+        }
+    }
 
     if !is_workspace {
         let _ = Command::new("git")
@@ -453,10 +475,7 @@ pub fn remove_worktrees(
             .output();
     }
 
-    if !failures.is_empty() {
-        anyhow::bail!("{}", failures.join("\n"));
-    }
-    Ok(())
+    Ok((removed, failures))
 }
 
 pub fn rename_worktree(
@@ -522,7 +541,6 @@ pub fn rename_worktree(
     Ok(new_path)
 }
 
-#[allow(dead_code)]
 pub struct PrCheckout {
     pub worktree_path: PathBuf,
     pub branch: String,
@@ -530,9 +548,11 @@ pub struct PrCheckout {
     pub created: bool,
 }
 
-pub fn checkout_pr_as_worktree(repo_root: &Path, pr_number: u32) -> Result<(Vec<String>, PathBuf)> {
-    let (messages, checkout) = checkout_pr_as_worktree_impl(repo_root, pr_number, None)?;
-    Ok((messages, checkout.worktree_path))
+pub fn checkout_pr_as_worktree(
+    repo_root: &Path,
+    pr_number: u32,
+) -> Result<(Vec<String>, PrCheckout)> {
+    checkout_pr_as_worktree_impl(repo_root, pr_number, None)
 }
 
 pub fn start_checkout_pr_as_worktree(repo_root: PathBuf, pr_number: u32) -> Receiver<SyncPrEvent> {
@@ -1838,7 +1858,8 @@ mod tests {
         describe_pr_sync_failure, detect_worktree_workspace, find_workspace_root,
         list_child_projects, list_secret_files, list_workspace_worktrees,
         normalize_checkout_remote_branch_input, read_git_origin_from_config, remove_worktree,
-        remove_worktrees, rename_worktree, resolve_existing_pr_worktree, resolve_git_cwd,
+        remove_worktrees, remove_worktrees_partial, rename_worktree, resolve_existing_pr_worktree,
+        resolve_git_cwd,
     };
     use crate::types::Worktree;
     use std::fs;
@@ -2199,6 +2220,43 @@ mod tests {
             remove_worktrees(&repo, &[repo.to_string_lossy().into_owned()], false).is_err(),
             "the main worktree must never be removed"
         );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn partial_worktree_removal_reports_successes_alongside_failures() {
+        let root = make_temp_dir("partial-delete");
+        let repo = root.join("main");
+        fs::create_dir_all(&repo).expect("repo dir should be created");
+        init_repo(&repo);
+        let linked_path = root.join("feature");
+        git(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "feature",
+                linked_path.to_str().unwrap(),
+            ],
+        );
+        let missing_path = root.join("missing").to_string_lossy().into_owned();
+
+        let (removed, failures) = remove_worktrees_partial(
+            &repo,
+            &[
+                linked_path.to_string_lossy().into_owned(),
+                missing_path.clone(),
+            ],
+            false,
+        )
+        .expect("partial removal should report per-path results");
+
+        assert_eq!(removed, vec![linked_path.to_string_lossy().into_owned()]);
+        assert_eq!(failures.len(), 1);
+        assert!(failures[0].contains(&missing_path));
+        assert!(!linked_path.exists());
 
         let _ = fs::remove_dir_all(root);
     }

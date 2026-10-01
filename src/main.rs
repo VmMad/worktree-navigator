@@ -34,8 +34,8 @@ use cli::{BranchBase, ParsedArgs};
 use config::{PostCreateRequest, PostCreateScript, RepoConfig};
 use text_input::TextInputKeyResult;
 use types::{
-    ActiveAction, CheckoutRemotePhase, CloneEvent, CopySecretsPhase, OptionsPhase, SyncPrEvent,
-    Worktree,
+    ActiveAction, CheckoutRemotePhase, CloneEvent, CopySecretsPhase, OptionsPhase, PostScriptKind,
+    SyncPrEvent, Worktree,
 };
 
 struct TuiCleanupGuard {
@@ -130,6 +130,32 @@ fn update_repo_config(app: &mut App, update: impl FnOnce(&mut RepoConfig)) -> Re
     Ok(())
 }
 
+fn run_post_delete_for_removed(
+    worktrees: &[Worktree],
+    default_worktree: &Worktree,
+    removed_paths: &[String],
+    scripts: &[PostCreateScript],
+) -> Vec<String> {
+    let mut errors = Vec::new();
+    for path in removed_paths {
+        if let Some(worktree) = worktrees.iter().find(|worktree| worktree.path == *path)
+            && let Err(err) = config::run_post_delete_scripts(
+                Path::new(&default_worktree.path),
+                Path::new(path),
+                &worktree.branch,
+                &default_worktree.branch,
+                scripts,
+            )
+        {
+            errors.push(format!(
+                "Post-delete scripts failed for '{}': {err}",
+                worktree.branch
+            ));
+        }
+    }
+    errors
+}
+
 fn select_worktree_by_path(app: &mut App, path: &Path) {
     let path = path.to_string_lossy();
     if let Some(idx) = app.worktrees.iter().position(|wt| wt.path == path) {
@@ -174,6 +200,15 @@ fn complete_new_worktree_creation(
     app.clear_input();
     refresh_worktrees(app);
     select_worktree_by_path(app, dest);
+
+    if app.repo_config.copy_secrets_from_default_branch
+        && let Err(err) = config::copy_default_secrets(&app.repo_root, dest)
+    {
+        app.overlay_error = Some(format!(
+            "Worktree created, but copying default-branch secrets failed: {err}"
+        ));
+        return Ok(());
+    }
 
     if scripts.is_empty() {
         app.exit_path = Some(dest.to_string_lossy().into_owned());
@@ -220,6 +255,16 @@ fn run_post_create_during_handoff(
     base_branch: Option<String>,
     dest: &Path,
 ) {
+    if app.repo_config.copy_secrets_from_default_branch
+        && let Err(err) = config::copy_default_secrets(&app.repo_root, dest)
+    {
+        app.console_handoff_needs_resume |= app.console_handoff_active;
+        app.overlay_error = Some(format!(
+            "Worktree created, but copying default-branch secrets failed: {err}"
+        ));
+        return;
+    }
+
     let scripts = app.repo_config.enabled_post_create_scripts();
     if scripts.is_empty() {
         app.exit_path = Some(dest.to_string_lossy().into_owned());
@@ -565,15 +610,54 @@ fn run_tui(cwd: &Path, mark_tree: bool, projects_only: bool) -> Result<()> {
 
             if let Some(paths) = app.delete_pending.take() {
                 let root = app.repo_root.clone();
-                match git::remove_worktrees(&root, &paths, app.is_workspace) {
-                    Ok(()) => {
+                let worktrees = app.worktrees.clone();
+                let default_worktree = app
+                    .default_worktree_idx()
+                    .and_then(|idx| app.worktrees.get(idx))
+                    .cloned();
+                let scripts = app.repo_config.enabled_post_delete_scripts();
+                match git::remove_worktrees_partial(&root, &paths, app.is_workspace) {
+                    Ok((removed, mut errors)) => {
+                        let removed_current = worktrees.iter().any(|worktree| {
+                            worktree.is_current && removed.contains(&worktree.path)
+                        });
+                        if !scripts.is_empty() {
+                            if let Some(default_worktree) = &default_worktree {
+                                if !removed.is_empty() {
+                                    suspend_terminal(&mut mouse_capture_enabled, &mut terminal)?;
+                                }
+                                errors.extend(run_post_delete_for_removed(
+                                    &worktrees,
+                                    default_worktree,
+                                    &removed,
+                                    &scripts,
+                                ));
+                                if !removed.is_empty() && !removed_current {
+                                    resume_terminal(
+                                        &app,
+                                        &mut mouse_capture_enabled,
+                                        &mut terminal,
+                                    )?;
+                                }
+                            } else {
+                                errors.push("Could not find the default worktree to run post-delete scripts.".to_string());
+                            }
+                        }
+
                         app.delete_loading = false;
                         app.active_action = ActiveAction::None;
                         app.delete_warn_current = false;
                         app.delete_confirm_targets.clear();
-                        app.overlay_error = None;
+                        app.overlay_error = (!errors.is_empty()).then(|| {
+                            format!("Delete completed with errors: {}", errors.join("; "))
+                        });
                         app.delete_checked.clear();
-                        if let Some(path) = app.delete_redirect_path.take() {
+                        let redirect_path =
+                            app.delete_redirect_path.take().filter(|_| removed_current);
+                        if let Some(path) = redirect_path {
+                            if !errors.is_empty() {
+                                eprintln!("[wt] {}", errors.join("; "));
+                            }
                             app.exit_path = Some(path);
                             app.should_quit = true;
                         } else {
@@ -753,8 +837,17 @@ fn run_cli_command(cwd: &Path, command: ParsedArgs) -> Result<()> {
         }
         ParsedArgs::CheckoutPr { pr_number } => {
             let context = require_repo_context(cwd)?;
-            let (_, dest) = git::checkout_pr_as_worktree(&context.repo_root, pr_number)?;
-            println!("{}", dest.display());
+            let (_, checkout) = git::checkout_pr_as_worktree(&context.repo_root, pr_number)?;
+            if checkout.created {
+                finish_cli_worktree_creation(
+                    &context.repo_root,
+                    &checkout.branch,
+                    checkout.base_branch,
+                    &checkout.worktree_path,
+                )?;
+            } else {
+                println!("{}", checkout.worktree_path.display());
+            }
         }
         ParsedArgs::Checkout { branch_name } => {
             let context = require_repo_context(cwd)?;
@@ -766,19 +859,68 @@ fn run_cli_command(cwd: &Path, command: ParsedArgs) -> Result<()> {
             let base_branch = resolve_cli_branch_base(&context, &base)?;
             let (_, dest) =
                 git::add_worktree(&context.repo_root, &branch_name, Some(&base_branch))?;
-            finish_cli_worktree_creation(&context.repo_root, &branch_name, base_branch, &dest)?;
+            finish_cli_worktree_creation(
+                &context.repo_root,
+                &branch_name,
+                Some(base_branch),
+                &dest,
+            )?;
         }
         ParsedArgs::Delete { branch_name, yes } => {
             let context = require_repo_context(cwd)?;
             let worktree = resolve_delete_target(&context, branch_name.as_deref())?;
             confirm_delete(&worktree, yes)?;
-            git::remove_worktree(&context.repo_root, &worktree.path, context.is_workspace)?;
-            eprintln!(
-                "Removed worktree for branch '{}' at {}",
-                worktree.branch, worktree.path
-            );
-            if worktree.is_current {
-                println!("{}", context.repo_root.display());
+            let worktrees = git::list_any_worktrees(&context.repo_root, context.is_workspace)?;
+            let default_worktree = worktrees.iter().find(|wt| wt.is_main).cloned();
+            let scripts =
+                config::load_repo_config(&context.repo_root)?.enabled_post_delete_scripts();
+            let (removed, mut errors) = match git::remove_worktree(
+                &context.repo_root,
+                &worktree.path,
+                context.is_workspace,
+            ) {
+                Ok(()) => (vec![worktree.path.clone()], Vec::new()),
+                Err(err) => (Vec::new(), vec![err.to_string()]),
+            };
+            if !scripts.is_empty() {
+                if let Some(default_worktree) = &default_worktree {
+                    errors.extend(run_post_delete_for_removed(
+                        &worktrees,
+                        default_worktree,
+                        &removed,
+                        &scripts,
+                    ));
+                } else {
+                    errors.push(
+                        "Could not find the default worktree to run post-delete scripts."
+                            .to_string(),
+                    );
+                }
+            }
+            let target_removed = removed.iter().any(|path| path == &worktree.path);
+            if target_removed {
+                eprintln!(
+                    "Removed worktree for branch '{}' at {}",
+                    worktree.branch, worktree.path
+                );
+            }
+            if target_removed && worktree.is_current {
+                println!(
+                    "{}",
+                    default_worktree
+                        .as_ref()
+                        .map_or(context.repo_root.as_path(), |default_worktree| Path::new(
+                            &default_worktree.path
+                        ))
+                        .display()
+                );
+            }
+            if !errors.is_empty() {
+                if target_removed && worktree.is_current {
+                    eprintln!("[wt] {}", errors.join("; "));
+                    return Ok(());
+                }
+                anyhow::bail!("Delete completed with errors: {}", errors.join("; "));
             }
         }
         ParsedArgs::RunPostCreate { request_file } => {
@@ -801,10 +943,22 @@ fn run_cli_command(cwd: &Path, command: ParsedArgs) -> Result<()> {
 fn finish_cli_worktree_creation(
     repo_root: &Path,
     branch: &str,
-    base_branch: String,
+    base_branch: Option<String>,
     dest: &Path,
 ) -> Result<()> {
-    let scripts = config::load_repo_config(repo_root)?.enabled_post_create_scripts();
+    let repo_config = config::load_repo_config(repo_root)?;
+    if repo_config.copy_secrets_from_default_branch
+        && let Err(err) = config::copy_default_secrets(repo_root, dest)
+    {
+        if std::env::var_os("WT_SHELL_WRAPPER").is_some() {
+            println!("WT_PATH={}", dest.display());
+        } else {
+            println!("{}", dest.display());
+        }
+        return Err(err).context("Failed to copy default-branch secrets");
+    }
+
+    let scripts = repo_config.enabled_post_create_scripts();
     if scripts.is_empty() {
         println!("{}", dest.display());
         return Ok(());
@@ -815,7 +969,7 @@ fn finish_cli_worktree_creation(
             repo_root: repo_root.to_path_buf(),
             worktree_path: dest.to_path_buf(),
             branch: branch.to_string(),
-            base_branch: Some(base_branch),
+            base_branch,
             scripts,
         })?;
         println!("WT_PATH={}", dest.display());
@@ -827,7 +981,7 @@ fn finish_cli_worktree_creation(
         "[wt] Running {} post-create setup step(s) for {branch}",
         scripts.len()
     );
-    config::run_post_create_scripts(repo_root, dest, branch, Some(&base_branch), &scripts)?;
+    config::run_post_create_scripts(repo_root, dest, branch, base_branch.as_deref(), &scripts)?;
     println!("{}", dest.display());
     Ok(())
 }
@@ -1411,8 +1565,10 @@ fn open_action(app: &mut App, action: ActiveAction) {
     }
 
     if action == ActiveAction::Options {
-        let max_idx = app.repo_config.post_create_scripts.len().saturating_sub(1);
-        app.options_selected_idx = app.options_selected_idx.min(max_idx);
+        app.options_phase = OptionsPhase::BrowsingCategories;
+        app.options_category_selected_idx = app.options_category_selected_idx.min(1);
+        app.options_selected_idx = 0;
+        app.options_edit_idx = None;
     }
 
     if action == ActiveAction::CheckoutRemote {
@@ -1650,10 +1806,25 @@ fn begin_options_edit(app: &mut App, index: Option<usize>) {
     app.overlay_error = None;
     match index {
         Some(idx) => {
-            app.input_buffer = app.repo_config.post_create_scripts[idx].command.clone();
+            let scripts = match app.options_script_kind {
+                PostScriptKind::Install => &app.repo_config.post_create_scripts,
+                PostScriptKind::Delete => &app.repo_config.post_delete_scripts,
+            };
+            app.input_buffer = scripts[idx].command.clone();
             app.input_cursor = app.input_buffer.chars().count();
         }
         None => app.clear_input(),
+    }
+}
+
+fn options_script_offset(app: &App) -> usize {
+    usize::from(app.options_script_kind == PostScriptKind::Install)
+}
+
+fn options_script_count(app: &App) -> usize {
+    match app.options_script_kind {
+        PostScriptKind::Install => app.repo_config.post_create_scripts.len(),
+        PostScriptKind::Delete => app.repo_config.post_delete_scripts.len(),
     }
 }
 
@@ -1672,26 +1843,32 @@ fn handle_options_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
                 }
 
                 let edit_idx = app.options_edit_idx;
-                let save_result = update_repo_config(app, |config| match edit_idx {
-                    Some(idx) => config.post_create_scripts[idx].command.clone_from(&command),
-                    None => config.post_create_scripts.push(PostCreateScript {
-                        command: command.clone(),
-                        enabled: true,
-                    }),
+                let kind = app.options_script_kind;
+                let save_result = update_repo_config(app, |config| {
+                    let scripts = match kind {
+                        PostScriptKind::Install => &mut config.post_create_scripts,
+                        PostScriptKind::Delete => &mut config.post_delete_scripts,
+                    };
+                    match edit_idx {
+                        Some(idx) => scripts[idx].command.clone_from(&command),
+                        None => scripts.push(PostCreateScript {
+                            command: command.clone(),
+                            enabled: true,
+                        }),
+                    }
                 });
 
                 match save_result {
                     Ok(()) => {
                         if edit_idx.is_none() {
-                            app.options_selected_idx =
-                                app.repo_config.post_create_scripts.len().saturating_sub(1);
+                            app.options_selected_idx = options_script_offset(app)
+                                + options_script_count(app).saturating_sub(1);
                         }
                         app.reset_options_editor();
                         app.overlay_error = None;
                     }
                     Err(err) => {
-                        app.overlay_error =
-                            Some(format!("Failed to save post-create scripts: {err}"));
+                        app.overlay_error = Some(format!("Failed to save scripts: {err}"));
                     }
                 }
             }
@@ -1702,62 +1879,108 @@ fn handle_options_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
         return;
     }
 
-    let script_count = app.repo_config.post_create_scripts.len();
-    let has_scripts = script_count > 0;
+    if app.options_phase == OptionsPhase::BrowsingCategories {
+        match code {
+            KeyCode::Esc => {
+                app.active_action = ActiveAction::None;
+                app.reset_options_editor();
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                app.options_category_selected_idx =
+                    app.options_category_selected_idx.saturating_sub(1);
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                app.options_category_selected_idx = (app.options_category_selected_idx + 1).min(1);
+            }
+            KeyCode::Enter => {
+                app.options_script_kind = if app.options_category_selected_idx == 0 {
+                    PostScriptKind::Install
+                } else {
+                    PostScriptKind::Delete
+                };
+                app.options_selected_idx = 0;
+                app.options_phase = OptionsPhase::BrowsingScripts;
+                app.overlay_error = None;
+            }
+            _ => {}
+        }
+        return;
+    }
+
+    let offset = options_script_offset(app);
+    let script_count = options_script_count(app);
+    let selected_script_idx = app.options_selected_idx.checked_sub(offset);
+    let selected_is_script = selected_script_idx.is_some_and(|idx| idx < script_count);
 
     match code {
         KeyCode::Esc => {
-            app.active_action = ActiveAction::None;
-            app.reset_options_editor();
+            app.options_phase = OptionsPhase::BrowsingCategories;
+            app.overlay_error = None;
         }
         KeyCode::Up | KeyCode::Char('k') => {
             app.options_selected_idx = app.options_selected_idx.saturating_sub(1);
         }
         KeyCode::Down | KeyCode::Char('j') => {
             app.options_selected_idx =
-                (app.options_selected_idx + 1).min(script_count.saturating_sub(1));
+                (app.options_selected_idx + 1).min((offset + script_count).saturating_sub(1));
         }
         KeyCode::Char('a') => begin_options_edit(app, None),
-        KeyCode::Enter | KeyCode::Char('e') => {
-            if has_scripts {
-                begin_options_edit(app, Some(app.options_selected_idx));
-            } else {
-                begin_options_edit(app, None);
-            }
+        KeyCode::Enter | KeyCode::Char('e' | ' ')
+            if offset > 0 && app.options_selected_idx == 0 =>
+        {
+            toggle_copy_default_secrets(app);
         }
-        KeyCode::Char(' ') => {
-            if !has_scripts {
-                return;
-            }
-            let idx = app.options_selected_idx;
+        KeyCode::Enter | KeyCode::Char('e') if selected_is_script => {
+            begin_options_edit(app, selected_script_idx);
+        }
+        KeyCode::Enter | KeyCode::Char('e') if script_count == 0 => {
+            begin_options_edit(app, None);
+        }
+        KeyCode::Char(' ') if selected_is_script => {
+            let idx = selected_script_idx.expect("selected index was checked");
+            let kind = app.options_script_kind;
             if let Err(err) = update_repo_config(app, |config| {
-                config.post_create_scripts[idx].enabled = !config.post_create_scripts[idx].enabled;
+                let scripts = match kind {
+                    PostScriptKind::Install => &mut config.post_create_scripts,
+                    PostScriptKind::Delete => &mut config.post_delete_scripts,
+                };
+                scripts[idx].enabled = !scripts[idx].enabled;
             }) {
-                app.overlay_error = Some(format!("Failed to save post-create scripts: {err}"));
+                app.overlay_error = Some(format!("Failed to save scripts: {err}"));
             } else {
                 app.overlay_error = None;
             }
         }
-        KeyCode::Char('d') | KeyCode::Delete | KeyCode::Backspace => {
-            if !has_scripts {
-                return;
-            }
-            let idx = app.options_selected_idx;
+        KeyCode::Char('d') | KeyCode::Delete | KeyCode::Backspace if selected_is_script => {
+            let idx = selected_script_idx.expect("selected index was checked");
+            let kind = app.options_script_kind;
             match update_repo_config(app, |config| {
-                config.post_create_scripts.remove(idx);
+                match kind {
+                    PostScriptKind::Install => &mut config.post_create_scripts,
+                    PostScriptKind::Delete => &mut config.post_delete_scripts,
+                }
+                .remove(idx);
             }) {
                 Ok(()) => {
                     app.options_selected_idx = app
                         .options_selected_idx
-                        .min(app.repo_config.post_create_scripts.len().saturating_sub(1));
+                        .min((offset + options_script_count(app)).saturating_sub(1));
                     app.overlay_error = None;
                 }
-                Err(err) => {
-                    app.overlay_error = Some(format!("Failed to save post-create scripts: {err}"));
-                }
+                Err(err) => app.overlay_error = Some(format!("Failed to save scripts: {err}")),
             }
         }
         _ => {}
+    }
+}
+
+fn toggle_copy_default_secrets(app: &mut App) {
+    if let Err(err) = update_repo_config(app, |config| {
+        config.copy_secrets_from_default_branch = !config.copy_secrets_from_default_branch;
+    }) {
+        app.overlay_error = Some(format!("Failed to save options: {err}"));
+    } else {
+        app.overlay_error = None;
     }
 }
 

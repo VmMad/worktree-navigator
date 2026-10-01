@@ -29,8 +29,15 @@ pub enum ActiveAction {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OptionsPhase {
+    BrowsingCategories,
     BrowsingScripts,
     Editing,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PostScriptKind {
+    Install,
+    Delete,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

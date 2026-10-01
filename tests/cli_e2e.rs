@@ -387,12 +387,63 @@ fn delete_commands_remove_worktrees_and_redirect_when_deleting_current() {
 }
 
 #[test]
+fn delete_command_runs_post_delete_scripts_with_removed_worktree_context() {
+    let env = TestEnv::new("post-delete");
+    let branch = "feature/post-delete";
+    env.create_branch(branch);
+    let worktree = env.create_existing_worktree(branch);
+    fs::write(
+        env.repo.join(".git").join("worktree-navigator.json"),
+        r#"{"post_delete_scripts":[{"command":"printf '%s|%s|%s\\n' \"$WT_WORKTREE_BRANCH\" \"$WT_WORKTREE_PATH\" \"$PWD\" >> \"$WT_REPO_ROOT/post-delete.log\"; echo hook-output","enabled":true}]}"#,
+    )
+    .expect("repo config should be written");
+
+    let output = run_wt_wrapped(&env, &env.repo, &["delete", branch, "--yes"]);
+
+    assert!(output.status.success(), "stderr:\n{}", stderr(&output));
+    assert!(!worktree.exists());
+    assert!(stdout(&output).is_empty());
+    assert!(stderr(&output).contains("hook-output"));
+    assert_eq!(
+        fs::read_to_string(env.repo.join("post-delete.log")).expect("hook should run"),
+        format!("{branch}|{}|{}\n", worktree.display(), env.repo.display())
+    );
+}
+
+#[test]
+fn deleting_current_worktree_still_navigates_when_post_delete_script_fails() {
+    let env = TestEnv::new("post-delete-failure-current");
+    let branch = "feature/post-delete-failure";
+    env.create_branch(branch);
+    let worktree = env.create_existing_worktree(branch);
+    fs::write(
+        env.repo.join(".git").join("worktree-navigator.json"),
+        r#"{"post_delete_scripts":[{"command":"exit 7","enabled":true}]}"#,
+    )
+    .expect("repo config should be written");
+
+    let output = run_wt_wrapped(&env, &worktree, &["delete", "--yes"]);
+
+    assert!(output.status.success(), "stderr:\n{}", stderr(&output));
+    assert!(!worktree.exists());
+    assert_eq!(stdout(&output), env.repo.to_string_lossy());
+    assert!(stderr(&output).contains("Post-delete scripts failed"));
+}
+
+#[test]
 fn pr_commands_create_or_reuse_pr_worktrees() {
     let env = TestEnv::new("pr-command");
     let pr_branch = "pr/123";
     env.create_branch(pr_branch);
+    let wrapper_branch = "pr/124";
+    env.create_branch(wrapper_branch);
+    fs::write(
+        env.repo.join(".git").join("worktree-navigator.json"),
+        r#"{"post_create_scripts":[{"command":"printf '%s\\n' \"$WT_WORKTREE_BRANCH\" >> \"$WT_REPO_ROOT/pr-setup.log\"","enabled":true}]}"#,
+    )
+    .expect("repo config should be written");
     env.set_fake_gh(
-        "#!/usr/bin/env bash\nset -e\nif [[ \"$1\" == \"pr\" && \"$2\" == \"view\" ]]; then\n  printf 'pr/123\\n'\n  exit 0\nfi\necho \"unexpected gh invocation: $*\" >&2\nexit 1\n",
+        "#!/usr/bin/env bash\nset -e\nif [[ \"$1\" == \"pr\" && \"$2\" == \"view\" ]]; then\n  case \"$3\" in\n    '#123') printf 'pr/123\\nmain\\n' ;;\n    '#124') printf 'pr/124\\nmain\\n' ;;\n  esac\n  exit 0\nfi\necho \"unexpected gh invocation: $*\" >&2\nexit 1\n",
     );
 
     let first = run_wt_with_path(&env, &env.repo, &["pr", "123"]);
@@ -403,10 +454,48 @@ fn pr_commands_create_or_reuse_pr_worktrees() {
         git_stdout(&pr_path, &["symbolic-ref", "--short", "HEAD"]),
         pr_branch
     );
+    assert_eq!(
+        fs::read_to_string(env.repo.join("pr-setup.log")).expect("new PR should run setup"),
+        "pr/123\n"
+    );
 
     let second = run_wt_with_path(&env, &env.repo, &["checkout-pr", "123"]);
     assert!(second.status.success(), "stderr:\n{}", stderr(&second));
     assert_eq!(stdout(&second), pr_path.to_string_lossy());
+    assert_eq!(
+        fs::read_to_string(env.repo.join("pr-setup.log")).expect("setup log should remain"),
+        "pr/123\n",
+        "reusing an existing PR worktree must not rerun setup"
+    );
+
+    let wrapped = Command::new(binary_path())
+        .args(["pr", "124"])
+        .current_dir(&env.repo)
+        .env("HOME", &env.home)
+        .env("WT_CWD", &env.repo)
+        .env("WT_SHELL_WRAPPER", "1")
+        .env("PATH", env.path_env())
+        .output()
+        .expect("wrapped wt pr should run");
+    assert!(wrapped.status.success(), "stderr:\n{}", stderr(&wrapped));
+    let wrapped_stdout = stdout(&wrapped);
+    let wrapped_lines: Vec<_> = wrapped_stdout.lines().collect();
+    let wrapped_path = wrapped_lines
+        .iter()
+        .find_map(|line| line.strip_prefix("WT_PATH="))
+        .map(PathBuf::from)
+        .expect("wrapper output should include the new worktree path");
+    let request_path = wrapped_lines
+        .iter()
+        .find_map(|line| line.strip_prefix("WT_POST_CREATE="))
+        .expect("wrapper output should include the setup request");
+    let setup = run_wt_with_path(&env, &wrapped_path, &["__run-post-create", request_path]);
+    assert!(setup.status.success(), "stderr:\n{}", stderr(&setup));
+    assert!(stdout(&setup).is_empty(), "setup output leaked to stdout");
+    assert_eq!(
+        fs::read_to_string(env.repo.join("pr-setup.log")).expect("wrapper setup should run"),
+        "pr/123\npr/124\n"
+    );
 }
 
 #[test]
@@ -533,15 +622,22 @@ fn post_create_setup_output_stays_off_stdout() {
 #[test]
 fn branch_command_runs_post_create_setup() {
     let env = TestEnv::new("branch-post-create");
+    fs::write(env.repo.join(".env.local"), "TOKEN=from-default\n")
+        .expect("default secret should be written");
     fs::write(
         env.repo.join(".git").join("worktree-navigator.json"),
-        r#"{"post_create_scripts":[{"command":"touch setup-ran","enabled":true}]}"#,
+        r#"{"copy_secrets_from_default_branch":true,"post_create_scripts":[{"command":"test -f .env.local && touch setup-ran","enabled":true}]}"#,
     )
     .expect("repo config should be written");
 
     let direct = run_wt_wrapped(&env, &env.repo, &["b", "feature/setup-direct"]);
     assert!(direct.status.success(), "stderr:\n{}", stderr(&direct));
-    assert!(PathBuf::from(stdout(&direct)).join("setup-ran").exists());
+    let direct_worktree = PathBuf::from(stdout(&direct));
+    assert!(direct_worktree.join("setup-ran").exists());
+    assert_eq!(
+        fs::read_to_string(direct_worktree.join(".env.local")).expect("secret should copy"),
+        "TOKEN=from-default\n"
+    );
 
     let wrapped = Command::new(binary_path())
         .args(["b", "feature/setup-wrapped"])
@@ -558,6 +654,11 @@ fn branch_command_runs_post_create_setup() {
         .find_map(|line| line.strip_prefix("WT_PATH="))
         .map(PathBuf::from)
         .expect("wrapper output should carry the worktree path");
+    assert_eq!(
+        fs::read_to_string(worktree.join(".env.local"))
+            .expect("secret should copy in wrapper mode"),
+        "TOKEN=from-default\n"
+    );
     let request = wrapped_stdout
         .lines()
         .find_map(|line| line.strip_prefix("WT_POST_CREATE="))
