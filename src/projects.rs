@@ -1,8 +1,10 @@
+use std::fs;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
+use crate::store::State;
 use crate::{git, store};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -48,6 +50,75 @@ pub fn toggle_favorite(path: &Path) -> Result<()> {
         state.favorites.push(path.to_path_buf());
     }
     store::save(&state)
+}
+
+/// Renames the project folder, then relinks its worktrees and the saved state to the new path.
+pub fn rename_project(project: &Project, new_name: &str) -> Result<PathBuf> {
+    let new_name = new_name.trim();
+    if new_name.is_empty() || new_name == "." || new_name == ".." || new_name.contains(['/', '\\'])
+    {
+        bail!("'{new_name}' is not a valid folder name.");
+    }
+
+    let old_path = &project.path;
+    let new_path = old_path.with_file_name(new_name);
+    if new_path == *old_path {
+        return Ok(new_path);
+    }
+    if new_path.exists() {
+        bail!("{} already exists.", new_path.display());
+    }
+
+    fs::rename(old_path, &new_path).with_context(|| {
+        format!(
+            "Failed to move {} to {}",
+            old_path.display(),
+            new_path.display()
+        )
+    })?;
+
+    let mut state = store::load().unwrap_or_default();
+    move_project_in_state(&mut state, old_path, &new_path, new_name);
+    store::save(&state)?;
+
+    git::repair_moved_workspace(old_path, &new_path)?;
+    Ok(new_path)
+}
+
+fn move_project_in_state(state: &mut State, old_path: &Path, new_path: &Path, new_name: &str) {
+    let moved = |path: &Path| -> Option<PathBuf> {
+        let rest = path.strip_prefix(old_path).ok()?;
+        Some(if rest.as_os_str().is_empty() {
+            new_path.to_path_buf()
+        } else {
+            new_path.join(rest)
+        })
+    };
+
+    for project in &mut state.projects {
+        if project.path == old_path {
+            project.name = new_name.to_string();
+        }
+        if let Some(path) = moved(&project.path) {
+            project.path = path;
+        }
+    }
+    for favorite in &mut state.favorites {
+        if let Some(path) = moved(favorite) {
+            *favorite = path;
+        }
+    }
+    state.worktrees = std::mem::take(&mut state.worktrees)
+        .into_iter()
+        .map(|(root, mut worktrees)| {
+            for worktree in &mut worktrees {
+                if let Some(path) = moved(Path::new(&worktree.path)) {
+                    worktree.path = path.to_string_lossy().to_string();
+                }
+            }
+            (moved(&root).unwrap_or(root), worktrees)
+        })
+        .collect();
 }
 
 pub fn register(workspace_root: &Path) {
@@ -182,8 +253,10 @@ fn match_projects<'a>(projects: &'a [Project], query: &str) -> Vec<&'a Project> 
 
 #[cfg(test)]
 mod tests {
-    use super::{Project, match_projects};
-    use std::path::PathBuf;
+    use super::{Project, match_projects, move_project_in_state};
+    use crate::store::State;
+    use crate::types::Worktree;
+    use std::path::{Path, PathBuf};
 
     fn project(name: &str) -> Project {
         Project {
@@ -220,5 +293,38 @@ mod tests {
         let projects = vec![project("api-gateway"), project("api-worker")];
 
         assert_eq!(match_projects(&projects, "api").len(), 2);
+    }
+
+    #[test]
+    fn moving_a_project_rewrites_its_paths_and_name_in_state() {
+        let mut state = State {
+            projects: vec![project("old"), project("other")],
+            favorites: vec![PathBuf::from("/tmp/old")],
+            ..State::default()
+        };
+        state.worktrees.insert(
+            PathBuf::from("/tmp/old"),
+            vec![Worktree {
+                path: "/tmp/old/main".to_string(),
+                branch: "main".to_string(),
+                is_main: true,
+                is_current: false,
+                has_secrets: false,
+            }],
+        );
+
+        move_project_in_state(
+            &mut state,
+            Path::new("/tmp/old"),
+            Path::new("/tmp/new"),
+            "new",
+        );
+
+        assert_eq!(state.projects[0].name, "new");
+        assert_eq!(state.projects[0].path, PathBuf::from("/tmp/new"));
+        assert_eq!(state.projects[1].path, PathBuf::from("/tmp/other"));
+        assert_eq!(state.favorites, vec![PathBuf::from("/tmp/new")]);
+        let worktrees = &state.worktrees[Path::new("/tmp/new")];
+        assert_eq!(worktrees[0].path, "/tmp/new/main");
     }
 }

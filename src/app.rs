@@ -114,6 +114,7 @@ pub struct App {
 
     pub projects: Vec<Project>,
     pub projects_selected_idx: usize,
+    pub projects_renaming: bool,
 
     pub selected_index: usize,
     pub active_action: ActiveAction,
@@ -203,6 +204,7 @@ impl App {
             console_handoff_needs_resume: false,
             projects: vec![],
             projects_selected_idx: 0,
+            projects_renaming: false,
             selected_index: 0,
             active_action: ActiveAction::None,
             filtering: false,

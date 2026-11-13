@@ -184,6 +184,16 @@ fn draw_projects(f: &mut Frame, app: &mut App, area: Rect) {
         );
     }
 
+    let footer = sections[sections.len() - 1];
+    if app.projects_renaming {
+        let (before, after) = app.input_parts();
+        f.render_widget(
+            Paragraph::new(input_line("Rename to: ", before, after, Color::Cyan)),
+            footer,
+        );
+        return;
+    }
+
     f.render_widget(
         Paragraph::new(Line::from(vec![
             Span::styled("↑↓/jk/scroll", Style::default().fg(Color::DarkGray)),
@@ -195,12 +205,14 @@ fn draw_projects(f: &mut Frame, app: &mut App, area: Rect) {
             ),
             Span::styled("f", Style::default().fg(Color::DarkGray)),
             Span::styled("  favorite    ", Style::default().fg(Color::DarkGray)),
+            Span::styled("r", Style::default().fg(Color::DarkGray)),
+            Span::styled("  rename    ", Style::default().fg(Color::DarkGray)),
             Span::styled("c", Style::default().fg(Color::DarkGray)),
             Span::styled("  clone    ", Style::default().fg(Color::DarkGray)),
             Span::styled("q", Style::default().fg(Color::DarkGray)),
             Span::styled("  quit", Style::default().fg(Color::DarkGray)),
         ])),
-        sections[sections.len() - 1],
+        footer,
     );
 }
 
