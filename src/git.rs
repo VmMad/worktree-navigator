@@ -137,6 +137,34 @@ fn move_workspace_repo(old_path: &Path, new_path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Git stores absolute paths on both sides of a worktree link, so moving a workspace folder
+/// breaks every link inside it until each owning repository repairs them.
+pub fn repair_moved_workspace(old_root: &Path, new_root: &Path) -> Result<()> {
+    let (repos, linked): (Vec<_>, Vec<_>) = collect_workspace_git_repos(new_root)?
+        .into_iter()
+        .partition(|repo| repo.join(".git").is_dir());
+
+    for repo in repos {
+        let relative = repo.strip_prefix(new_root)?;
+        let old_admin_dir = old_root.join(relative).join(".git").join("worktrees");
+        let old_admin_dir = old_admin_dir.to_string_lossy();
+        let owned = linked.iter().filter(|worktree| {
+            fs::read_to_string(worktree.join(".git"))
+                .is_ok_and(|gitdir| gitdir.contains(old_admin_dir.as_ref()))
+        });
+        let output = Command::new("git")
+            .args(["worktree", "repair"])
+            .args(owned)
+            .current_dir(&repo)
+            .output()
+            .context("Failed to run git worktree repair")?;
+        if !output.status.success() {
+            anyhow::bail!("{}", String::from_utf8_lossy(&output.stderr).trim());
+        }
+    }
+    Ok(())
+}
+
 pub fn list_worktrees(repo_root: &Path) -> Result<Vec<Worktree>> {
     let output = Command::new("git")
         .args(["worktree", "list", "--porcelain"])
@@ -1858,8 +1886,8 @@ mod tests {
         describe_pr_sync_failure, detect_worktree_workspace, find_workspace_root,
         list_child_projects, list_secret_files, list_workspace_worktrees,
         normalize_checkout_remote_branch_input, read_git_origin_from_config, remove_worktree,
-        remove_worktrees, remove_worktrees_partial, rename_worktree, resolve_existing_pr_worktree,
-        resolve_git_cwd,
+        remove_worktrees, remove_worktrees_partial, rename_worktree, repair_moved_workspace,
+        resolve_existing_pr_worktree, resolve_git_cwd,
     };
     use crate::types::Worktree;
     use std::fs;
@@ -2186,6 +2214,32 @@ mod tests {
         assert!(recreated_path.exists());
 
         let _ = fs::remove_dir_all(workspace);
+    }
+
+    #[test]
+    fn repair_moved_workspace_relinks_worktrees_after_the_folder_moves() {
+        let parent = make_temp_dir("move-workspace");
+        let old_root = parent.join("old-name");
+        let repo = old_root.join("main");
+        fs::create_dir_all(&repo).expect("repo dir should be created");
+        init_repo(&repo);
+        add_worktree(&repo, "feature", None).expect("worktree should be created");
+
+        let new_root = parent.join("new-name");
+        fs::rename(&old_root, &new_root).expect("workspace should move");
+        repair_moved_workspace(&old_root, &new_root).expect("repair should succeed");
+
+        git(&new_root.join("feature"), &["status"]);
+        let list = Command::new("git")
+            .args(["worktree", "list"])
+            .current_dir(new_root.join("main"))
+            .output()
+            .expect("git should list worktrees");
+        let list = String::from_utf8_lossy(&list.stdout);
+        assert!(!list.contains("old-name"), "{list}");
+        assert!(!list.contains("prunable"), "{list}");
+
+        let _ = fs::remove_dir_all(parent);
     }
 
     #[test]

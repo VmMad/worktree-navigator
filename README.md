@@ -166,6 +166,7 @@ wt --mark-tree
 - `wt gco` with no argument goes to the default-branch worktree.
 - Projects are the repositories and worktree workspaces `wt` knows about, recorded, together with a cache of each repo's worktrees, in `~/.config/worktree-navigator/state.json`. Clones register themselves, and opening `wt` in a directory that holds several unrelated repositories (like `~/Projects`) registers each of them.
 - Press `f` in the project picker to add or remove a favorite. Favorites sit on top, in the order you added them.
+- Press `r` in the project picker to rename a project. `wt` renames its folder and repairs the git worktree links, which break if you rename the folder by hand.
 - A directory holding several unrelated repositories is treated as a container of projects, not as one project's workspace, so `wt` lists its projects instead of mixing every repository's worktrees into one list.
 - When `wt d` deletes the current worktree, the shell wrapper moves you back to the repo root.
 
