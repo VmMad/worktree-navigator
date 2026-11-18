@@ -28,6 +28,7 @@ pub fn is_active(app: &App) -> bool {
                 )
         }
         ActiveAction::Options => app.options_phase == OptionsPhase::Editing,
+        ActiveAction::Projects => app.projects_renaming,
         _ => false,
     }
 }

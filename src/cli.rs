@@ -32,6 +32,7 @@ pub enum ParsedArgs {
         branch_name: Option<String>,
         yes: bool,
     },
+    List,
     RunPostCreate {
         request_file: String,
     },
@@ -74,6 +75,8 @@ where
         "gco" | "checkout" => parse_checkout(&args),
         "b" | "branch" => parse_branch(args),
         "d" | "delete" => parse_delete(args),
+        "ls" | "list" if args.is_empty() => Ok(ParsedArgs::List),
+        "ls" | "list" => bail!("Usage: wt ls"),
         "--help" | "-h" | "help" => Ok(ParsedArgs::Help),
         _ => bail!("Unknown command '{command}'. Run `wt --help` for usage."),
     }
@@ -283,6 +286,8 @@ Available commands:
  branch <branch> [base options] Alias for `b`
  d [branch] [--yes]             Delete a worktree
  delete [branch] [--yes]        Alias for `d`
+ ls                             List the repo's worktrees
+ list                           Alias for `ls`
 
 Branch base options:
  --from-default, -d             Branch from the repo default branch
@@ -486,6 +491,13 @@ mod tests {
     }
 
     #[test]
+    fn parses_list_aliases() {
+        assert_eq!(parse(&["ls"]), ParsedArgs::List);
+        assert_eq!(parse(&["list"]), ParsedArgs::List);
+        assert!(parse_args(["ls", "extra"].map(str::to_string)).is_err());
+    }
+
+    #[test]
     fn rejects_conflicting_branch_base_flags() {
         let err =
             parse_args(["b", "feat/test", "--from-default", "--base", "main"].map(str::to_string))
@@ -512,6 +524,8 @@ mod tests {
             "branch <branch> [base options]",
             "d [branch] [--yes]",
             "delete [branch] [--yes]",
+            "ls",
+            "list",
             "--mark-tree",
             "--update",
             "--version, -V",

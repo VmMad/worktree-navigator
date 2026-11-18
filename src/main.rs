@@ -923,6 +923,11 @@ fn run_cli_command(cwd: &Path, command: ParsedArgs) -> Result<()> {
                 anyhow::bail!("Delete completed with errors: {}", errors.join("; "));
             }
         }
+        ParsedArgs::List => {
+            let context = require_repo_context(cwd)?;
+            let worktrees = git::list_any_worktrees(&context.repo_root, context.is_workspace)?;
+            print_info(&format_worktree_list(&worktrees));
+        }
         ParsedArgs::RunPostCreate { request_file } => {
             config::run_post_create_scripts_from_request(Path::new(&request_file))?;
             eprintln!();
@@ -1006,6 +1011,25 @@ fn print_projects() {
         )
     };
 
+    print_info(&text);
+}
+
+fn format_worktree_list(worktrees: &[Worktree]) -> String {
+    worktrees
+        .iter()
+        .map(|wt| {
+            format!(
+                "{} {}  ({})",
+                if wt.is_current { "*" } else { " " },
+                wt.branch,
+                display_path_with_home(Path::new(&wt.path))
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn print_info(text: &str) {
     if std::env::var_os("WT_CWD").is_some() {
         eprintln!("{text}");
     } else {
@@ -1138,7 +1162,7 @@ fn handle_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
         ActiveAction::CopySecrets => handle_copy_secrets_key(app, code),
         ActiveAction::Options => handle_options_key(app, code, modifiers),
         ActiveAction::CloneRepo => handle_clone_key(app, code, modifiers),
-        ActiveAction::Projects => handle_projects_key(app, code),
+        ActiveAction::Projects => handle_projects_key(app, code, modifiers),
         ActiveAction::CheckoutRemote => handle_checkout_remote_key(app, code, modifiers),
         ActiveAction::None if app.filtering => handle_filter_key(app, code, modifiers),
         ActiveAction::None => handle_nav_key(app, code, modifiers),
@@ -1298,7 +1322,12 @@ fn handle_projects_mouse(app: &mut App, kind: MouseEventKind, row: u16) {
     }
 }
 
-fn handle_projects_key(app: &mut App, code: KeyCode) {
+fn handle_projects_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
+    if app.projects_renaming {
+        handle_project_rename_key(app, code, modifiers);
+        return;
+    }
+
     match code {
         KeyCode::Char('q') | KeyCode::Esc => app.should_quit = true,
         KeyCode::Up | KeyCode::Char('k') => {
@@ -1318,6 +1347,7 @@ fn handle_projects_key(app: &mut App, code: KeyCode) {
         }
         KeyCode::Char('c') => open_clone_from_projects(app),
         KeyCode::Char('f') => toggle_selected_favorite(app),
+        KeyCode::Char('r') => start_project_rename(app),
         KeyCode::Enter => open_selected_project(app),
         _ => {}
     }
@@ -1329,6 +1359,53 @@ fn open_clone_from_projects(app: &mut App) {
     app.clone_error = None;
     app.overlay_error = None;
     app.clear_input();
+}
+
+fn start_project_rename(app: &mut App) {
+    let Some(name) = app
+        .projects
+        .get(app.projects_selected_idx)
+        .map(|project| project.name.clone())
+    else {
+        return;
+    };
+
+    app.overlay_error = None;
+    app.clear_input();
+    app.input_str(&name);
+    app.projects_renaming = true;
+}
+
+fn handle_project_rename_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
+    match text_input::handle_key(app, code, modifiers) {
+        TextInputKeyResult::Cancel => {
+            app.projects_renaming = false;
+            app.overlay_error = None;
+            app.clear_input();
+        }
+        TextInputKeyResult::Submit => {
+            let Some(project) = app.projects.get(app.projects_selected_idx).cloned() else {
+                return;
+            };
+            match projects::rename_project(&project, &app.input_buffer) {
+                Ok(new_path) => {
+                    app.projects_renaming = false;
+                    app.overlay_error = None;
+                    app.clear_input();
+                    app.projects = projects::list_projects();
+                    app.projects_selected_idx = app
+                        .projects
+                        .iter()
+                        .position(|project| project.path == new_path)
+                        .unwrap_or(0);
+                }
+                Err(err) => app.overlay_error = Some(format!("Failed to rename project: {err}")),
+            }
+        }
+        TextInputKeyResult::Updated
+        | TextInputKeyResult::Ignored
+        | TextInputKeyResult::Complete => {}
+    }
 }
 
 fn toggle_selected_favorite(app: &mut App) {
@@ -2916,13 +2993,13 @@ mod tests {
         app.active_action = ActiveAction::SyncTrees;
 
         handle_paste(&mut app, "feature/test");
-        assert!(app.input_buffer.is_empty());
+        assert_eq!(app.input_buffer, "");
 
         app.active_action = ActiveAction::CheckoutRemote;
         app.checkout_remote_phase = CheckoutRemotePhase::CreatingWorktree;
 
         handle_paste(&mut app, "feature/test");
-        assert!(app.input_buffer.is_empty());
+        assert_eq!(app.input_buffer, "");
     }
 
     #[test]
@@ -3055,7 +3132,7 @@ mod tests {
 
         handle_key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
         assert!(!app.filtering);
-        assert!(app.input_buffer.is_empty());
+        assert_eq!(app.input_buffer, "");
         assert!(!app.should_quit);
     }
 }
