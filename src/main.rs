@@ -923,6 +923,11 @@ fn run_cli_command(cwd: &Path, command: ParsedArgs) -> Result<()> {
                 anyhow::bail!("Delete completed with errors: {}", errors.join("; "));
             }
         }
+        ParsedArgs::List => {
+            let context = require_repo_context(cwd)?;
+            let worktrees = git::list_any_worktrees(&context.repo_root, context.is_workspace)?;
+            print_info(&format_worktree_list(&worktrees));
+        }
         ParsedArgs::RunPostCreate { request_file } => {
             config::run_post_create_scripts_from_request(Path::new(&request_file))?;
             eprintln!();
@@ -1006,6 +1011,25 @@ fn print_projects() {
         )
     };
 
+    print_info(&text);
+}
+
+fn format_worktree_list(worktrees: &[Worktree]) -> String {
+    worktrees
+        .iter()
+        .map(|wt| {
+            format!(
+                "{} {}  ({})",
+                if wt.is_current { "*" } else { " " },
+                wt.branch,
+                display_path_with_home(Path::new(&wt.path))
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn print_info(text: &str) {
     if std::env::var_os("WT_CWD").is_some() {
         eprintln!("{text}");
     } else {
@@ -2969,13 +2993,13 @@ mod tests {
         app.active_action = ActiveAction::SyncTrees;
 
         handle_paste(&mut app, "feature/test");
-        assert!(app.input_buffer.is_empty());
+        assert_eq!(app.input_buffer, "");
 
         app.active_action = ActiveAction::CheckoutRemote;
         app.checkout_remote_phase = CheckoutRemotePhase::CreatingWorktree;
 
         handle_paste(&mut app, "feature/test");
-        assert!(app.input_buffer.is_empty());
+        assert_eq!(app.input_buffer, "");
     }
 
     #[test]
@@ -3108,7 +3132,7 @@ mod tests {
 
         handle_key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
         assert!(!app.filtering);
-        assert!(app.input_buffer.is_empty());
+        assert_eq!(app.input_buffer, "");
         assert!(!app.should_quit);
     }
 }

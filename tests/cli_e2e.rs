@@ -234,12 +234,12 @@ fn help_and_version_work_end_to_end() {
 
     let help_alias = run_wt_wrapped(&env, &env.repo, &["help"]);
     assert!(help_alias.status.success());
-    assert!(stdout(&help_alias).is_empty());
+    assert_eq!(stdout(&help_alias), "");
     assert!(stderr(&help_alias).contains("Available commands:"));
 
     let version = run_wt_wrapped(&env, &env.repo, &["--version"]);
     assert!(version.status.success());
-    assert!(stdout(&version).is_empty());
+    assert_eq!(stdout(&version), "");
     assert!(stderr(&version).starts_with("wt v"));
 }
 
@@ -358,6 +358,19 @@ fn branch_commands_create_worktrees_from_expected_bases() {
 }
 
 #[test]
+fn list_command_prints_worktrees_without_navigating() {
+    let env = TestEnv::new("list-worktrees");
+    let branch = "feature/listed";
+    env.create_branch(branch);
+    env.create_existing_worktree(branch);
+
+    let output = run_wt_wrapped(&env, &env.repo, &["ls"]);
+    assert!(output.status.success(), "stderr:\n{}", stderr(&output));
+    assert_eq!(stdout(&output), "");
+    assert!(stderr(&output).contains(branch));
+}
+
+#[test]
 fn delete_commands_remove_worktrees_and_redirect_when_deleting_current() {
     let env = TestEnv::new("delete-worktree");
 
@@ -371,7 +384,7 @@ fn delete_commands_remove_worktrees_and_redirect_when_deleting_current() {
         stderr(&named_delete)
     );
     assert!(!named_path.exists());
-    assert!(stdout(&named_delete).is_empty());
+    assert_eq!(stdout(&named_delete), "");
 
     let current_branch = "feature/delete-current";
     env.create_branch(current_branch);
@@ -402,7 +415,7 @@ fn delete_command_runs_post_delete_scripts_with_removed_worktree_context() {
 
     assert!(output.status.success(), "stderr:\n{}", stderr(&output));
     assert!(!worktree.exists());
-    assert!(stdout(&output).is_empty());
+    assert_eq!(stdout(&output), "");
     assert!(stderr(&output).contains("hook-output"));
     assert_eq!(
         fs::read_to_string(env.repo.join("post-delete.log")).expect("hook should run"),
@@ -541,7 +554,7 @@ fn update_command_refreshes_zsh_wrapper_and_prints_restart_message() {
 
     assert!(output.status.success(), "stderr:\n{}", stderr(&output));
     assert!(update_target.exists());
-    assert!(stdout(&output).is_empty());
+    assert_eq!(stdout(&output), "");
 
     let zshrc = fs::read_to_string(env.home.join(".zshrc")).expect("zshrc should exist");
     assert!(zshrc.contains("# worktree-navigator wt()"));
@@ -575,7 +588,7 @@ fn install_shell_command_replaces_an_outdated_wrapper() {
         .expect("install-shell should run");
 
     assert!(output.status.success(), "stderr:\n{}", stderr(&output));
-    assert!(stdout(&output).is_empty());
+    assert_eq!(stdout(&output), "");
 
     let updated = fs::read_to_string(&zshrc).expect("zshrc should exist");
     assert!(updated.contains("WT_SHELL_WRAPPER=1 command wt \"$@\""));
@@ -747,7 +760,7 @@ fn project_commands_jump_to_the_default_branch_worktree() {
 
     let listing = run_wt_wrapped(&env, &outside, &["p"]);
     assert!(listing.status.success());
-    assert!(stdout(&listing).is_empty());
+    assert_eq!(stdout(&listing), "");
     assert!(stderr(&listing).contains("acme-api"));
     assert!(
         !stderr(&listing).contains("plain-"),

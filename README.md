@@ -156,6 +156,7 @@ wt --mark-tree
 | `wt b <branch> --base <branch>` | | Branch from an explicit base |
 | `wt d [branch]` | `delete` | Delete a worktree by branch, or the current one if omitted |
 | `wt d ... --yes` | | Skip the branch-name confirmation prompt |
+| `wt ls` | `list` | List the repo's worktrees, `*` marks the current one |
 
 #### Notes
 

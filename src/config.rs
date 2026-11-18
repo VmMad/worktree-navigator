@@ -195,8 +195,7 @@ fn run_scripts(
     let default_worktree_path = list_repo_worktrees(repo_root)?
         .into_iter()
         .find(|wt| wt.is_main)
-        .map(|wt| wt.path)
-        .unwrap_or_default();
+        .map_or_default(|wt| wt.path);
 
     for (index, script) in enabled_scripts.iter().enumerate() {
         eprintln!();
@@ -330,9 +329,9 @@ mod tests {
 
         let config = load_repo_config(&repo).expect("missing config should load");
 
-        assert!(config.post_create_scripts.is_empty());
+        assert_eq!(config.post_create_scripts.len(), 0);
         assert!(!config.copy_secrets_from_default_branch);
-        assert!(config.post_delete_scripts.is_empty());
+        assert_eq!(config.post_delete_scripts.len(), 0);
 
         let _ = fs::remove_dir_all(workspace);
     }

@@ -888,8 +888,7 @@ fn sync_existing_pr_worktree(
             let range = stdout
                 .lines()
                 .find(|line| line.starts_with("Updating "))
-                .map(|line| line.trim_start_matches("Updating ").trim().to_string())
-                .unwrap_or_default();
+                .map_or_default(|line| line.trim_start_matches("Updating ").trim().to_string());
             let suffix = if range.is_empty() {
                 String::new()
             } else {
@@ -1012,8 +1011,7 @@ pub fn sync_one_worktree(repo_root: &Path, wt: &Worktree) -> (bool, SyncResult) 
                     let range = stdout
                         .lines()
                         .find(|l| l.starts_with("Updating "))
-                        .map(|l| l.trim_start_matches("Updating ").trim().to_string())
-                        .unwrap_or_default();
+                        .map_or_default(|l| l.trim_start_matches("Updating ").trim().to_string());
                     SyncStatus::Updated(range)
                 }
             } else {
@@ -2470,7 +2468,7 @@ mod tests {
         init_repo_with_origin(&main, "git@github.com:acme/api.git");
         add_worktree(&main, "feature/login", Some("main")).expect("worktree should be created");
 
-        assert!(list_child_projects(&workspace).is_empty());
+        assert_eq!(list_child_projects(&workspace).len(), 0);
 
         let _ = fs::remove_dir_all(container);
         let _ = fs::remove_dir_all(workspace);

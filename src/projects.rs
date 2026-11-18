@@ -285,7 +285,7 @@ mod tests {
             match_projects(&projects, "navigator")[0].name,
             projects[0].name
         );
-        assert!(match_projects(&projects, "missing").is_empty());
+        assert_eq!(match_projects(&projects, "missing").len(), 0);
     }
 
     #[test]
